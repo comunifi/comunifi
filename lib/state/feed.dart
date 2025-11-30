@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
-// import 'package:dart_nostr/dart_nostr.dart'; // TODO: Re-enable when implementing event signing
+import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart';
 import 'package:comunifi/services/mls/mls.dart';
@@ -161,13 +161,11 @@ class FeedState with ChangeNotifier {
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
-      // Store the private key - public key will be derived when needed
-      // Nostr uses secp256k1, but deriving the public key requires the dart_nostr package
-      // For now, we'll store the private key and derive the public key when publishing
-      final keyData = {
-        'private': privateKeyHex,
-        'public': '', // Will be derived when publishing
-      };
+      // Derive public key from private key using dart_nostr
+      final keyPair = NostrKeyPairs(private: privateKeyHex);
+
+      // Store both private and public keys
+      final keyData = {'private': keyPair.private, 'public': keyPair.public};
       final keyJson = jsonEncode(keyData);
       final keyBytes = Uint8List.fromList(keyJson.codeUnits);
 
@@ -177,7 +175,7 @@ class FeedState with ChangeNotifier {
       // Store the ciphertext in the database for later retrieval
       await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
 
-      debugPrint('Generated and stored new Nostr private key');
+      debugPrint('Generated and stored new Nostr key: ${keyPair.public}');
     } catch (e) {
       debugPrint('Failed to ensure Nostr key: $e');
       // Continue without Nostr key - feed can still work for reading
@@ -409,25 +407,38 @@ class FeedState with ChangeNotifier {
         );
       }
 
-      // TODO: Implement proper event creation and signing using dart_nostr
-      // The implementation should:
-      // 1. Use dart_nostr to derive public key from private key
-      // 2. Create a NostrEvent with kind 1 (text note)
-      // 3. Sign the event using the private key
-      // 4. Publish to the relay
-      //
-      // Example structure (needs to be confirmed with actual dart_nostr API):
-      // final keyPair = nostr.services.keys.generateKeyPairFromExistingPrivateKey(privateKey);
-      // final event = nostr.services.events.createEvent(kind: 1, content: content, keyPairs: keyPair);
-      // _nostrService!.publishEvent(event.toJson());
+      // Derive key pair from private key using dart_nostr
+      final keyPair = NostrKeyPairs(private: privateKey);
 
-      debugPrint('Publishing message: $content');
-      debugPrint('Private key available: ${privateKey.substring(0, 8)}...');
-
-      throw Exception(
-        'Event signing not yet implemented. '
-        'The dart_nostr API structure needs to be confirmed to properly create and sign events.',
+      // Create and sign a NostrEvent using dart_nostr
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 1, // Text note
+        content: content,
+        keyPairs: keyPair,
+        tags: addClientIdTag([]),
+        createdAt: DateTime.now(),
       );
+
+      // Convert to our model format for publishing
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      // Publish to the relay
+      _nostrService!.publishEvent(eventModel.toJson());
+
+      debugPrint('Published message to relay: ${eventModel.id}');
+
+      // Publish to the relay
+      _nostrService!.publishEvent(eventModel.toJson());
+
+      debugPrint('Published message to relay: ${eventModel.id}');
     } catch (e) {
       debugPrint('Failed to publish message: $e');
       rethrow;

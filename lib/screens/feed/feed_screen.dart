@@ -12,6 +12,9 @@ class FeedScreen extends StatefulWidget {
 
 class _FeedScreenState extends State<FeedScreen> {
   final ScrollController _scrollController = ScrollController();
+  final TextEditingController _messageController = TextEditingController();
+  bool _isPublishing = false;
+  String? _publishError;
 
   @override
   void initState() {
@@ -23,7 +26,39 @@ class _FeedScreenState extends State<FeedScreen> {
   void dispose() {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    _messageController.dispose();
     super.dispose();
+  }
+
+  Future<void> _publishMessage() async {
+    final content = _messageController.text.trim();
+    if (content.isEmpty || _isPublishing) return;
+
+    final feedState = context.read<FeedState>();
+    if (!feedState.isConnected) {
+      setState(() {
+        _publishError = 'Not connected to relay';
+      });
+      return;
+    }
+
+    setState(() {
+      _isPublishing = true;
+      _publishError = null;
+    });
+
+    try {
+      await feedState.publishMessage(content);
+      _messageController.clear();
+      setState(() {
+        _isPublishing = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isPublishing = false;
+        _publishError = e.toString();
+      });
+    }
   }
 
   void _onScroll() {
@@ -72,52 +107,67 @@ class _FeedScreenState extends State<FeedScreen> {
               );
             }
 
-            if (feedState.events.isEmpty) {
-              return const Center(
-                child: Text('No events yet'),
-              );
-            }
-
-            return CustomScrollView(
-              controller: _scrollController,
-              slivers: [
-                CupertinoSliverRefreshControl(
-                  onRefresh: () async {
-                    await feedState.retryConnection();
-                  },
-                ),
-                SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      if (index < feedState.events.length) {
-                        return _EventItem(event: feedState.events[index]);
-                      } else if (feedState.isLoadingMore) {
-                        return const Padding(
-                          padding: EdgeInsets.all(16.0),
-                          child: Center(
-                            child: CupertinoActivityIndicator(),
-                          ),
-                        );
-                      } else if (feedState.hasMoreEvents) {
-                        return const SizedBox.shrink();
-                      } else {
-                        return const Padding(
-                          padding: EdgeInsets.all(16.0),
-                          child: Center(
-                            child: Text(
-                              'No more events',
-                              style: TextStyle(
-                                color: CupertinoColors.secondaryLabel,
-                              ),
-                            ),
-                          ),
-                        );
-                      }
-                    },
-                    childCount: feedState.events.length +
-                        (feedState.isLoadingMore ? 1 : 0) +
-                        (feedState.hasMoreEvents ? 0 : 1),
+            return Column(
+              children: [
+                Expanded(
+                  child: feedState.events.isEmpty
+                      ? const Center(
+                          child: Text('No events yet'),
+                        )
+                      : CustomScrollView(
+                    controller: _scrollController,
+                    slivers: [
+                      CupertinoSliverRefreshControl(
+                        onRefresh: () async {
+                          await feedState.retryConnection();
+                        },
+                      ),
+                      SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, index) {
+                            if (index < feedState.events.length) {
+                              return _EventItem(event: feedState.events[index]);
+                            } else if (feedState.isLoadingMore) {
+                              return const Padding(
+                                padding: EdgeInsets.all(16.0),
+                                child: Center(
+                                  child: CupertinoActivityIndicator(),
+                                ),
+                              );
+                            } else if (feedState.hasMoreEvents) {
+                              return const SizedBox.shrink();
+                            } else {
+                              return const Padding(
+                                padding: EdgeInsets.all(16.0),
+                                child: Center(
+                                  child: Text(
+                                    'No more events',
+                                    style: TextStyle(
+                                      color: CupertinoColors.secondaryLabel,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+                          },
+                          childCount: feedState.events.length +
+                              (feedState.isLoadingMore ? 1 : 0) +
+                              (feedState.hasMoreEvents ? 0 : 1),
+                        ),
+                      ),
+                    ],
                   ),
+                ),
+                _ComposeMessageWidget(
+                  controller: _messageController,
+                  isPublishing: _isPublishing,
+                  error: _publishError,
+                  onPublish: _publishMessage,
+                  onErrorDismiss: () {
+                    setState(() {
+                      _publishError = null;
+                    });
+                  },
                 ),
               ],
             );
@@ -193,6 +243,126 @@ class _EventItem extends StatelessWidget {
             style: const TextStyle(fontSize: 15),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ComposeMessageWidget extends StatelessWidget {
+  final TextEditingController controller;
+  final bool isPublishing;
+  final String? error;
+  final VoidCallback onPublish;
+  final VoidCallback onErrorDismiss;
+
+  const _ComposeMessageWidget({
+    required this.controller,
+    required this.isPublishing,
+    this.error,
+    required this.onPublish,
+    required this.onErrorDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: CupertinoColors.systemBackground,
+        border: Border(
+          top: BorderSide(
+            color: CupertinoColors.separator,
+            width: 0.5,
+          ),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (error != null)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16.0,
+                  vertical: 8.0,
+                ),
+                color: CupertinoColors.systemRed.withOpacity(0.1),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        error!,
+                        style: const TextStyle(
+                          color: CupertinoColors.systemRed,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      minSize: 0,
+                      onPressed: onErrorDismiss,
+                      child: const Icon(
+                        CupertinoIcons.xmark_circle_fill,
+                        color: CupertinoColors.systemRed,
+                        size: 20,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: CupertinoTextField(
+                      controller: controller,
+                      placeholder: 'Write a message...',
+                      maxLines: null,
+                      minLines: 1,
+                      textInputAction: TextInputAction.newline,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12.0,
+                        vertical: 8.0,
+                      ),
+                      decoration: BoxDecoration(
+                        color: CupertinoColors.systemGrey6,
+                        borderRadius: BorderRadius.circular(20.0),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minSize: 0,
+                    onPressed: isPublishing ? null : onPublish,
+                    child: Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: isPublishing
+                            ? CupertinoColors.systemGrey
+                            : CupertinoColors.systemBlue,
+                        shape: BoxShape.circle,
+                      ),
+                      child: isPublishing
+                          ? const CupertinoActivityIndicator(
+                              color: CupertinoColors.white,
+                            )
+                          : const Icon(
+                              CupertinoIcons.arrow_up,
+                              color: CupertinoColors.white,
+                              size: 20,
+                            ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
