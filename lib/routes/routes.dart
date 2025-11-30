@@ -46,10 +46,7 @@ GoRouter createRouter(
       path: '/mls',
       parentNavigatorKey: rootNavigatorKey,
       builder: (context, state) {
-        return ChangeNotifierProvider(
-          create: (_) => MlsState(),
-          child: const MlsScreen(),
-        );
+        return const MlsScreen();
       },
     ),
     GoRoute(

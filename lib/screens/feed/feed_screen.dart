@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/feed.dart';
+import 'package:comunifi/state/group.dart';
 import 'package:comunifi/models/nostr_event.dart';
 
 class FeedScreen extends StatefulWidget {
@@ -34,6 +35,38 @@ class _FeedScreenState extends State<FeedScreen> {
     final content = _messageController.text.trim();
     if (content.isEmpty || _isPublishing) return;
 
+    final groupState = context.read<GroupState>();
+    
+    // If there's an active group, post to the group
+    if (groupState.activeGroup != null) {
+      if (!groupState.isConnected) {
+        setState(() {
+          _publishError = 'Not connected to relay';
+        });
+        return;
+      }
+
+      setState(() {
+        _isPublishing = true;
+        _publishError = null;
+      });
+
+      try {
+        await groupState.postMessage(content);
+        _messageController.clear();
+        setState(() {
+          _isPublishing = false;
+        });
+      } catch (e) {
+        setState(() {
+          _isPublishing = false;
+          _publishError = e.toString();
+        });
+      }
+      return;
+    }
+
+    // Otherwise, use regular feed
     final feedState = context.read<FeedState>();
     if (!feedState.isConnected) {
       setState(() {
@@ -74,13 +107,101 @@ class _FeedScreenState extends State<FeedScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoPageScaffold(
-      navigationBar: const CupertinoNavigationBar(
-        middle: Text('Feed'),
-      ),
-      child: SafeArea(
-        child: Consumer<FeedState>(
-          builder: (context, feedState, child) {
+    return Consumer2<FeedState, GroupState>(
+      builder: (context, feedState, groupState, child) {
+        final activeGroup = groupState.activeGroup;
+        return CupertinoPageScaffold(
+          navigationBar: CupertinoNavigationBar(
+            middle: Text(activeGroup?.name ?? 'Feed'),
+            trailing: activeGroup != null
+                ? CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: () {
+                      groupState.setActiveGroup(null);
+                    },
+                    child: const Text('Exit Group'),
+                  )
+                : null,
+          ),
+          child: SafeArea(
+            child: Builder(
+              builder: (context) {
+                // If there's an active group, show group messages
+            if (groupState.activeGroup != null) {
+              if (!groupState.isConnected && groupState.errorMessage != null) {
+                return Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        groupState.errorMessage!,
+                        style: const TextStyle(color: CupertinoColors.systemRed),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 16),
+                      CupertinoButton(
+                        onPressed: groupState.retryConnection,
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
+              if (groupState.isLoading && groupState.groupMessages.isEmpty) {
+                return const Center(
+                  child: CupertinoActivityIndicator(),
+                );
+              }
+
+              return Column(
+                children: [
+                  Expanded(
+                    child: groupState.groupMessages.isEmpty
+                        ? const Center(
+                            child: Text('No messages in this group yet'),
+                          )
+                        : CustomScrollView(
+                            controller: _scrollController,
+                            slivers: [
+                              CupertinoSliverRefreshControl(
+                                onRefresh: () async {
+                                  await groupState.refreshActiveGroupMessages();
+                                },
+                              ),
+                              SliverList(
+                                delegate: SliverChildBuilderDelegate(
+                                  (context, index) {
+                                    if (index < groupState.groupMessages.length) {
+                                      return _EventItem(
+                                        event: groupState.groupMessages[index],
+                                      );
+                                    }
+                                    return const SizedBox.shrink();
+                                  },
+                                  childCount: groupState.groupMessages.length,
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
+                  _ComposeMessageWidget(
+                    controller: _messageController,
+                    isPublishing: _isPublishing,
+                    error: _publishError,
+                    onPublish: _publishMessage,
+                    placeholder: 'Write a message to ${groupState.activeGroup!.name}...',
+                    onErrorDismiss: () {
+                      setState(() {
+                        _publishError = null;
+                      });
+                    },
+                  ),
+                ],
+              );
+            }
+
+            // Otherwise, show regular feed
             if (!feedState.isConnected && feedState.errorMessage != null) {
               return Center(
                 child: Column(
@@ -115,48 +236,51 @@ class _FeedScreenState extends State<FeedScreen> {
                           child: Text('No events yet'),
                         )
                       : CustomScrollView(
-                    controller: _scrollController,
-                    slivers: [
-                      CupertinoSliverRefreshControl(
-                        onRefresh: () async {
-                          await feedState.retryConnection();
-                        },
-                      ),
-                      SliverList(
-                        delegate: SliverChildBuilderDelegate(
-                          (context, index) {
-                            if (index < feedState.events.length) {
-                              return _EventItem(event: feedState.events[index]);
-                            } else if (feedState.isLoadingMore) {
-                              return const Padding(
-                                padding: EdgeInsets.all(16.0),
-                                child: Center(
-                                  child: CupertinoActivityIndicator(),
-                                ),
-                              );
-                            } else if (feedState.hasMoreEvents) {
-                              return const SizedBox.shrink();
-                            } else {
-                              return const Padding(
-                                padding: EdgeInsets.all(16.0),
-                                child: Center(
-                                  child: Text(
-                                    'No more events',
-                                    style: TextStyle(
-                                      color: CupertinoColors.secondaryLabel,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }
-                          },
-                          childCount: feedState.events.length +
-                              (feedState.isLoadingMore ? 1 : 0) +
-                              (feedState.hasMoreEvents ? 0 : 1),
+                          controller: _scrollController,
+                          slivers: [
+                            CupertinoSliverRefreshControl(
+                              onRefresh: () async {
+                                await feedState.retryConnection();
+                              },
+                            ),
+                            SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (context, index) {
+                                  if (index < feedState.events.length) {
+                                    return _EventItem(
+                                      event: feedState.events[index],
+                                    );
+                                  } else if (feedState.isLoadingMore) {
+                                    return const Padding(
+                                      padding: EdgeInsets.all(16.0),
+                                      child: Center(
+                                        child: CupertinoActivityIndicator(),
+                                      ),
+                                    );
+                                  } else if (feedState.hasMoreEvents) {
+                                    return const SizedBox.shrink();
+                                  } else {
+                                    return const Padding(
+                                      padding: EdgeInsets.all(16.0),
+                                      child: Center(
+                                        child: Text(
+                                          'No more events',
+                                          style: TextStyle(
+                                            color:
+                                                CupertinoColors.secondaryLabel,
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                },
+                                childCount: feedState.events.length +
+                                    (feedState.isLoadingMore ? 1 : 0) +
+                                    (feedState.hasMoreEvents ? 0 : 1),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                    ],
-                  ),
                 ),
                 _ComposeMessageWidget(
                   controller: _messageController,
@@ -171,9 +295,11 @@ class _FeedScreenState extends State<FeedScreen> {
                 ),
               ],
             );
-          },
-        ),
-      ),
+              },
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -254,6 +380,7 @@ class _ComposeMessageWidget extends StatelessWidget {
   final String? error;
   final VoidCallback onPublish;
   final VoidCallback onErrorDismiss;
+  final String? placeholder;
 
   const _ComposeMessageWidget({
     required this.controller,
@@ -261,6 +388,7 @@ class _ComposeMessageWidget extends StatelessWidget {
     this.error,
     required this.onPublish,
     required this.onErrorDismiss,
+    this.placeholder,
   });
 
   @override
@@ -319,7 +447,7 @@ class _ComposeMessageWidget extends StatelessWidget {
                   Expanded(
                     child: CupertinoTextField(
                       controller: controller,
-                      placeholder: 'Write a message...',
+                      placeholder: placeholder ?? 'Write a message...',
                       maxLines: null,
                       minLines: 1,
                       textInputAction: TextInputAction.newline,
