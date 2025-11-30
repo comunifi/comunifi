@@ -276,6 +276,17 @@ class NostrService {
     _channel!.sink.add(jsonMessage);
   }
 
+  /// Publish an event to the relay (public method)
+  void publishEvent(Map<String, dynamic> eventJson) {
+    if (!_isConnected || _channel == null) {
+      throw Exception('Not connected to relay');
+    }
+
+    final List<dynamic> message = ['EVENT', eventJson];
+    final String jsonMessage = jsonEncode(message);
+    _channel!.sink.add(jsonMessage);
+  }
+
   /// Listen to events of a specific kind
   Stream<NostrEventModel> listenToEvents({
     required int kind,
