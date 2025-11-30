@@ -2,6 +2,7 @@ import 'package:comunifi/screens/feed/feed_screen.dart';
 import 'package:comunifi/screens/mls/mls_screen.dart';
 import 'package:comunifi/screens/mls/mls_persistent_screen.dart';
 import 'package:comunifi/screens/onboarding_screen.dart';
+import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/mls.dart';
 import 'package:comunifi/state/mls_persistent.dart';
 import 'package:flutter/cupertino.dart';
@@ -34,7 +35,10 @@ GoRouter createRouter(
       path: '/feed',
       parentNavigatorKey: rootNavigatorKey,
       builder: (context, state) {
-        return const FeedScreen();
+        return ChangeNotifierProvider(
+          create: (_) => FeedState(),
+          child: const FeedScreen(),
+        );
       },
     ),
     GoRoute(
