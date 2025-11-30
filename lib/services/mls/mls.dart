@@ -12,5 +12,6 @@ export 'key_schedule/key_schedule.dart';
 export 'group_state/group_state.dart';
 export 'messages/messages.dart';
 export 'storage/storage.dart';
+export 'storage/secure_storage.dart';
 export 'mls_service.dart';
 export 'mls_group.dart';

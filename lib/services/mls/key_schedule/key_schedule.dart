@@ -14,6 +14,79 @@ class EpochSecrets {
     required this.handshakeSecret,
     required this.applicationSecret,
   });
+
+  /// Serialize epoch secrets to bytes
+  Uint8List serialize() {
+    // Format: epoch_secret_length (4 bytes) + epoch_secret + sender_data_secret_length (4 bytes) + sender_data_secret + handshake_secret_length (4 bytes) + handshake_secret + application_secret_length (4 bytes) + application_secret
+    final totalLength = 4 + epochSecret.length +
+        4 + senderDataSecret.length +
+        4 + handshakeSecret.length +
+        4 + applicationSecret.length;
+
+    final result = Uint8List(totalLength);
+    int offset = 0;
+
+    // Write epoch secret
+    _writeUint8List(result, offset, epochSecret);
+    offset += 4 + epochSecret.length;
+
+    // Write sender data secret
+    _writeUint8List(result, offset, senderDataSecret);
+    offset += 4 + senderDataSecret.length;
+
+    // Write handshake secret
+    _writeUint8List(result, offset, handshakeSecret);
+    offset += 4 + handshakeSecret.length;
+
+    // Write application secret
+    _writeUint8List(result, offset, applicationSecret);
+
+    return result;
+  }
+
+  void _writeUint8List(Uint8List result, int offset, Uint8List data) {
+    final length = data.length;
+    result[offset++] = (length >> 24) & 0xFF;
+    result[offset++] = (length >> 16) & 0xFF;
+    result[offset++] = (length >> 8) & 0xFF;
+    result[offset++] = length & 0xFF;
+    result.setRange(offset, offset + length, data);
+  }
+
+  /// Deserialize epoch secrets from bytes
+  static EpochSecrets deserialize(Uint8List data) {
+    int offset = 0;
+
+    // Read epoch secret
+    final epochSecret = _readUint8List(data, offset);
+    offset += 4 + epochSecret.length;
+
+    // Read sender data secret
+    final senderDataSecret = _readUint8List(data, offset);
+    offset += 4 + senderDataSecret.length;
+
+    // Read handshake secret
+    final handshakeSecret = _readUint8List(data, offset);
+    offset += 4 + handshakeSecret.length;
+
+    // Read application secret
+    final applicationSecret = _readUint8List(data, offset);
+
+    return EpochSecrets(
+      epochSecret: epochSecret,
+      senderDataSecret: senderDataSecret,
+      handshakeSecret: handshakeSecret,
+      applicationSecret: applicationSecret,
+    );
+  }
+
+  static Uint8List _readUint8List(Uint8List data, int offset) {
+    final length = (data[offset] << 24) |
+        (data[offset + 1] << 16) |
+        (data[offset + 2] << 8) |
+        data[offset + 3];
+    return data.sublist(offset + 4, offset + 4 + length);
+  }
 }
 
 /// Application key material (key + nonce)

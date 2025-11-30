@@ -1,7 +1,9 @@
 import 'package:comunifi/screens/feed/feed_screen.dart';
 import 'package:comunifi/screens/mls/mls_screen.dart';
+import 'package:comunifi/screens/mls/mls_persistent_screen.dart';
 import 'package:comunifi/screens/onboarding_screen.dart';
 import 'package:comunifi/state/mls.dart';
+import 'package:comunifi/state/mls_persistent.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
@@ -43,6 +45,17 @@ GoRouter createRouter(
         return ChangeNotifierProvider(
           create: (_) => MlsState(),
           child: const MlsScreen(),
+        );
+      },
+    ),
+    GoRoute(
+      name: 'MlsPersistent',
+      path: '/mls-persistent',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return ChangeNotifierProvider(
+          create: (_) => MlsPersistentState(),
+          child: const MlsPersistentScreen(),
         );
       },
     ),

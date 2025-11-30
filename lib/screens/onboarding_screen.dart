@@ -19,6 +19,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     navigate.push('/mls');
   }
 
+  void handleMlsPersistent() {
+    final navigate = GoRouter.of(context);
+    navigate.push('/mls-persistent');
+  }
+
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
@@ -27,6 +32,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           children: [
             CupertinoButton(onPressed: handleLogin, child: const Text('Login')),
             CupertinoButton(onPressed: handleMls, child: const Text('Mls')),
+            CupertinoButton(
+              onPressed: handleMlsPersistent,
+              child: const Text('Mls Persistent'),
+            ),
           ],
         ),
       ),
