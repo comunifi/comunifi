@@ -14,13 +14,20 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     navigate.push('/feed');
   }
 
+  void handleMls() {
+    final navigate = GoRouter.of(context);
+    navigate.push('/mls');
+  }
+
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
       child: Center(
-        child: CupertinoButton(
-          onPressed: handleLogin,
-          child: const Text('Login'),
+        child: Column(
+          children: [
+            CupertinoButton(onPressed: handleLogin, child: const Text('Login')),
+            CupertinoButton(onPressed: handleMls, child: const Text('Mls')),
+          ],
         ),
       ),
     );

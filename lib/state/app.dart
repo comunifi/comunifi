@@ -4,7 +4,6 @@ class AppState with ChangeNotifier {
   // instantiate services here
 
   // private variables here
-
   bool _mounted = true;
   void safeNotifyListeners() {
     if (_mounted) {
@@ -19,6 +18,11 @@ class AppState with ChangeNotifier {
   }
 
   // state variables here
+  bool thisIsABool = false;
 
   // state methods here
+  void toggleThisIsABool() {
+    thisIsABool = !thisIsABool;
+    safeNotifyListeners();
+  }
 }
