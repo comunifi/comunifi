@@ -16,6 +16,17 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final TextEditingController _groupAboutController = TextEditingController();
   bool _isCreatingGroup = false;
   String? _createGroupError;
+  bool _isFetchingGroups = false;
+  String? _fetchGroupsError;
+
+  @override
+  void initState() {
+    super.initState();
+    // Fetch groups from relay when screen loads
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _fetchGroupsFromRelay();
+    });
+  }
 
   @override
   void dispose() {
@@ -24,19 +35,52 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     super.dispose();
   }
 
-  void handleLogin() {
-    final navigate = GoRouter.of(context);
-    navigate.push('/feed');
+  Future<void> _fetchGroupsFromRelay() async {
+    final groupState = context.read<GroupState>();
+    if (!groupState.isConnected) {
+      return;
+    }
+
+    setState(() {
+      _isFetchingGroups = true;
+      _fetchGroupsError = null;
+    });
+
+    try {
+      await groupState.refreshDiscoveredGroups(limit: 50);
+    } catch (e) {
+      setState(() {
+        _fetchGroupsError = 'Failed to fetch groups: $e';
+      });
+    } finally {
+      setState(() {
+        _isFetchingGroups = false;
+      });
+    }
   }
 
-  void handleMls() {
-    final navigate = GoRouter.of(context);
-    navigate.push('/mls');
-  }
+  Future<void> _loadMoreGroups() async {
+    final groupState = context.read<GroupState>();
+    if (!groupState.isConnected || _isFetchingGroups) {
+      return;
+    }
 
-  void handleMlsPersistent() {
-    final navigate = GoRouter.of(context);
-    navigate.push('/mls-persistent');
+    setState(() {
+      _isFetchingGroups = true;
+      _fetchGroupsError = null;
+    });
+
+    try {
+      await groupState.loadMoreGroups();
+    } catch (e) {
+      setState(() {
+        _fetchGroupsError = 'Failed to load all groups: $e';
+      });
+    } finally {
+      setState(() {
+        _isFetchingGroups = false;
+      });
+    }
   }
 
   Future<void> _createGroup() async {
@@ -72,6 +116,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       setState(() {
         _isCreatingGroup = false;
       });
+      // Refresh discovered groups to show the newly created group
+      await _fetchGroupsFromRelay();
     } catch (e) {
       setState(() {
         _isCreatingGroup = false;
@@ -112,43 +158,6 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                // Navigation buttons
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    color: CupertinoColors.systemGrey6,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text(
-                        'Navigation',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      CupertinoButton.filled(
-                        onPressed: handleLogin,
-                        child: const Text('Feed'),
-                      ),
-                      const SizedBox(height: 8),
-                      CupertinoButton.filled(
-                        onPressed: handleMls,
-                        child: const Text('MLS'),
-                      ),
-                      const SizedBox(height: 8),
-                      CupertinoButton.filled(
-                        onPressed: handleMlsPersistent,
-                        child: const Text('MLS Persistent'),
-                      ),
-                    ],
-                  ),
-                ),
-
                 // Connection status
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -286,7 +295,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   ),
                 ),
 
-                // Groups list section
+                // Discovered groups from relay section
                 Container(
                   padding: const EdgeInsets.all(16),
                   margin: const EdgeInsets.only(bottom: 16),
@@ -301,7 +310,254 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           const Text(
-                            'Groups',
+                            'Available Groups',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Row(
+                            children: [
+                              if (_isFetchingGroups ||
+                                  groupState.isLoadingGroups)
+                                const Padding(
+                                  padding: EdgeInsets.only(right: 8),
+                                  child: CupertinoActivityIndicator(),
+                                ),
+                              CupertinoButton(
+                                padding: EdgeInsets.zero,
+                                minSize: 0,
+                                onPressed: _isFetchingGroups
+                                    ? null
+                                    : _fetchGroupsFromRelay,
+                                child: const Icon(
+                                  CupertinoIcons.arrow_clockwise,
+                                  size: 20,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      if (_fetchGroupsError != null)
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          margin: const EdgeInsets.only(bottom: 12),
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemRed.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: CupertinoColors.systemRed,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                CupertinoIcons.exclamationmark_triangle,
+                                color: CupertinoColors.systemRed,
+                                size: 16,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _fetchGroupsError!,
+                                  style: const TextStyle(
+                                    color: CupertinoColors.systemRed,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (groupState.discoveredGroups.isEmpty &&
+                          !_isFetchingGroups &&
+                          !groupState.isLoadingGroups)
+                        const Padding(
+                          padding: EdgeInsets.all(16),
+                          child: Text(
+                            'No groups found on relay. Create one above!',
+                            style: TextStyle(
+                              color: CupertinoColors.secondaryLabel,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        )
+                      else
+                        ...groupState.discoveredGroups.map((announcement) {
+                          // Try to find matching local group
+                          MlsGroup? matchingGroup;
+                          try {
+                            matchingGroup = groupState.groups.firstWhere((g) {
+                              final groupIdHex = g.id.bytes
+                                  .map(
+                                    (b) => b.toRadixString(16).padLeft(2, '0'),
+                                  )
+                                  .join();
+                              return announcement.mlsGroupId == groupIdHex;
+                            });
+                          } catch (e) {
+                            matchingGroup = null;
+                          }
+
+                          final isLocalGroup = matchingGroup != null;
+                          final activeGroupId = groupState.activeGroup?.id.bytes
+                              .toString();
+                          final matchingGroupId = matchingGroup?.id.bytes
+                              .toString();
+                          final isActive =
+                              isLocalGroup &&
+                              activeGroupId != null &&
+                              matchingGroupId != null &&
+                              activeGroupId == matchingGroupId;
+
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: isActive
+                                  ? CupertinoColors.systemBlue.withOpacity(0.1)
+                                  : isLocalGroup
+                                  ? CupertinoColors.systemGreen.withOpacity(0.1)
+                                  : CupertinoColors.systemGrey5,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: isActive
+                                    ? CupertinoColors.systemBlue
+                                    : isLocalGroup
+                                    ? CupertinoColors.systemGreen
+                                    : CupertinoColors.systemGrey4,
+                                width: isActive ? 2 : 1,
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Text(
+                                                announcement.name ??
+                                                    'Unnamed Group',
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 16,
+                                                  color: isActive
+                                                      ? CupertinoColors
+                                                            .systemBlue
+                                                      : null,
+                                                ),
+                                              ),
+                                              if (isLocalGroup)
+                                                const Padding(
+                                                  padding: EdgeInsets.only(
+                                                    left: 8,
+                                                  ),
+                                                  child: Icon(
+                                                    CupertinoIcons
+                                                        .check_mark_circled,
+                                                    color: CupertinoColors
+                                                        .systemGreen,
+                                                    size: 16,
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                          if (announcement.about != null) ...[
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              announcement.about!,
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                color: CupertinoColors
+                                                    .secondaryLabel,
+                                              ),
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ],
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            announcement.mlsGroupId != null
+                                                ? 'ID: ${announcement.mlsGroupId!.length > 12 ? "${announcement.mlsGroupId!.substring(0, 6)}...${announcement.mlsGroupId!.substring(announcement.mlsGroupId!.length - 6)}" : announcement.mlsGroupId}'
+                                                : 'No group ID',
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: CupertinoColors
+                                                  .secondaryLabel,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    if (isActive)
+                                      const Icon(
+                                        CupertinoIcons.check_mark_circled_solid,
+                                        color: CupertinoColors.systemBlue,
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                if (isLocalGroup)
+                                  CupertinoButton(
+                                    padding: EdgeInsets.zero,
+                                    minSize: 0,
+                                    onPressed: () =>
+                                        _toggleGroup(matchingGroup!),
+                                    child: Text(
+                                      isActive ? 'Deselect' : 'Select',
+                                      style: const TextStyle(
+                                        color: CupertinoColors.systemBlue,
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  const Text(
+                                    'Join to access this group',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: CupertinoColors.secondaryLabel,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          );
+                        }),
+                      if (!_isFetchingGroups && !groupState.isLoadingGroups)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: CupertinoButton(
+                            onPressed: _loadMoreGroups,
+                            child: const Text('Load All Groups'),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+
+                // Local groups section
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemGrey6,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'My Groups',
                             style: TextStyle(
                               fontSize: 20,
                               fontWeight: FontWeight.bold,

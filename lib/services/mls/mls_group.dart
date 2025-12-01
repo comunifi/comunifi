@@ -37,16 +37,16 @@ class MlsGroup {
   /// Encrypt an application message
   Future<MlsCiphertext> encryptApplicationMessage(Uint8List plaintext) async {
     // Get sender leaf index (simplified - in production would track local member)
-    final senderLeafIndex = _state.members.keys.first.value;
+    final senderLeafIndex = _state.members.keys.first;
 
-    // Get current generation (simplified - in production would track per-sender)
-    final generation = 0; // Would be tracked per sender
+    // Get and increment generation for this sender (prevents nonce reuse)
+    final generation = _state.incrementGeneration(senderLeafIndex);
 
     // Derive application keys
     final keySchedule = KeySchedule(_crypto.kdf);
     final keyMaterial = await keySchedule.deriveApplicationKeys(
       applicationSecret: _state.secrets.applicationSecret,
-      senderIndex: senderLeafIndex,
+      senderIndex: senderLeafIndex.value,
       generation: generation,
     );
 
@@ -63,7 +63,7 @@ class MlsGroup {
     return MlsCiphertext(
       groupId: id,
       epoch: _state.context.epoch,
-      senderIndex: senderLeafIndex,
+      senderIndex: senderLeafIndex.value,
       nonce: nonce,
       ciphertext: ciphertext,
       contentType: MlsContentType.application,
@@ -81,27 +81,61 @@ class MlsGroup {
       throw MlsError('Epoch mismatch - message from different epoch');
     }
 
-    // Derive application keys for sender
-    final generation = 0; // Would be tracked per sender
-    final keySchedule = KeySchedule(_crypto.kdf);
-    final keyMaterial = await keySchedule.deriveApplicationKeys(
-      applicationSecret: _state.secrets.applicationSecret,
-      senderIndex: ciphertext.senderIndex,
-      generation: generation,
-    );
+    final senderLeafIndex = LeafIndex(ciphertext.senderIndex);
+    
+    // Get expected generation (what we think the sender should be at)
+    final expectedGeneration = _state.getGeneration(senderLeafIndex);
+    
+    // Try decrypting with expected generation and nearby generations
+    // This handles out-of-order messages or if we missed some messages
+    final generationsToTry = [
+      expectedGeneration,
+      expectedGeneration + 1,
+      expectedGeneration + 2,
+      expectedGeneration - 1,
+      expectedGeneration - 2,
+    ].where((g) => g >= 0).toSet().toList()..sort();
 
-    // Decrypt
+    final keySchedule = KeySchedule(_crypto.kdf);
     final aad = Uint8List(0); // Simplified
-    try {
-      return await _crypto.aead.open(
-        key: keyMaterial.key,
-        nonce: ciphertext.nonce,
-        ciphertext: ciphertext.ciphertext,
-        aad: aad,
-      );
-    } catch (e) {
-      throw DecryptionFailed('Failed to decrypt message: $e');
+    
+    Exception? lastError;
+    for (final generation in generationsToTry) {
+      try {
+        // Derive application keys for this generation
+        final keyMaterial = await keySchedule.deriveApplicationKeys(
+          applicationSecret: _state.secrets.applicationSecret,
+          senderIndex: ciphertext.senderIndex,
+          generation: generation,
+        );
+
+        // Verify nonce matches (since nonce is deterministic from generation)
+        if (keyMaterial.nonce.toString() != ciphertext.nonce.toString()) {
+          continue; // Wrong generation, try next
+        }
+
+        // Try to decrypt
+        final decrypted = await _crypto.aead.open(
+          key: keyMaterial.key,
+          nonce: ciphertext.nonce,
+          ciphertext: ciphertext.ciphertext,
+          aad: aad,
+        );
+
+        // Success! Update our generation tracking
+        _state.setGeneration(senderLeafIndex, generation);
+        
+        return decrypted;
+      } catch (e) {
+        lastError = e is Exception ? e : Exception(e.toString());
+        // Continue to next generation
+      }
     }
+
+    // If we get here, decryption failed for all generations
+    throw DecryptionFailed(
+      'Failed to decrypt message: ${lastError?.toString() ?? "Unknown error"}',
+    );
   }
 
   /// Add members to the group

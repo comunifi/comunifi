@@ -2,6 +2,9 @@ import 'dart:convert';
 
 import 'package:dart_nostr/dart_nostr.dart';
 
+/// Kind 40: Channel/Group announcement
+const int kindGroupAnnouncement = 40;
+
 /// Kind 1059: Encrypted envelope containing an encrypted Nostr event
 const int kindEncryptedEnvelope = 1059;
 

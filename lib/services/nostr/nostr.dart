@@ -681,7 +681,8 @@ class NostrService {
     bool useCache = true,
   }) async {
     // Try to get from cache first if enabled
-    if (useCache && _cacheInitialized && _eventTable != null) {
+    // Skip cache if 'until' is set (pagination - we want to query relay for older events)
+    if (useCache && until == null && _cacheInitialized && _eventTable != null) {
       try {
         final cachedEvents = await _getCachedEvents(
           kind: kind,
@@ -752,7 +753,16 @@ class NostrService {
     }
 
     if (tags != null && tags.isNotEmpty) {
-      filter['#t'] = tags;
+      // Support both 't' and 'g' tag filters
+      // If tags contain group IDs, use '#g' filter
+      // Otherwise, use '#t' filter
+      if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
+        // Looks like hex group IDs, use 'g' tag
+        filter['#g'] = tags;
+      } else {
+        // Regular tags, use 't' tag
+        filter['#t'] = tags;
+      }
     }
 
     if (since != null) {

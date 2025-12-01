@@ -17,7 +17,31 @@ import 'package:comunifi/services/db/app_db.dart';
 // Import MlsGroupTable for listing groups
 import 'package:comunifi/services/mls/storage/secure_storage.dart'
     show MlsGroupTable;
-import 'package:comunifi/models/nostr_event.dart' show kindEncryptedEnvelope;
+import 'package:comunifi/models/nostr_event.dart'
+    show
+        kindEncryptedEnvelope,
+        kindGroupAnnouncement,
+        NostrEventModel,
+        addClientIdTag;
+
+/// Represents a group announcement from the relay
+class GroupAnnouncement {
+  final String eventId;
+  final String pubkey;
+  final String? name;
+  final String? about;
+  final String? mlsGroupId; // MLS group ID from 'g' tag
+  final DateTime createdAt;
+
+  GroupAnnouncement({
+    required this.eventId,
+    required this.pubkey,
+    this.name,
+    this.about,
+    this.mlsGroupId,
+    required this.createdAt,
+  });
+}
 
 class GroupState with ChangeNotifier {
   // instantiate services here
@@ -271,6 +295,8 @@ class GroupState with ChangeNotifier {
   List<MlsGroup> _groups = [];
   MlsGroup? _activeGroup;
   List<NostrEventModel> _groupMessages = [];
+  List<GroupAnnouncement> _discoveredGroups = [];
+  bool _isLoadingGroups = false;
 
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
@@ -278,6 +304,8 @@ class GroupState with ChangeNotifier {
   List<MlsGroup> get groups => _groups;
   MlsGroup? get activeGroup => _activeGroup;
   List<NostrEventModel> get groupMessages => _groupMessages;
+  List<GroupAnnouncement> get discoveredGroups => _discoveredGroups;
+  bool get isLoadingGroups => _isLoadingGroups;
 
   /// Resolve MLS group by hex ID (for NostrService)
   Future<MlsGroup?> _resolveMlsGroup(String groupIdHex) async {
@@ -355,6 +383,10 @@ class GroupState with ChangeNotifier {
       throw Exception('MLS service not initialized');
     }
 
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
     try {
       // Create MLS group
       final mlsGroup = await _mlsService!.createGroup(
@@ -371,6 +403,57 @@ class GroupState with ChangeNotifier {
       safeNotifyListeners();
 
       debugPrint('Created MLS group: ${mlsGroup.name} (${groupIdHex})');
+
+      // Publish group announcement to relay (kind 40)
+      try {
+        final privateKey = await _getNostrPrivateKey();
+        if (privateKey != null && privateKey.isNotEmpty) {
+          final keyPair = NostrKeyPairs(private: privateKey);
+
+          // Create content as JSON
+          final contentJson = <String, dynamic>{'name': name};
+          if (about != null && about.isNotEmpty) {
+            contentJson['about'] = about;
+          }
+          final content = jsonEncode(contentJson);
+
+          // Create kind 40 event (group announcement)
+          final announcementEvent = NostrEvent.fromPartialData(
+            kind: kindGroupAnnouncement,
+            content: content,
+            keyPairs: keyPair,
+            tags: [
+              ['g', groupIdHex], // MLS group ID tag
+              ...addClientIdTag([]),
+            ],
+            createdAt: DateTime.now(),
+          );
+
+          final announcementModel = NostrEventModel(
+            id: announcementEvent.id,
+            pubkey: announcementEvent.pubkey,
+            kind: announcementEvent.kind,
+            content: announcementEvent.content,
+            tags: announcementEvent.tags,
+            sig: announcementEvent.sig,
+            createdAt: announcementEvent.createdAt,
+          );
+
+          // Publish to relay (not encrypted, this is a public announcement)
+          await _nostrService!.publishEvent(announcementModel.toJson());
+
+          debugPrint(
+            'Published group announcement to relay: ${announcementModel.id}',
+          );
+        } else {
+          debugPrint(
+            'Warning: No Nostr key found, group announcement not published',
+          );
+        }
+      } catch (e) {
+        debugPrint('Failed to publish group announcement to relay: $e');
+        // Don't fail group creation if announcement fails
+      }
     } catch (e) {
       debugPrint('Failed to create group: $e');
       rethrow;
@@ -583,5 +666,135 @@ class GroupState with ChangeNotifier {
     _groupMessages.clear();
     safeNotifyListeners();
     await _initialize();
+  }
+
+  /// Fetch group announcements from the relay with pagination
+  /// [limit] - Maximum number of groups to fetch (default: 50)
+  /// [since] - Only fetch groups created after this timestamp (for pagination)
+  /// [until] - Only fetch groups created before this timestamp (for pagination)
+  /// [useCache] - Whether to use cache (default: true, but false for refresh)
+  /// Returns list of group announcements
+  Future<List<GroupAnnouncement>> fetchGroupsFromRelay({
+    int limit = 50,
+    DateTime? since,
+    DateTime? until,
+    bool useCache = true,
+  }) async {
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    try {
+      _isLoadingGroups = true;
+      safeNotifyListeners();
+
+      // Request kind 40 events (group announcements)
+      // Disable cache when paginating (until is set) or when explicitly disabled
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindGroupAnnouncement,
+        since: since,
+        until: until,
+        limit: limit,
+        useCache:
+            useCache &&
+            until ==
+                null, // Disable cache for pagination or when explicitly disabled
+      );
+
+      // Parse events into GroupAnnouncement objects
+      final announcements = <GroupAnnouncement>[];
+      for (final event in events) {
+        final announcement = _parseGroupAnnouncement(event);
+        if (announcement != null) {
+          announcements.add(announcement);
+        }
+      }
+
+      // Sort by creation date (newest first)
+      announcements.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+      _isLoadingGroups = false;
+      safeNotifyListeners();
+
+      return announcements;
+    } catch (e) {
+      _isLoadingGroups = false;
+      _errorMessage = 'Failed to fetch groups from relay: $e';
+      safeNotifyListeners();
+      rethrow;
+    }
+  }
+
+  /// Load all groups from relay (no pagination)
+  /// Fetches all available groups from the relay
+  Future<List<GroupAnnouncement>> loadMoreGroups() async {
+    // Fetch all groups without pagination (no until/since filters, large limit)
+    // Disable cache to ensure we get all groups from relay
+    final newGroups = await fetchGroupsFromRelay(limit: 1000, useCache: false);
+
+    // Add to discovered groups, avoiding duplicates
+    for (final group in newGroups) {
+      if (!_discoveredGroups.any((g) => g.eventId == group.eventId)) {
+        _discoveredGroups.add(group);
+      }
+    }
+
+    // Re-sort
+    _discoveredGroups.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    safeNotifyListeners();
+
+    return newGroups;
+  }
+
+  /// Refresh discovered groups from relay
+  /// Fetches the latest groups (always queries relay, no cache)
+  Future<void> refreshDiscoveredGroups({int limit = 50}) async {
+    // Always query relay for refresh (disable cache to get latest groups)
+    final newGroups = await fetchGroupsFromRelay(limit: limit, useCache: false);
+    _discoveredGroups = newGroups;
+    safeNotifyListeners();
+  }
+
+  /// Parse a Nostr event (kind 40) into a GroupAnnouncement
+  GroupAnnouncement? _parseGroupAnnouncement(NostrEventModel event) {
+    if (event.kind != kindGroupAnnouncement) {
+      return null;
+    }
+
+    // Extract MLS group ID from 'g' tag
+    String? mlsGroupId;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+        mlsGroupId = tag[1];
+        break;
+      }
+    }
+
+    // Parse content as JSON to extract name and about
+    String? name;
+    String? about;
+    try {
+      if (event.content.isNotEmpty) {
+        final contentJson = jsonDecode(event.content) as Map<String, dynamic>?;
+        if (contentJson != null) {
+          name = contentJson['name'] as String?;
+          about = contentJson['about'] as String?;
+        }
+      }
+    } catch (e) {
+      // If content is not JSON, treat it as the group name
+      if (event.content.isNotEmpty) {
+        name = event.content;
+      }
+    }
+
+    return GroupAnnouncement(
+      eventId: event.id,
+      pubkey: event.pubkey,
+      name: name,
+      about: about,
+      mlsGroupId: mlsGroupId,
+      createdAt: event.createdAt,
+    );
   }
 }

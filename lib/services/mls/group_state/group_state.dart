@@ -142,6 +142,8 @@ class GroupState {
   final EpochSecrets secrets;
   final mls_crypto.PrivateKey? identityPrivateKey;
   final mls_crypto.PrivateKey? leafHpkePrivateKey;
+  // Track generation counter per sender (LeafIndex -> generation)
+  final Map<LeafIndex, int> _generations;
 
   GroupState({
     required this.context,
@@ -150,7 +152,33 @@ class GroupState {
     required this.secrets,
     required this.identityPrivateKey,
     required this.leafHpkePrivateKey,
-  });
+    Map<LeafIndex, int>? generations,
+  }) : _generations = generations ?? {};
+
+  /// Get the current generation for a sender
+  int getGeneration(LeafIndex senderIndex) {
+    return _generations[senderIndex] ?? 0;
+  }
+
+  /// Increment and return the next generation for a sender
+  int incrementGeneration(LeafIndex senderIndex) {
+    final current = _generations[senderIndex] ?? 0;
+    final next = current + 1;
+    _generations[senderIndex] = next;
+    return next;
+  }
+
+  /// Set the generation for a sender (used when receiving messages)
+  void setGeneration(LeafIndex senderIndex, int generation) {
+    final current = _generations[senderIndex] ?? 0;
+    // Only update if the new generation is higher (to handle out-of-order messages)
+    if (generation > current) {
+      _generations[senderIndex] = generation;
+    }
+  }
+
+  /// Get generations map (for serialization)
+  Map<LeafIndex, int> get generations => Map.from(_generations);
 
   GroupState copyWith({
     GroupContext? context,
@@ -159,6 +187,7 @@ class GroupState {
     EpochSecrets? secrets,
     mls_crypto.PrivateKey? identityPrivateKey,
     mls_crypto.PrivateKey? leafHpkePrivateKey,
+    Map<LeafIndex, int>? generations,
   }) {
     return GroupState(
       context: context ?? this.context,
@@ -167,16 +196,18 @@ class GroupState {
       secrets: secrets ?? this.secrets,
       identityPrivateKey: identityPrivateKey ?? this.identityPrivateKey,
       leafHpkePrivateKey: leafHpkePrivateKey ?? this.leafHpkePrivateKey,
+      generations: generations ?? Map.from(_generations),
     );
   }
 
   /// Serialize group state to bytes
   Uint8List serialize() {
-    // Format: group_context + ratchet_tree + members + epoch_secrets + identity_private_key + leaf_hpke_private_key
+    // Format: group_context + ratchet_tree + members + epoch_secrets + identity_private_key + leaf_hpke_private_key + generations
     final contextBytes = context.serialize();
     final treeBytes = tree.serialize();
     final membersBytes = _serializeMembers(members);
     final secretsBytes = secrets.serialize();
+    final generationsBytes = _serializeGenerations(_generations);
     
     final identityPrivateKeyBytes = identityPrivateKey?.bytes;
     final leafHpkePrivateKeyBytes = leafHpkePrivateKey?.bytes;
@@ -186,7 +217,8 @@ class GroupState {
         4 + membersBytes.length +
         4 + secretsBytes.length +
         4 + (identityPrivateKeyBytes?.length ?? 0) +
-        4 + (leafHpkePrivateKeyBytes?.length ?? 0);
+        4 + (leafHpkePrivateKeyBytes?.length ?? 0) +
+        4 + generationsBytes.length;
 
     final result = Uint8List(totalLength);
     int offset = 0;
@@ -221,11 +253,45 @@ class GroupState {
     // Write leaf HPKE private key
     if (leafHpkePrivateKeyBytes != null) {
       _writeUint8List(result, offset, leafHpkePrivateKeyBytes);
+      offset += 4 + leafHpkePrivateKeyBytes.length;
     } else {
       result[offset++] = 0;
       result[offset++] = 0;
       result[offset++] = 0;
       result[offset++] = 0;
+    }
+
+    // Write generations map
+    _writeUint8List(result, offset, generationsBytes);
+
+    return result;
+  }
+
+  /// Serialize generations map (LeafIndex -> generation)
+  Uint8List _serializeGenerations(Map<LeafIndex, int> generations) {
+    // Format: count (4 bytes) + [leaf_index (4 bytes) + generation (4 bytes)]*
+    final count = generations.length;
+    final result = Uint8List(4 + count * 8);
+    int offset = 0;
+
+    // Write count
+    result[offset++] = (count >> 24) & 0xFF;
+    result[offset++] = (count >> 16) & 0xFF;
+    result[offset++] = (count >> 8) & 0xFF;
+    result[offset++] = count & 0xFF;
+
+    // Write each entry
+    for (final entry in generations.entries) {
+      // Leaf index
+      result[offset++] = (entry.key.value >> 24) & 0xFF;
+      result[offset++] = (entry.key.value >> 16) & 0xFF;
+      result[offset++] = (entry.key.value >> 8) & 0xFF;
+      result[offset++] = entry.key.value & 0xFF;
+      // Generation
+      result[offset++] = (entry.value >> 24) & 0xFF;
+      result[offset++] = (entry.value >> 16) & 0xFF;
+      result[offset++] = (entry.value >> 8) & 0xFF;
+      result[offset++] = entry.value & 0xFF;
     }
 
     return result;
@@ -345,10 +411,27 @@ class GroupState {
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
+    offset += 4;
     mls_crypto.PrivateKey? leafHpkePrivateKey;
     if (leafHpkePrivateKeyLength > 0) {
       final leafHpkePrivateKeyBytes = data.sublist(offset, offset + leafHpkePrivateKeyLength);
       leafHpkePrivateKey = DefaultPrivateKey(leafHpkePrivateKeyBytes);
+      offset += leafHpkePrivateKeyLength;
+    }
+
+    // Read generations map (if present, for backward compatibility)
+    Map<LeafIndex, int>? generations;
+    if (offset < data.length) {
+      try {
+        final generationsBytes = _readUint8List(data, offset);
+        generations = _deserializeGenerations(generationsBytes);
+      } catch (e) {
+        // Backward compatibility: if deserialization fails, use empty map
+        generations = {};
+      }
+    } else {
+      // No generations data (old format), use empty map
+      generations = {};
     }
 
     return GroupState(
@@ -358,7 +441,43 @@ class GroupState {
       secrets: secrets,
       identityPrivateKey: identityPrivateKey,
       leafHpkePrivateKey: leafHpkePrivateKey,
+      generations: generations,
     );
+  }
+
+  /// Deserialize generations map
+  static Map<LeafIndex, int> _deserializeGenerations(Uint8List data) {
+    final generations = <LeafIndex, int>{};
+    int offset = 0;
+
+    // Read count
+    final count = (data[offset] << 24) |
+        (data[offset + 1] << 16) |
+        (data[offset + 2] << 8) |
+        data[offset + 3];
+    offset += 4;
+
+    // Read each entry
+    for (int i = 0; i < count; i++) {
+      // Leaf index
+      final leafIndexValue = (data[offset] << 24) |
+          (data[offset + 1] << 16) |
+          (data[offset + 2] << 8) |
+          data[offset + 3];
+      offset += 4;
+      final leafIndex = LeafIndex(leafIndexValue);
+
+      // Generation
+      final generation = (data[offset] << 24) |
+          (data[offset + 1] << 16) |
+          (data[offset + 2] << 8) |
+          data[offset + 3];
+      offset += 4;
+
+      generations[leafIndex] = generation;
+    }
+
+    return generations;
   }
 
   static Uint8List _readUint8List(Uint8List data, int offset) {

@@ -362,10 +362,11 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
   /// Serialize public state (everything except private keys and epoch secrets)
   Uint8List _serializePublicState(GroupState state) {
-    // Serialize: context + tree + members
+    // Serialize: context + tree + members + generations
     final contextBytes = state.context.serialize();
     final treeBytes = state.tree.serialize();
     final membersBytes = _serializeMembers(state.members);
+    final generationsBytes = _serializeGenerations(state);
 
     final totalLength =
         4 +
@@ -373,7 +374,9 @@ class SecurePersistentMlsStorage implements MlsStorage {
         4 +
         treeBytes.length +
         4 +
-        membersBytes.length;
+        membersBytes.length +
+        4 +
+        generationsBytes.length;
 
     final result = Uint8List(totalLength);
     int offset = 0;
@@ -385,6 +388,40 @@ class SecurePersistentMlsStorage implements MlsStorage {
     offset += 4 + treeBytes.length;
 
     _writeUint8List(result, offset, membersBytes);
+    offset += 4 + membersBytes.length;
+
+    _writeUint8List(result, offset, generationsBytes);
+
+    return result;
+  }
+
+  /// Serialize generations map
+  Uint8List _serializeGenerations(GroupState state) {
+    final generations = state.generations;
+    // Format: count (4 bytes) + [leaf_index (4 bytes) + generation (4 bytes)]*
+    final count = generations.length;
+    final result = Uint8List(4 + (count * 8));
+    int offset = 0;
+
+    // Write count
+    result[offset++] = (count >> 24) & 0xFF;
+    result[offset++] = (count >> 16) & 0xFF;
+    result[offset++] = (count >> 8) & 0xFF;
+    result[offset++] = count & 0xFF;
+
+    // Write each entry
+    for (final entry in generations.entries) {
+      // Leaf index
+      result[offset++] = (entry.key.value >> 24) & 0xFF;
+      result[offset++] = (entry.key.value >> 16) & 0xFF;
+      result[offset++] = (entry.key.value >> 8) & 0xFF;
+      result[offset++] = entry.key.value & 0xFF;
+      // Generation
+      result[offset++] = (entry.value >> 24) & 0xFF;
+      result[offset++] = (entry.value >> 16) & 0xFF;
+      result[offset++] = (entry.value >> 8) & 0xFF;
+      result[offset++] = entry.value & 0xFF;
+    }
 
     return result;
   }
@@ -410,7 +447,23 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
     // Read members
     final membersBytes = _readUint8List(publicStateBytes, offset);
+    offset += 4 + membersBytes.length;
     final members = _deserializeMembers(membersBytes, _cryptoProvider);
+
+    // Read generations (if present, for backward compatibility)
+    Map<LeafIndex, int>? generations;
+    if (offset < publicStateBytes.length) {
+      try {
+        final generationsBytes = _readUint8List(publicStateBytes, offset);
+        generations = _deserializeGenerations(generationsBytes);
+      } catch (e) {
+        // Backward compatibility: if deserialization fails, use empty map
+        generations = {};
+      }
+    } else {
+      // No generations data (old format), use empty map
+      generations = {};
+    }
 
     // Deserialize epoch secrets
     final secrets = EpochSecrets.deserialize(epochSecretsBytes);
@@ -422,7 +475,43 @@ class SecurePersistentMlsStorage implements MlsStorage {
       secrets: secrets,
       identityPrivateKey: identityPrivateKey,
       leafHpkePrivateKey: leafHpkePrivateKey,
+      generations: generations,
     );
+  }
+
+  /// Deserialize generations map
+  Map<LeafIndex, int> _deserializeGenerations(Uint8List data) {
+    final generations = <LeafIndex, int>{};
+    int offset = 0;
+
+    // Read count
+    final count = (data[offset] << 24) |
+        (data[offset + 1] << 16) |
+        (data[offset + 2] << 8) |
+        data[offset + 3];
+    offset += 4;
+
+    // Read each entry
+    for (int i = 0; i < count; i++) {
+      // Leaf index
+      final leafIndexValue = (data[offset] << 24) |
+          (data[offset + 1] << 16) |
+          (data[offset + 2] << 8) |
+          data[offset + 3];
+      offset += 4;
+      final leafIndex = LeafIndex(leafIndexValue);
+
+      // Generation
+      final generation = (data[offset] << 24) |
+          (data[offset + 1] << 16) |
+          (data[offset + 2] << 8) |
+          data[offset + 3];
+      offset += 4;
+
+      generations[leafIndex] = generation;
+    }
+
+    return generations;
   }
 
   void _writeUint8List(Uint8List result, int offset, Uint8List data) {
