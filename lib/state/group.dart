@@ -659,6 +659,33 @@ class GroupState with ChangeNotifier {
     }
   }
 
+  /// Get the stored Nostr public key
+  Future<String?> getNostrPublicKey() async {
+    if (_keysGroup == null || _dbService?.database == null) {
+      return null;
+    }
+
+    try {
+      final groupIdHex = _keysGroup!.id.bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      final storedCiphertext = await _loadStoredNostrKeyCiphertext(groupIdHex);
+      if (storedCiphertext == null) {
+        return null;
+      }
+
+      final decrypted = await _keysGroup!.decryptApplicationMessage(
+        storedCiphertext,
+      );
+      final keyData = jsonDecode(String.fromCharCodes(decrypted));
+      return keyData['public'] as String?;
+    } catch (e) {
+      debugPrint('Failed to get Nostr public key: $e');
+      return null;
+    }
+  }
+
   Future<void> retryConnection() async {
     _errorMessage = null;
     _groups.clear();
