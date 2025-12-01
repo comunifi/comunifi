@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import '../group_state/group_state.dart';
 import '../crypto/crypto.dart';
@@ -77,5 +78,36 @@ class Welcome {
     required this.encryptedGroupSecrets,
     required this.encryptedGroupInfo,
   });
+
+  /// Serialize Welcome message to JSON string
+  /// Format: {"groupId": [hex bytes], "encryptedGroupSecrets": [base64], "encryptedGroupInfo": [base64]}
+  String toJson() {
+    final groupIdHex = groupId.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    return jsonEncode({
+      'groupId': groupIdHex,
+      'encryptedGroupSecrets': base64Encode(encryptedGroupSecrets),
+      'encryptedGroupInfo': base64Encode(encryptedGroupInfo),
+    });
+  }
+
+  /// Deserialize Welcome message from JSON string
+  factory Welcome.fromJson(String jsonString) {
+    final json = jsonDecode(jsonString) as Map<String, dynamic>;
+    final groupIdHex = json['groupId'] as String;
+    final groupIdBytes = <int>[];
+    for (int i = 0; i < groupIdHex.length; i += 2) {
+      groupIdBytes.add(int.parse(groupIdHex.substring(i, i + 2), radix: 16));
+    }
+    final groupId = GroupId(Uint8List.fromList(groupIdBytes));
+    final encryptedGroupSecrets = base64Decode(json['encryptedGroupSecrets'] as String);
+    final encryptedGroupInfo = base64Decode(json['encryptedGroupInfo'] as String);
+    return Welcome(
+      groupId: groupId,
+      encryptedGroupSecrets: encryptedGroupSecrets,
+      encryptedGroupInfo: encryptedGroupInfo,
+    );
+  }
 }
 

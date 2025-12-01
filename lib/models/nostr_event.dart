@@ -8,6 +8,9 @@ const int kindGroupAnnouncement = 40;
 /// Kind 1059: Encrypted envelope containing an encrypted Nostr event
 const int kindEncryptedEnvelope = 1059;
 
+/// Kind 1060: MLS Welcome message (encrypted invitation to join a group)
+const int kindMlsWelcome = 1060;
+
 class NostrEventModel {
   final String id;
   final String pubkey;

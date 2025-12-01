@@ -37,7 +37,7 @@ void main() {
         final initialEpoch = aliceGroup.epoch;
         final initialMemberCount = aliceGroup.memberCount;
 
-        final (commit, ciphertexts) = await aliceGroup.addMembers([
+        final (commit, ciphertexts, welcomes) = await aliceGroup.addMembers([
           addProposal,
         ]);
 
@@ -55,6 +55,9 @@ void main() {
         // Verify ciphertexts were created
         expect(ciphertexts.length, greaterThan(0));
         expect(ciphertexts[0].contentType, equals(MlsContentType.commit));
+
+        // Verify welcome messages were created
+        expect(welcomes.length, equals(1));
       });
 
       test('adds multiple members successfully', () async {
@@ -81,11 +84,12 @@ void main() {
 
         final initialMemberCount = aliceGroup.memberCount;
 
-        final (commit, _) = await aliceGroup.addMembers(addProposals);
+        final (commit, _, welcomes) = await aliceGroup.addMembers(addProposals);
 
         // Verify both members were added
         expect(aliceGroup.memberCount, equals(initialMemberCount + 2));
         expect(commit.proposals.length, equals(2));
+        expect(welcomes.length, equals(2));
       });
 
       test('throws error when adding empty list', () async {

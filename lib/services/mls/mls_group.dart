@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:math';
 import 'crypto/crypto.dart' as mls_crypto;
+import 'crypto/default_crypto.dart';
 import 'group_state/group_state.dart';
 import 'key_schedule/key_schedule.dart';
 import 'messages/messages.dart';
@@ -139,7 +141,8 @@ class MlsGroup {
   }
 
   /// Add members to the group
-  Future<(Commit, List<MlsCiphertext>)> addMembers(
+  /// Returns: (commit, commit ciphertexts, welcome messages)
+  Future<(Commit, List<MlsCiphertext>, List<Welcome>)> addMembers(
     List<AddProposal> adds,
   ) async {
     if (adds.isEmpty) {
@@ -219,10 +222,51 @@ class MlsGroup {
     final commitPlaintext = _serializeCommit(commit);
     final commitCiphertext = await _encryptCommit(commitPlaintext, newSecrets);
 
-    // Create Welcome messages for new members (simplified)
-    final welcomeMessages = <MlsCiphertext>[];
+    // Create Welcome messages for new members
+    final welcomeMessages = <Welcome>[];
+    for (int i = 0; i < adds.length; i++) {
+      final add = adds[i];
+      final newLeafIndex = newLeafIndices[i];
+      
+      // Serialize the new group state (public parts only - no private keys)
+      // In production, this would be a proper GroupInfo structure
+      final groupInfo = _serializeGroupInfo(newGroupContext, newTree, newMembers);
+      
+      // Encrypt group secrets for this new member using their HPKE public key
+      // The secrets include: init_secret, epoch secrets, and tree position
+      final groupSecrets = _serializeGroupSecrets(
+        newInitSecret,
+        newSecrets,
+        newLeafIndex,
+      );
+      
+      // Encrypt group secrets with new member's HPKE public key
+      final encapResult = await _crypto.hpke.setupBaseSender(
+        recipientPublicKey: add.hpkeInitKey,
+        info: Uint8List.fromList(utf8.encode('mls-welcome')),
+      );
+      final encryptedGroupSecrets = await encapResult.context.seal(
+        plaintext: groupSecrets,
+        aad: Uint8List(0),
+      );
+      
+      // Encrypt group info (simplified - in production would use proper encryption)
+      // For now, we'll encrypt it with the same HPKE context
+      final encryptedGroupInfo = await encapResult.context.seal(
+        plaintext: groupInfo,
+        aad: Uint8List(0),
+      );
+      
+      final welcome = Welcome(
+        groupId: id,
+        encryptedGroupSecrets: encryptedGroupSecrets,
+        encryptedGroupInfo: encryptedGroupInfo,
+      );
+      
+      welcomeMessages.add(welcome);
+    }
 
-    return (commit, [commitCiphertext, ...welcomeMessages]);
+    return (commit, [commitCiphertext], welcomeMessages);
   }
 
   /// Remove members from the group
@@ -492,29 +536,196 @@ class MlsGroup {
     required mls_crypto.PrivateKey hpkePrivateKey,
     required mls_crypto.MlsCryptoProvider cryptoProvider,
     required MlsStorage storage,
+    String? userId,
   }) async {
-    // Decrypt group secrets from Welcome (simplified)
-    // In production, would decrypt using HPKE with hpkePrivateKey
-    // For now, we'll use the group ID to load existing state
-
-    // Extract group ID and reconstruct state (simplified)
-    // In production, would properly deserialize group info
     final groupId = GroupId(welcome.groupId.bytes);
 
-    // Load existing state if available
-    var state = await storage.loadGroupState(groupId);
-    if (state == null) {
-      // Create minimal state from Welcome (simplified)
-      // In production, would properly reconstruct from Welcome message
-      throw MlsError(
-        'Cannot join group - state reconstruction not fully implemented',
-      );
-    }
-
-    // Load group name
-    final groupName = await storage.loadGroupName(groupId) ?? 'Joined Group';
+    // Decrypt group secrets using HPKE
+    final hpkeContext = await cryptoProvider.hpke.setupBaseRecipient(
+      enc: welcome.encryptedGroupSecrets, // In production, extract 'enc' from encryptedGroupSecrets
+      recipientPrivateKey: hpkePrivateKey,
+      info: Uint8List.fromList(utf8.encode('mls-welcome')),
+    );
+    
+    // For now, we'll decrypt the encryptedGroupSecrets directly
+    // In production, encryptedGroupSecrets would contain the 'enc' value separately
+    // Simplified: assume encryptedGroupSecrets is the full encrypted blob
+    final decryptedSecrets = await hpkeContext.open(
+      ciphertext: welcome.encryptedGroupSecrets,
+      aad: Uint8List(0),
+    );
+    
+    // Decrypt group info
+    final decryptedGroupInfo = await hpkeContext.open(
+      ciphertext: welcome.encryptedGroupInfo,
+      aad: Uint8List(0),
+    );
+    
+    // Deserialize group secrets
+    final (initSecret, secrets, leafIndex) = _deserializeGroupSecrets(decryptedSecrets);
+    
+    // Deserialize group info
+    final (context, tree, members) = _deserializeGroupInfo(decryptedGroupInfo);
+    
+    // Generate identity key pair for this member (if not provided)
+    final identityKeyPair = await cryptoProvider.signatureScheme.generateKeyPair();
+    
+    // Create group state
+    final state = GroupState(
+      context: context,
+      tree: tree,
+      members: members,
+      secrets: secrets,
+      identityPrivateKey: identityKeyPair.privateKey,
+      leafHpkePrivateKey: hpkePrivateKey,
+    );
+    
+    // Save state
+    await storage.saveGroupState(state);
+    
+    // Load or set group name
+    final groupName = await storage.loadGroupName(groupId) ?? 
+        (userId != null ? 'Group with $userId' : 'Joined Group');
+    await storage.saveGroupName(groupId, groupName);
 
     return MlsGroup(groupId, groupName, state, cryptoProvider, storage);
+  }
+
+  /// Deserialize group secrets from Welcome message
+  static (Uint8List, EpochSecrets, LeafIndex) _deserializeGroupSecrets(
+    Uint8List data,
+  ) {
+    int offset = 0;
+    
+    // Read init secret
+    final initSecretLength = (data[offset] << 24) | 
+        (data[offset + 1] << 16) | 
+        (data[offset + 2] << 8) | 
+        data[offset + 3];
+    offset += 4;
+    final initSecret = data.sublist(offset, offset + initSecretLength);
+    offset += initSecretLength;
+    
+    // Read epoch secrets
+    final secretsLength = (data[offset] << 24) | 
+        (data[offset + 1] << 16) | 
+        (data[offset + 2] << 8) | 
+        data[offset + 3];
+    offset += 4;
+    final secretsBytes = data.sublist(offset, offset + secretsLength);
+    offset += secretsLength;
+    final secrets = EpochSecrets.deserialize(secretsBytes);
+    
+    // Read leaf index
+    final leafIndexValue = (data[offset] << 24) | 
+        (data[offset + 1] << 16) | 
+        (data[offset + 2] << 8) | 
+        data[offset + 3];
+    final leafIndex = LeafIndex(leafIndexValue);
+    
+    return (initSecret, secrets, leafIndex);
+  }
+
+  /// Deserialize group info from Welcome message
+  static (GroupContext, RatchetTree, Map<LeafIndex, GroupMember>) _deserializeGroupInfo(
+    Uint8List data,
+  ) {
+    int offset = 0;
+    
+    // Read context
+    final contextLength = (data[offset] << 24) | 
+        (data[offset + 1] << 16) | 
+        (data[offset + 2] << 8) | 
+        data[offset + 3];
+    offset += 4;
+    final contextBytes = data.sublist(offset, offset + contextLength);
+    offset += contextLength;
+    final context = GroupContext.deserialize(contextBytes);
+    
+    // Read tree
+    final treeLength = (data[offset] << 24) | 
+        (data[offset + 1] << 16) | 
+        (data[offset + 2] << 8) | 
+        data[offset + 3];
+    offset += 4;
+    final treeBytes = data.sublist(offset, offset + treeLength);
+    offset += treeLength;
+    final tree = RatchetTree.deserialize(treeBytes);
+    
+    // Read members
+    final membersLength = (data[offset] << 24) | 
+        (data[offset + 1] << 16) | 
+        (data[offset + 2] << 8) | 
+        data[offset + 3];
+    offset += 4;
+    final membersBytes = data.sublist(offset, offset + membersLength);
+    final members = _deserializeMembersPublic(membersBytes);
+    
+    return (context, tree, members);
+  }
+
+  /// Deserialize members (public keys only)
+  static Map<LeafIndex, GroupMember> _deserializeMembersPublic(Uint8List data) {
+    final members = <LeafIndex, GroupMember>{};
+    int offset = 0;
+    
+    // Read count
+    final count = (data[offset] << 24) | 
+        (data[offset + 1] << 16) | 
+        (data[offset + 2] << 8) | 
+        data[offset + 3];
+    offset += 4;
+    
+    // Read each member
+    for (int i = 0; i < count; i++) {
+      // Leaf index
+      final leafIndexValue = (data[offset] << 24) | 
+          (data[offset + 1] << 16) | 
+          (data[offset + 2] << 8) | 
+          data[offset + 3];
+      offset += 4;
+      final leafIndex = LeafIndex(leafIndexValue);
+      
+      // User ID
+      final userIdLength = (data[offset] << 24) | 
+          (data[offset + 1] << 16) | 
+          (data[offset + 2] << 8) | 
+          data[offset + 3];
+      offset += 4;
+      final userIdBytes = data.sublist(offset, offset + userIdLength);
+      offset += userIdLength;
+      final userId = utf8.decode(userIdBytes);
+      
+      // Identity key
+      final identityKeyLength = (data[offset] << 24) | 
+          (data[offset + 1] << 16) | 
+          (data[offset + 2] << 8) | 
+          data[offset + 3];
+      offset += 4;
+      final identityKeyBytes = data.sublist(offset, offset + identityKeyLength);
+      offset += identityKeyLength;
+      // Create PublicKey from bytes (simplified - would use proper key type)
+      final identityKey = DefaultPublicKey(identityKeyBytes);
+      
+      // HPKE public key
+      final hpkeKeyLength = (data[offset] << 24) | 
+          (data[offset + 1] << 16) | 
+          (data[offset + 2] << 8) | 
+          data[offset + 3];
+      offset += 4;
+      final hpkeKeyBytes = data.sublist(offset, offset + hpkeKeyLength);
+      offset += hpkeKeyLength;
+      final hpkePublicKey = DefaultPublicKey(hpkeKeyBytes);
+      
+      members[leafIndex] = GroupMember(
+        userId: userId,
+        leafIndex: leafIndex,
+        identityKey: identityKey,
+        hpkePublicKey: hpkePublicKey,
+      );
+    }
+    
+    return members;
   }
 
   // Helper methods
@@ -622,6 +833,123 @@ class MlsGroup {
       ciphertext: ciphertext,
       contentType: MlsContentType.commit,
     );
+  }
+
+  /// Serialize group info (public state) for Welcome message
+  Uint8List _serializeGroupInfo(
+    GroupContext context,
+    RatchetTree tree,
+    Map<LeafIndex, GroupMember> members,
+  ) {
+    // Serialize: context + tree + members (public info only)
+    final contextBytes = context.serialize();
+    final treeBytes = tree.serialize();
+    
+    // Serialize members (public keys only)
+    final membersBytes = _serializeMembersPublic(members);
+    
+    final totalLength = 4 + contextBytes.length + 4 + treeBytes.length + 4 + membersBytes.length;
+    final result = Uint8List(totalLength);
+    int offset = 0;
+    
+    _writeUint8List(result, offset, contextBytes);
+    offset += 4 + contextBytes.length;
+    
+    _writeUint8List(result, offset, treeBytes);
+    offset += 4 + treeBytes.length;
+    
+    _writeUint8List(result, offset, membersBytes);
+    
+    return result;
+  }
+
+  /// Serialize group secrets for Welcome message
+  Uint8List _serializeGroupSecrets(
+    Uint8List initSecret,
+    EpochSecrets secrets,
+    LeafIndex leafIndex,
+  ) {
+    // Serialize: init_secret + epoch_secrets + leaf_index
+    final secretsBytes = secrets.serialize();
+    final leafIndexBytes = Uint8List(4);
+    leafIndexBytes[0] = (leafIndex.value >> 24) & 0xFF;
+    leafIndexBytes[1] = (leafIndex.value >> 16) & 0xFF;
+    leafIndexBytes[2] = (leafIndex.value >> 8) & 0xFF;
+    leafIndexBytes[3] = leafIndex.value & 0xFF;
+    
+    final totalLength = 4 + initSecret.length + 4 + secretsBytes.length + 4 + leafIndexBytes.length;
+    final result = Uint8List(totalLength);
+    int offset = 0;
+    
+    _writeUint8List(result, offset, initSecret);
+    offset += 4 + initSecret.length;
+    
+    _writeUint8List(result, offset, secretsBytes);
+    offset += 4 + secretsBytes.length;
+    
+    _writeUint8List(result, offset, leafIndexBytes);
+    
+    return result;
+  }
+
+  /// Serialize members (public keys only)
+  Uint8List _serializeMembersPublic(Map<LeafIndex, GroupMember> members) {
+    // Format: count (4 bytes) + [leaf_index (4) + user_id_len (4) + user_id + identity_key_len (4) + identity_key + hpke_key_len (4) + hpke_key]*
+    final count = members.length;
+    var totalLength = 4; // count
+    
+    for (final member in members.values) {
+      totalLength += 4; // leaf_index
+      totalLength += 4 + utf8.encode(member.userId).length; // user_id
+      totalLength += 4 + member.identityKey.bytes.length; // identity_key
+      totalLength += 4 + member.hpkePublicKey.bytes.length; // hpke_key
+    }
+    
+    final result = Uint8List(totalLength);
+    int offset = 0;
+    
+    // Write count
+    result[offset++] = (count >> 24) & 0xFF;
+    result[offset++] = (count >> 16) & 0xFF;
+    result[offset++] = (count >> 8) & 0xFF;
+    result[offset++] = count & 0xFF;
+    
+    // Write each member
+    for (final entry in members.entries) {
+      final leafIndex = entry.key;
+      final member = entry.value;
+      
+      // Leaf index
+      result[offset++] = (leafIndex.value >> 24) & 0xFF;
+      result[offset++] = (leafIndex.value >> 16) & 0xFF;
+      result[offset++] = (leafIndex.value >> 8) & 0xFF;
+      result[offset++] = leafIndex.value & 0xFF;
+      
+      // User ID
+      final userIdBytes = utf8.encode(member.userId);
+      _writeUint8List(result, offset, userIdBytes);
+      offset += 4 + userIdBytes.length;
+      
+      // Identity key
+      _writeUint8List(result, offset, member.identityKey.bytes);
+      offset += 4 + member.identityKey.bytes.length;
+      
+      // HPKE public key
+      _writeUint8List(result, offset, member.hpkePublicKey.bytes);
+      offset += 4 + member.hpkePublicKey.bytes.length;
+    }
+    
+    return result;
+  }
+
+  /// Helper to write Uint8List with length prefix
+  void _writeUint8List(Uint8List target, int offset, Uint8List data) {
+    final length = data.length;
+    target[offset++] = (length >> 24) & 0xFF;
+    target[offset++] = (length >> 16) & 0xFF;
+    target[offset++] = (length >> 8) & 0xFF;
+    target[offset++] = length & 0xFF;
+    target.setRange(offset, offset + length, data);
   }
 }
 

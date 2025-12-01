@@ -12,6 +12,7 @@ import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/services/mls/group_state/group_state.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
+import 'package:comunifi/services/mls/crypto/default_crypto.dart';
 import 'package:comunifi/services/db/app_db.dart';
 
 // Import MlsGroupTable for listing groups
@@ -21,8 +22,12 @@ import 'package:comunifi/models/nostr_event.dart'
     show
         kindEncryptedEnvelope,
         kindGroupAnnouncement,
+        kindMlsWelcome,
         NostrEventModel,
         addClientIdTag;
+import 'package:comunifi/services/mls/messages/messages.dart'
+    show AddProposal, Welcome;
+import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -52,6 +57,7 @@ class GroupState with ChangeNotifier {
   SecurePersistentMlsStorage? _mlsStorage;
   AppDBService? _dbService;
   MlsGroup? _keysGroup;
+  bool _wasNewNostrKeyGenerated = false;
 
   // Map of group ID (hex) to MLS group for quick lookup
   final Map<String, MlsGroup> _mlsGroups = {};
@@ -99,6 +105,8 @@ class GroupState with ChangeNotifier {
           safeNotifyListeners();
           _loadSavedGroups();
           _startListeningForGroupEvents();
+          // Create personal group if new key was generated
+          _ensurePersonalGroup();
         } else {
           _isConnected = false;
           _errorMessage = 'Failed to connect to relay';
@@ -202,6 +210,9 @@ class GroupState with ChangeNotifier {
       final ciphertext = await _keysGroup!.encryptApplicationMessage(keyBytes);
 
       await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
+
+      // Mark that a new key was generated - we'll create personal group after relay connection
+      _wasNewNostrKeyGenerated = true;
 
       debugPrint('Generated and stored new Nostr key: ${keyPair.public}');
     } catch (e) {
@@ -521,9 +532,31 @@ class GroupState with ChangeNotifier {
 
   /// Start listening for new group events
   /// Note: Groups are now MLS-based, so we just refresh the list periodically
+  /// Also listens for Welcome messages (kind 1060)
   void _startListeningForGroupEvents() {
     // Groups are managed through MLS, so we don't need to listen for kind 40 events
     // Instead, we'll refresh the groups list when needed
+
+    // Listen for Welcome messages (kind 1060)
+    if (_nostrService == null || !_isConnected) return;
+
+    try {
+      _nostrService!
+          .listenToEvents(kind: kindMlsWelcome, limit: null)
+          .listen(
+            (event) {
+              // Handle Welcome invitation
+              handleWelcomeInvitation(event).catchError((error) {
+                debugPrint('Error handling Welcome invitation: $error');
+              });
+            },
+            onError: (error) {
+              debugPrint('Error listening to Welcome messages: $error');
+            },
+          );
+    } catch (e) {
+      debugPrint('Failed to start listening for Welcome messages: $e');
+    }
   }
 
   /// Start listening for new messages in the active group
@@ -823,5 +856,272 @@ class GroupState with ChangeNotifier {
       mlsGroupId: mlsGroupId,
       createdAt: event.createdAt,
     );
+  }
+
+  /// Invite a member to the active group
+  ///
+  /// [inviteeNostrPubkey] - The Nostr public key of the person to invite
+  /// [inviteeIdentityKey] - The invitee's MLS identity public key
+  /// [inviteeHpkePublicKey] - The invitee's MLS HPKE public key
+  /// [inviteeUserId] - The invitee's user ID (e.g., their Nostr pubkey or username)
+  ///
+  /// This will:
+  /// 1. Create an AddProposal with the invitee's keys
+  /// 2. Add them to the group (advances epoch)
+  /// 3. Create a Welcome message
+  /// 4. Send the Welcome message to the invitee via Nostr (kind 1060)
+  Future<void> inviteMember({
+    required String inviteeNostrPubkey,
+    required mls_crypto.PublicKey inviteeIdentityKey,
+    required mls_crypto.PublicKey inviteeHpkePublicKey,
+    required String inviteeUserId,
+  }) async {
+    if (_activeGroup == null) {
+      throw Exception('No active group selected. Please select a group first.');
+    }
+
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    if (_mlsService == null) {
+      throw Exception('MLS service not initialized');
+    }
+
+    try {
+      // Create AddProposal
+      final addProposal = AddProposal(
+        identityKey: inviteeIdentityKey,
+        hpkeInitKey: inviteeHpkePublicKey,
+        userId: inviteeUserId,
+      );
+
+      // Add member to group (this creates Welcome message)
+      final (commit, commitCiphertexts, welcomeMessages) = await _activeGroup!
+          .addMembers([addProposal]);
+
+      if (welcomeMessages.isEmpty) {
+        throw Exception('Failed to create Welcome message');
+      }
+
+      final welcome = welcomeMessages.first;
+
+      // Serialize Welcome message
+      final welcomeJson = welcome.toJson();
+
+      // Get our Nostr private key for signing
+      final privateKey = await _getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+      final groupIdHex = _groupIdToHex(_activeGroup!.id);
+
+      // Create kind 1060 event (MLS Welcome message)
+      final welcomeEvent = NostrEvent.fromPartialData(
+        kind: kindMlsWelcome,
+        content: welcomeJson,
+        keyPairs: keyPair,
+        tags: [
+          ['p', inviteeNostrPubkey], // Recipient
+          ['g', groupIdHex], // Group ID
+          ...addClientIdTag([]),
+        ],
+        createdAt: DateTime.now(),
+      );
+
+      final welcomeEventModel = NostrEventModel(
+        id: welcomeEvent.id,
+        pubkey: welcomeEvent.pubkey,
+        kind: welcomeEvent.kind,
+        content: welcomeEvent.content,
+        tags: welcomeEvent.tags,
+        sig: welcomeEvent.sig,
+        createdAt: welcomeEvent.createdAt,
+      );
+
+      // Publish Welcome message to relay
+      // Note: In production, you might want to encrypt this with the invitee's Nostr pubkey
+      // For now, we'll send it as a public event (kind 1060) that only the invitee can decrypt
+      await _nostrService!.publishEvent(welcomeEventModel.toJson());
+
+      debugPrint(
+        'Sent Welcome message to $inviteeUserId for group ${_activeGroup!.name}',
+      );
+
+      // Update groups list to reflect new member
+      await _loadSavedGroups();
+    } catch (e) {
+      debugPrint('Failed to invite member: $e');
+      rethrow;
+    }
+  }
+
+  /// Handle receiving a Welcome message invitation
+  ///
+  /// This should be called when a kind 1060 event is received from the relay
+  /// [welcomeEvent] - The Nostr event containing the Welcome message
+  /// [hpkePrivateKey] - Optional HPKE private key to decrypt the Welcome.
+  ///                    If not provided, a new key pair will be generated (not recommended).
+  ///                    The invitee should use the same HPKE private key that corresponds
+  ///                    to the public key they shared when being invited.
+  ///
+  /// This will:
+  /// 1. Deserialize the Welcome message
+  /// 2. Join the group using joinFromWelcome
+  /// 3. Add the group to the groups list
+  /// 4. Update the UI
+  Future<void> handleWelcomeInvitation(
+    NostrEventModel welcomeEvent, {
+    mls_crypto.PrivateKey? hpkePrivateKey,
+  }) async {
+    if (welcomeEvent.kind != kindMlsWelcome) {
+      throw Exception('Event is not a Welcome message (kind 1060)');
+    }
+
+    // Check if this Welcome is for us (check 'p' tag)
+    final recipientPubkey =
+        welcomeEvent.tags
+                .firstWhere(
+                  (tag) => tag.isNotEmpty && tag[0] == 'p',
+                  orElse: () => [],
+                )
+                .length >
+            1
+        ? welcomeEvent.tags.firstWhere(
+            (tag) => tag.isNotEmpty && tag[0] == 'p',
+          )[1]
+        : null;
+
+    if (recipientPubkey == null) {
+      debugPrint('Welcome message has no recipient tag');
+      return;
+    }
+
+    // Check if this Welcome is for our Nostr pubkey
+    final ourPubkey = await getNostrPublicKey();
+    if (ourPubkey != recipientPubkey) {
+      debugPrint(
+        'Welcome message is not for us (ours: $ourPubkey, theirs: $recipientPubkey)',
+      );
+      return;
+    }
+
+    if (_mlsService == null || _mlsStorage == null) {
+      throw Exception('MLS service not initialized');
+    }
+
+    try {
+      // Deserialize Welcome message
+      final welcome = Welcome.fromJson(welcomeEvent.content);
+
+      // Get our HPKE private key
+      // The invitee must use the same HPKE private key that corresponds to the
+      // public key they shared when being invited. This should be stored securely.
+      // TODO: Implement key storage/retrieval mechanism
+      final cryptoProvider = DefaultMlsCryptoProvider();
+      final hpkePrivateKeyToUse =
+          hpkePrivateKey ??
+          (await cryptoProvider.hpke.generateKeyPair()).privateKey;
+
+      if (hpkePrivateKey == null) {
+        debugPrint(
+          'Warning: Generating new HPKE key pair. This may not match the public key used for invitation.',
+        );
+      }
+
+      // Join the group
+      final group = await MlsGroup.joinFromWelcome(
+        welcome: welcome,
+        hpkePrivateKey: hpkePrivateKeyToUse,
+        cryptoProvider: cryptoProvider,
+        storage: _mlsStorage!,
+        userId: ourPubkey,
+      );
+
+      // Cache the group
+      final groupIdHex = _groupIdToHex(group.id);
+      _mlsGroups[groupIdHex] = group;
+
+      // Add to groups list
+      if (!_groups.any(
+        (g) => g.id.bytes.toString() == group.id.bytes.toString(),
+      )) {
+        _groups.insert(0, group);
+      }
+
+      // Update UI
+      safeNotifyListeners();
+
+      debugPrint('Successfully joined group ${group.name} (${groupIdHex})');
+    } catch (e) {
+      debugPrint('Failed to handle Welcome invitation: $e');
+      rethrow;
+    }
+  }
+
+  /// Ensure a personal MLS group exists for the user's Nostr key
+  /// This is called after connecting to the relay when a new key was generated
+  Future<void> _ensurePersonalGroup() async {
+    // Only create personal group if a new key was generated
+    if (!_wasNewNostrKeyGenerated) {
+      return;
+    }
+
+    if (!_isConnected || _nostrService == null || _mlsService == null) {
+      return;
+    }
+
+    try {
+      // Get user's pubkey
+      final pubkey = await getNostrPublicKey();
+      if (pubkey == null) {
+        debugPrint('No pubkey available, skipping personal group creation');
+        return;
+      }
+
+      // Check if a personal group already exists by looking for group announcements
+      // with our pubkey
+      final existingGroups = await fetchGroupsFromRelay(
+        limit: 1000,
+        useCache: false,
+      );
+      final hasPersonalGroup = existingGroups.any(
+        (announcement) => announcement.pubkey == pubkey,
+      );
+
+      if (hasPersonalGroup) {
+        debugPrint('Personal group already exists for pubkey: $pubkey');
+        _wasNewNostrKeyGenerated = false; // Reset flag
+        return;
+      }
+
+      // Check if we have a local group that might be the personal group
+      // (in case it was created but not yet published)
+      final hasLocalPersonalGroup = _groups.any((group) {
+        // Check if group name suggests it's personal
+        final name = group.name.toLowerCase();
+        return name == 'personal' ||
+            name == 'my group' ||
+            name == pubkey.substring(0, 8);
+      });
+
+      if (hasLocalPersonalGroup) {
+        debugPrint('Local personal group already exists');
+        _wasNewNostrKeyGenerated = false; // Reset flag
+        return;
+      }
+
+      // Create personal group
+      debugPrint('Creating personal MLS group for pubkey: $pubkey');
+      await createGroup('Personal', about: 'My personal group');
+
+      _wasNewNostrKeyGenerated = false; // Reset flag
+      debugPrint('Personal group created successfully');
+    } catch (e) {
+      debugPrint('Failed to ensure personal group: $e');
+      // Don't throw - this is not critical for app functionality
+    }
   }
 }
