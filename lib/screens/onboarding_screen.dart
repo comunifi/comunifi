@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 
 /// Helper class to combine discovered and local groups
@@ -28,11 +29,26 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   bool _isFetchingGroups = false;
   String? _fetchGroupsError;
   String? _userNostrPubkey;
+  String? _userUsername;
   bool _hasFetchedOnConnect = false;
 
   @override
   void initState() {
     super.initState();
+    // Set up profile callback in GroupState
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final groupState = context.read<GroupState>();
+      final profileState = context.read<ProfileState>();
+
+      // Set callback so GroupState can trigger profile creation
+      groupState.setEnsureProfileCallback((pubkey, privateKey) async {
+        await profileState.ensureUserProfile(
+          pubkey: pubkey,
+          privateKey: privateKey,
+        );
+      });
+    });
+
     // Fetch groups from relay when screen loads
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _loadUserPubkey();
@@ -42,10 +58,31 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   Future<void> _loadUserPubkey() async {
     final groupState = context.read<GroupState>();
+    final profileState = context.read<ProfileState>();
     final pubkey = await groupState.getNostrPublicKey();
     setState(() {
       _userNostrPubkey = pubkey;
     });
+
+    // Ensure user has a profile (will create one if needed)
+    if (pubkey != null) {
+      final privateKey = await groupState.getNostrPrivateKey();
+      if (privateKey != null) {
+        // Use GroupState's keys to ensure profile exists
+        await profileState.ensureUserProfile(
+          pubkey: pubkey,
+          privateKey: privateKey,
+        );
+      }
+
+      // Load username
+      final profile = await profileState.getProfile(pubkey);
+      if (mounted) {
+        setState(() {
+          _userUsername = profile?.getUsername();
+        });
+      }
+    }
   }
 
   @override
@@ -170,6 +207,51 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                // User info and connection status
+                if (_userUsername != null || _userNostrPubkey != null)
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemBlue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: CupertinoColors.systemBlue),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          CupertinoIcons.person_fill,
+                          color: CupertinoColors.systemBlue,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (_userUsername != null)
+                                Text(
+                                  _userUsername!,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              if (_userNostrPubkey != null)
+                                Text(
+                                  _userNostrPubkey!.length > 20
+                                      ? '${_userNostrPubkey!.substring(0, 10)}...${_userNostrPubkey!.substring(_userNostrPubkey!.length - 10)}'
+                                      : _userNostrPubkey!,
+                                  style: const TextStyle(
+                                    color: CupertinoColors.secondaryLabel,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 // Connection status
                 Container(
                   padding: const EdgeInsets.all(12),

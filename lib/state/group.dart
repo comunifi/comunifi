@@ -62,8 +62,37 @@ class GroupState with ChangeNotifier {
   // Map of group ID (hex) to MLS group for quick lookup
   final Map<String, MlsGroup> _mlsGroups = {};
 
+  // Callback to ensure user profile (set by widgets that have access to ProfileState)
+  Future<void> Function(String pubkey, String privateKey)?
+  _ensureProfileCallback;
+
   GroupState() {
     _initialize();
+  }
+
+  /// Set callback to ensure user profile (called by widgets with access to ProfileState)
+  void setEnsureProfileCallback(
+    Future<void> Function(String pubkey, String privateKey) callback,
+  ) {
+    _ensureProfileCallback = callback;
+    // If we already have keys, call it immediately
+    _tryEnsureProfile();
+  }
+
+  /// Try to ensure profile if we have keys and callback is set
+  Future<void> _tryEnsureProfile() async {
+    if (_ensureProfileCallback == null) return;
+
+    try {
+      final pubkey = await getNostrPublicKey();
+      final privateKey = await getNostrPrivateKey();
+      if (pubkey != null && privateKey != null) {
+        debugPrint('GroupState: Ensuring user profile with keys');
+        await _ensureProfileCallback!(pubkey, privateKey);
+      }
+    } catch (e) {
+      debugPrint('GroupState: Failed to ensure profile: $e');
+    }
   }
 
   Future<void> _initialize() async {
@@ -107,6 +136,8 @@ class GroupState with ChangeNotifier {
           _startListeningForGroupEvents();
           // Create personal group if new key was generated
           _ensurePersonalGroup();
+          // Try to ensure user profile if callback is set
+          _tryEnsureProfile();
         } else {
           _isConnected = false;
           _errorMessage = 'Failed to connect to relay';
@@ -417,7 +448,7 @@ class GroupState with ChangeNotifier {
 
       // Publish group announcement to relay (kind 40)
       try {
-        final privateKey = await _getNostrPrivateKey();
+        final privateKey = await getNostrPrivateKey();
         if (privateKey != null && privateKey.isNotEmpty) {
           final keyPair = NostrKeyPairs(private: privateKey);
 
@@ -502,31 +533,71 @@ class GroupState with ChangeNotifier {
     if (_nostrService == null || !_isConnected) return;
 
     try {
-      final groupIdHex = _groupIdToHex(group.id);
+      _isLoading = true;
+      safeNotifyListeners();
 
-      // Request past encrypted envelopes (kind 1059) for this group
+      final groupIdHex = _groupIdToHex(group.id);
+      debugPrint('Loading messages for group: $groupIdHex');
+
+      // First, try to get decrypted messages from cache (kind 1 with 'g' tag)
+      // These are messages that were already decrypted and cached
+      final cachedDecrypted = await _nostrService!.queryCachedEvents(
+        kind: 1, // Text notes (decrypted messages)
+        tagKey: 'g',
+        tagValue: groupIdHex,
+        limit: 200,
+      );
+
+      debugPrint('Found ${cachedDecrypted.length} cached decrypted messages');
+
+      // Also request past encrypted envelopes (kind 1059) for this group
+      // Note: requestPastEvents will automatically decrypt envelopes if possible
+      // Events that can't be decrypted will be silently skipped
       final pastEvents = await _nostrService!.requestPastEvents(
         kind: kindEncryptedEnvelope,
         tags: [groupIdHex], // Filter by 'g' tag
         limit: 200,
+        useCache: false, // We already checked cache for decrypted events
       );
 
-      // Filter events that have the group tag matching this group
-      // Note: Events are decrypted, so we check for 'g' tag in the event tags
-      _groupMessages = pastEvents.where((event) {
+      debugPrint('Received ${pastEvents.length} events from relay');
+
+      // Combine cached decrypted messages and newly decrypted events
+      // Use a map to deduplicate by event ID
+      final allEvents = <String, NostrEventModel>{};
+
+      // Add cached decrypted messages
+      for (final event in cachedDecrypted) {
+        allEvents[event.id] = event;
+      }
+
+      // Add newly decrypted events from relay
+      for (final event in pastEvents) {
         // Check if event has 'g' tag with matching group ID
-        return event.tags.any(
+        final hasGroupTag = event.tags.any(
           (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
         );
-      }).toList();
+        if (hasGroupTag) {
+          allEvents[event.id] = event;
+        }
+      }
+
+      _groupMessages = allEvents.values.toList();
+
+      debugPrint(
+        'Total ${_groupMessages.length} messages for group $groupIdHex',
+      );
 
       _groupMessages.sort(
         (a, b) => b.createdAt.compareTo(a.createdAt),
       ); // Newest first
 
+      _isLoading = false;
       safeNotifyListeners();
     } catch (e) {
+      _isLoading = false;
       debugPrint('Failed to load group messages: $e');
+      safeNotifyListeners();
     }
   }
 
@@ -605,7 +676,7 @@ class GroupState with ChangeNotifier {
     }
 
     try {
-      final privateKey = await _getNostrPrivateKey();
+      final privateKey = await getNostrPrivateKey();
       if (privateKey == null || privateKey.isEmpty) {
         throw Exception(
           'No Nostr key found. Please ensure keys are initialized.',
@@ -666,7 +737,7 @@ class GroupState with ChangeNotifier {
   }
 
   /// Get the stored Nostr private key
-  Future<String?> _getNostrPrivateKey() async {
+  Future<String?> getNostrPrivateKey() async {
     if (_keysGroup == null || _dbService?.database == null) {
       return null;
     }
@@ -910,7 +981,7 @@ class GroupState with ChangeNotifier {
       final welcomeJson = welcome.toJson();
 
       // Get our Nostr private key for signing
-      final privateKey = await _getNostrPrivateKey();
+      final privateKey = await getNostrPrivateKey();
       if (privateKey == null || privateKey.isEmpty) {
         throw Exception('No Nostr key found');
       }

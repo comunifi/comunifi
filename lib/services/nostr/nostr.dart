@@ -349,21 +349,21 @@ class NostrService {
       // Get MLS group ID from envelope
       final groupIdHex = envelope.encryptedEnvelopeMlsGroupId;
       if (groupIdHex == null || _mlsGroupResolver == null) {
-        debugPrint('Cannot decrypt envelope: missing group ID or MLS resolver');
+        // Silently skip if we can't decrypt - this is expected for envelopes we're not part of
         return;
       }
 
       // Resolve MLS group
       final mlsGroup = await _mlsGroupResolver!(groupIdHex);
       if (mlsGroup == null) {
-        debugPrint('Cannot decrypt envelope: MLS group not found: $groupIdHex');
+        // Silently skip if we don't have the group - this is expected for envelopes we're not part of
         return;
       }
 
       // Get encrypted content
       final encryptedContent = envelope.getEncryptedContent();
       if (encryptedContent == null) {
-        debugPrint('Cannot decrypt envelope: no encrypted content');
+        // Silently skip if no encrypted content
         return;
       }
 
@@ -383,7 +383,7 @@ class NostrService {
       );
 
       if (decryptedBytes == null) {
-        debugPrint('Failed to decrypt envelope');
+        // Silently skip if decryption fails - this is expected for envelopes we can't decrypt
         return;
       }
 
@@ -402,7 +402,13 @@ class NostrService {
         controller.add(decryptedEvent);
       }
     } catch (e) {
-      debugPrint('Error decrypting envelope: $e');
+      // Silently skip decryption errors - these are expected for envelopes we can't decrypt
+      // Only log if it's an unexpected error type
+      if (e.toString().contains('MlsError')) {
+        // This is expected - we can't decrypt envelopes we're not part of
+        return;
+      }
+      debugPrint('Unexpected error decrypting envelope: $e');
     }
   }
 
@@ -433,8 +439,8 @@ class NostrService {
 
         return await mlsGroup.decryptApplicationMessage(ciphertext);
       } catch (e) {
-        // If JSON parsing fails, try direct decryption (simplified)
-        debugPrint('Failed to parse MLS ciphertext JSON: $e');
+        // If JSON parsing or decryption fails, return null silently
+        // This is expected for envelopes we can't decrypt
         return null;
       }
     } catch (e) {
@@ -818,10 +824,18 @@ class NostrService {
     }
 
     // If tags is provided, extract tag key and value
-    // Assuming tags are hashtags (tag 't')
+    // Check if tags look like group IDs (hex strings of 32 or 64 chars) - use 'g' tag
+    // Otherwise assume they're hashtags (tag 't')
     if (tags != null && tags.isNotEmpty) {
-      queryTagKey = 't';
-      queryTagValue = tags.first;
+      if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
+        // Looks like group IDs, use 'g' tag
+        queryTagKey = 'g';
+        queryTagValue = tags.first;
+      } else {
+        // Regular tags, use 't' tag
+        queryTagKey = 't';
+        queryTagValue = tags.first;
+      }
     }
 
     // Query the database (increase limit to allow for date filtering)
