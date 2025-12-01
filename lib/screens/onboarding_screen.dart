@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/services/mls/mls_group.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -79,9 +80,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
   }
 
-  void _toggleGroup(NostrGroup group) {
+  void _toggleGroup(MlsGroup group) {
     final groupState = context.read<GroupState>();
-    if (groupState.activeGroup?.id == group.id) {
+    if (groupState.activeGroup?.id.bytes.toString() ==
+        group.id.bytes.toString()) {
       // Deselect if already active
       groupState.setActiveGroup(null);
     } else {
@@ -92,24 +94,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
   }
 
-  String _truncateId(String id) {
-    if (id.length <= 12) return id;
-    return '${id.substring(0, 6)}...${id.substring(id.length - 6)}';
-  }
-
-  String _formatDate(DateTime date) {
-    final now = DateTime.now();
-    final difference = now.difference(date);
-
-    if (difference.inDays > 0) {
-      return '${difference.inDays}d ago';
-    } else if (difference.inHours > 0) {
-      return '${difference.inHours}h ago';
-    } else if (difference.inMinutes > 0) {
-      return '${difference.inMinutes}m ago';
-    } else {
-      return 'Just now';
-    }
+  String _truncateGroupId(MlsGroup group) {
+    final groupIdHex = group.id.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    if (groupIdHex.length <= 12) return groupIdHex;
+    return '${groupIdHex.substring(0, 6)}...${groupIdHex.substring(groupIdHex.length - 6)}';
   }
 
   @override
@@ -336,7 +326,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       else
                         ...groupState.groups.map((group) {
                           final isActive =
-                              groupState.activeGroup?.id == group.id;
+                              groupState.activeGroup?.id.bytes.toString() ==
+                              group.id.bytes.toString();
                           return Container(
                             margin: const EdgeInsets.only(bottom: 8),
                             padding: const EdgeInsets.all(12),
@@ -372,23 +363,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                                   : null,
                                             ),
                                           ),
-                                          if (group.about != null)
-                                            Padding(
-                                              padding: const EdgeInsets.only(
-                                                top: 4,
-                                              ),
-                                              child: Text(
-                                                group.about!,
-                                                style: const TextStyle(
-                                                  fontSize: 12,
-                                                  color: CupertinoColors
-                                                      .secondaryLabel,
-                                                ),
-                                              ),
-                                            ),
                                           const SizedBox(height: 4),
                                           Text(
-                                            'ID: ${_truncateId(group.id)} • ${_formatDate(group.createdAt)}',
+                                            'ID: ${_truncateGroupId(group)}',
                                             style: const TextStyle(
                                               fontSize: 11,
                                               color: CupertinoColors
@@ -456,17 +433,6 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        if (groupState.activeGroup!.about != null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Text(
-                              groupState.activeGroup!.about!,
-                              style: const TextStyle(
-                                fontSize: 14,
-                                color: CupertinoColors.secondaryLabel,
-                              ),
-                            ),
-                          ),
                         const SizedBox(height: 8),
                         Text(
                           'Messages: ${groupState.groupMessages.length}',

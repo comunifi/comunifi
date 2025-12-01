@@ -9,45 +9,15 @@ import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart';
 import 'package:comunifi/services/mls/mls.dart';
+import 'package:comunifi/services/mls/mls_group.dart';
+import 'package:comunifi/services/mls/group_state/group_state.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
 
-/// Model for a Nostr group/channel
-class NostrGroup {
-  final String id; // Event ID of the group creation event (kind 40)
-  final String name;
-  final String pubkey; // Creator's public key
-  final DateTime createdAt;
-  final String? about; // Optional description
-
-  NostrGroup({
-    required this.id,
-    required this.name,
-    required this.pubkey,
-    required this.createdAt,
-    this.about,
-  });
-
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'name': name,
-      'pubkey': pubkey,
-      'created_at': createdAt.toIso8601String(),
-      'about': about,
-    };
-  }
-
-  static NostrGroup fromMap(Map<String, dynamic> map) {
-    return NostrGroup(
-      id: map['id'],
-      name: map['name'],
-      pubkey: map['pubkey'],
-      createdAt: DateTime.parse(map['created_at']),
-      about: map['about'],
-    );
-  }
-}
+// Import MlsGroupTable for listing groups
+import 'package:comunifi/services/mls/storage/secure_storage.dart'
+    show MlsGroupTable;
+import 'package:comunifi/models/nostr_event.dart' show kindEncryptedEnvelope;
 
 class GroupState with ChangeNotifier {
   // instantiate services here
@@ -58,6 +28,9 @@ class GroupState with ChangeNotifier {
   SecurePersistentMlsStorage? _mlsStorage;
   AppDBService? _dbService;
   MlsGroup? _keysGroup;
+
+  // Map of group ID (hex) to MLS group for quick lookup
+  final Map<String, MlsGroup> _mlsGroups = {};
 
   GroupState() {
     _initialize();
@@ -87,7 +60,12 @@ class GroupState with ChangeNotifier {
         return;
       }
 
-      _nostrService = NostrService(relayUrl, useTor: false);
+      // Create NostrService with MLS group resolver
+      _nostrService = NostrService(
+        relayUrl,
+        useTor: false,
+        mlsGroupResolver: _resolveMlsGroup,
+      );
 
       // Connect to relay
       await _nostrService!.connect((connected) {
@@ -268,24 +246,6 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  Future<void> _ensureGroupsTable() async {
-    if (_dbService?.database == null) return;
-
-    try {
-      await _dbService!.database!.execute('''
-        CREATE TABLE IF NOT EXISTS nostr_groups (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          pubkey TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          about TEXT
-        )
-      ''');
-    } catch (e) {
-      debugPrint('Failed to create groups table: $e');
-    }
-  }
-
   // private variables here
   bool _mounted = true;
   void safeNotifyListeners() {
@@ -308,33 +268,78 @@ class GroupState with ChangeNotifier {
   bool _isConnected = false;
   bool _isLoading = false;
   String? _errorMessage;
-  List<NostrGroup> _groups = [];
-  NostrGroup? _activeGroup;
+  List<MlsGroup> _groups = [];
+  MlsGroup? _activeGroup;
   List<NostrEventModel> _groupMessages = [];
 
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
-  List<NostrGroup> get groups => _groups;
-  NostrGroup? get activeGroup => _activeGroup;
+  List<MlsGroup> get groups => _groups;
+  MlsGroup? get activeGroup => _activeGroup;
   List<NostrEventModel> get groupMessages => _groupMessages;
+
+  /// Resolve MLS group by hex ID (for NostrService)
+  Future<MlsGroup?> _resolveMlsGroup(String groupIdHex) async {
+    // Check cache first
+    if (_mlsGroups.containsKey(groupIdHex)) {
+      return _mlsGroups[groupIdHex];
+    }
+
+    // Load from storage
+    if (_mlsService == null) return null;
+
+    try {
+      final groupId = _hexToGroupId(groupIdHex);
+      final group = await _mlsService!.loadGroup(groupId);
+      if (group != null) {
+        _mlsGroups[groupIdHex] = group;
+      }
+      return group;
+    } catch (e) {
+      debugPrint('Failed to resolve MLS group $groupIdHex: $e');
+      return null;
+    }
+  }
+
+  /// Convert hex string to GroupId
+  GroupId _hexToGroupId(String hex) {
+    final bytes = <int>[];
+    for (int i = 0; i < hex.length; i += 2) {
+      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
+    }
+    return GroupId(Uint8List.fromList(bytes));
+  }
+
+  /// Convert GroupId to hex string
+  String _groupIdToHex(GroupId groupId) {
+    return groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
 
   // state methods here
   Future<void> _loadSavedGroups() async {
-    if (_dbService?.database == null) return;
+    if (_mlsService == null || _dbService?.database == null) return;
 
     try {
-      await _ensureGroupsTable();
       _isLoading = true;
       safeNotifyListeners();
 
-      final maps = await _dbService!.database!.query(
-        'nostr_groups',
-        orderBy: 'created_at DESC',
-      );
+      // Load all MLS groups from storage using the table
+      final mlsTable = MlsGroupTable(_dbService!.database!);
+      final groupIds = await mlsTable.listGroupIds();
+      final loadedGroups = <MlsGroup>[];
 
-      _groups = maps.map((map) => NostrGroup.fromMap(map)).toList();
+      for (final groupId in groupIds) {
+        final group = await _mlsService!.loadGroup(groupId);
+        if (group != null) {
+          loadedGroups.add(group);
+          // Cache in map
+          final groupIdHex = _groupIdToHex(groupId);
+          _mlsGroups[groupIdHex] = group;
+        }
+      }
 
+      _groups = loadedGroups;
       _isLoading = false;
       safeNotifyListeners();
     } catch (e) {
@@ -344,84 +349,36 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Create a new Nostr group/channel (kind 40)
+  /// Create a new MLS group
   Future<void> createGroup(String name, {String? about}) async {
-    if (!_isConnected || _nostrService == null) {
-      throw Exception('Not connected to relay. Please connect first.');
+    if (_mlsService == null) {
+      throw Exception('MLS service not initialized');
     }
 
     try {
-      final privateKey = await _getNostrPrivateKey();
-      if (privateKey == null || privateKey.isEmpty) {
-        throw Exception(
-          'No Nostr key found. Please ensure keys are initialized.',
-        );
-      }
-
-      final keyPair = NostrKeyPairs(private: privateKey);
-
-      // Create group metadata
-      final groupMetadata = {'name': name, if (about != null) 'about': about};
-
-      // Create and sign a kind 40 event (channel creation)
-      final nostrEvent = NostrEvent.fromPartialData(
-        kind: 40, // Channel creation
-        content: jsonEncode(groupMetadata),
-        keyPairs: keyPair,
-        tags: addClientIdTag([]),
-        createdAt: DateTime.now(),
+      // Create MLS group
+      final mlsGroup = await _mlsService!.createGroup(
+        creatorUserId: 'self',
+        groupName: name,
       );
 
-      final eventModel = NostrEventModel(
-        id: nostrEvent.id,
-        pubkey: nostrEvent.pubkey,
-        kind: nostrEvent.kind,
-        content: nostrEvent.content,
-        tags: nostrEvent.tags,
-        sig: nostrEvent.sig,
-        createdAt: nostrEvent.createdAt,
-      );
+      // Cache the group
+      final groupIdHex = _groupIdToHex(mlsGroup.id);
+      _mlsGroups[groupIdHex] = mlsGroup;
 
-      // Publish to the relay
-      _nostrService!.publishEvent(eventModel.toJson());
-
-      // Save to local database
-      final group = NostrGroup(
-        id: eventModel.id,
-        name: name,
-        pubkey: eventModel.pubkey,
-        createdAt: eventModel.createdAt,
-        about: about,
-      );
-
-      await _saveGroup(group);
-      _groups.insert(0, group);
+      // Add to groups list
+      _groups.insert(0, mlsGroup);
       safeNotifyListeners();
 
-      debugPrint('Created group: ${group.id}');
+      debugPrint('Created MLS group: ${mlsGroup.name} (${groupIdHex})');
     } catch (e) {
       debugPrint('Failed to create group: $e');
       rethrow;
     }
   }
 
-  Future<void> _saveGroup(NostrGroup group) async {
-    if (_dbService?.database == null) return;
-
-    try {
-      await _ensureGroupsTable();
-      await _dbService!.database!.insert(
-        'nostr_groups',
-        group.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    } catch (e) {
-      debugPrint('Failed to save group: $e');
-    }
-  }
-
   /// Toggle/select active group
-  Future<void> setActiveGroup(NostrGroup? group) async {
+  Future<void> setActiveGroup(MlsGroup? group) async {
     _activeGroup = group;
     _groupMessages = [];
 
@@ -447,21 +404,25 @@ class GroupState with ChangeNotifier {
   }
 
   /// Load messages for a specific group
-  Future<void> _loadGroupMessages(NostrGroup group) async {
+  Future<void> _loadGroupMessages(MlsGroup group) async {
     if (_nostrService == null || !_isConnected) return;
 
     try {
-      // Request past events (kind 1 = text notes)
-      // Note: We filter client-side since the service only supports #t tag filtering
+      final groupIdHex = _groupIdToHex(group.id);
+
+      // Request past encrypted envelopes (kind 1059) for this group
       final pastEvents = await _nostrService!.requestPastEvents(
-        kind: 1,
-        limit: 200, // Get more events to filter from
+        kind: kindEncryptedEnvelope,
+        tags: [groupIdHex], // Filter by 'g' tag
+        limit: 200,
       );
 
-      // Filter events that have the group tag
+      // Filter events that have the group tag matching this group
+      // Note: Events are decrypted, so we check for 'g' tag in the event tags
       _groupMessages = pastEvents.where((event) {
+        // Check if event has 'g' tag with matching group ID
         return event.tags.any(
-          (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == group.id,
+          (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
         );
       }).toList();
 
@@ -475,70 +436,33 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Start listening for new group events (kind 40)
+  /// Start listening for new group events
+  /// Note: Groups are now MLS-based, so we just refresh the list periodically
   void _startListeningForGroupEvents() {
-    if (_nostrService == null || !_isConnected) return;
-
-    try {
-      _groupEventSubscription = _nostrService!
-          .listenToEvents(
-            kind: 40, // Channel creation events
-            limit: null,
-          )
-          .listen(
-            (event) {
-              // Parse and save new groups
-              try {
-                final metadata =
-                    jsonDecode(event.content) as Map<String, dynamic>;
-                final group = NostrGroup(
-                  id: event.id,
-                  name: metadata['name'] ?? 'Unnamed Group',
-                  pubkey: event.pubkey,
-                  createdAt: event.createdAt,
-                  about: metadata['about'],
-                );
-
-                // Check if we already have this group
-                if (!_groups.any((g) => g.id == group.id)) {
-                  _saveGroup(group);
-                  _groups.add(group);
-                  safeNotifyListeners();
-                }
-              } catch (e) {
-                debugPrint('Failed to parse group event: $e');
-              }
-            },
-            onError: (error) {
-              debugPrint('Error listening to group events: $error');
-            },
-          );
-    } catch (e) {
-      debugPrint('Failed to start listening for group events: $e');
-    }
+    // Groups are managed through MLS, so we don't need to listen for kind 40 events
+    // Instead, we'll refresh the groups list when needed
   }
 
   /// Start listening for new messages in the active group
-  void _startListeningForGroupMessages(NostrGroup group) {
+  void _startListeningForGroupMessages(MlsGroup group) {
     if (_nostrService == null || !_isConnected || _activeGroup == null) return;
 
     try {
       _messageEventSubscription?.cancel();
 
-      // Listen to all kind 1 events and filter client-side
-      // (since the service only supports #t tag filtering)
+      final groupIdHex = _groupIdToHex(group.id);
+
+      // Listen to encrypted envelopes (kind 1059) for this group
       _messageEventSubscription = _nostrService!
-          .listenToEvents(
-            kind: 1, // Text notes
-            limit: null,
-          )
+          .listenToEvents(kind: kindEncryptedEnvelope, limit: null)
           .listen(
             (event) {
-              // Check if this message is for the active group
+              // Events are automatically decrypted by NostrService
+              // Check if this message is for the active group by looking for 'g' tag
               final hasGroupTag = event.tags.any(
-                (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == group.id,
+                (tag) =>
+                    tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
               );
-
               if (hasGroupTag && !_groupMessages.any((e) => e.id == event.id)) {
                 _groupMessages.insert(0, event);
                 safeNotifyListeners();
@@ -554,6 +478,7 @@ class GroupState with ChangeNotifier {
   }
 
   /// Post a message to the active group
+  /// Message will be encrypted with MLS and sent as kind 1059 envelope
   Future<void> postMessage(String content) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
@@ -573,19 +498,19 @@ class GroupState with ChangeNotifier {
 
       final keyPair = NostrKeyPairs(private: privateKey);
 
-      // Create tags for the group message
-      // Using 'g' tag to reference the group
-      final tags = [
-        ['g', _activeGroup!.id], // Group reference tag
-        ...addClientIdTag([]),
-      ];
+      // Get group ID as hex
+      final groupIdHex = _groupIdToHex(_activeGroup!.id);
 
-      // Create and sign a NostrEvent (kind 1 = text note)
+      // Create a normal Nostr event (kind 1 = text note)
+      // Add group ID as 'g' tag so it can be filtered after decryption
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 1, // Text note
         content: content,
         keyPairs: keyPair,
-        tags: tags,
+        tags: [
+          ['g', groupIdHex], // Add group ID tag
+          ...addClientIdTag([]),
+        ],
         createdAt: DateTime.now(),
       );
 
@@ -599,15 +524,24 @@ class GroupState with ChangeNotifier {
         createdAt: nostrEvent.createdAt,
       );
 
-      // Publish to the relay
-      _nostrService!.publishEvent(eventModel.toJson());
+      // Get recipient pubkey (for now, use our own pubkey)
+      // In a real implementation, you'd get the recipient from the group
+      final recipientPubkey = eventModel.pubkey;
 
-      // Add to local messages immediately
+      // Publish to the relay - will be automatically encrypted and wrapped in kind 1059
+      await _nostrService!.publishEvent(
+        eventModel.toJson(),
+        mlsGroupId: groupIdHex,
+        recipientPubkey: recipientPubkey,
+        keyPairs: keyPair,
+      );
+
+      // Add to local messages immediately (the decrypted version)
       _groupMessages.insert(0, eventModel);
       safeNotifyListeners();
 
       debugPrint(
-        'Posted message to group ${_activeGroup!.id}: ${eventModel.id}',
+        'Posted encrypted message to group ${_activeGroup!.name}: ${eventModel.id}',
       );
     } catch (e) {
       debugPrint('Failed to post message: $e');

@@ -2,15 +2,23 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
-import 'package:comunifi/models/nostr_event.dart';
+import 'package:comunifi/models/nostr_event.dart'
+    show NostrEventModel, kindEncryptedEnvelope, addClientIdTag;
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
+import 'package:comunifi/services/mls/mls_group.dart';
+import 'package:comunifi/services/mls/messages/messages.dart';
 import 'package:comunifi/services/tor/tor_service.dart';
+import 'package:dart_nostr/dart_nostr.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:socks5_proxy/socks.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+
+/// Function type for resolving MLS groups by group ID (hex string)
+typedef MlsGroupResolver = Future<MlsGroup?> Function(String groupIdHex);
 
 /// WebSocket-based Nostr service implementation with database caching
 class NostrService {
@@ -29,7 +37,20 @@ class NostrService {
   NostrEventTable? _eventTable;
   bool _cacheInitialized = false;
 
-  NostrService(this._relayUrl, {bool useTor = false}) : _useTor = useTor;
+  // MLS group resolver for encryption/decryption
+  MlsGroupResolver? _mlsGroupResolver;
+
+  NostrService(
+    this._relayUrl, {
+    bool useTor = false,
+    MlsGroupResolver? mlsGroupResolver,
+  }) : _useTor = useTor,
+       _mlsGroupResolver = mlsGroupResolver;
+
+  /// Set the MLS group resolver for encryption/decryption
+  void setMlsGroupResolver(MlsGroupResolver resolver) {
+    _mlsGroupResolver = resolver;
+  }
 
   /// Initialize the database cache (optional, called automatically on first use)
   Future<void> _ensureCacheInitialized() async {
@@ -300,6 +321,12 @@ class NostrService {
     try {
       final event = NostrEventModel.fromJson(eventData);
 
+      // If this is an encrypted envelope (kind 1059), decrypt it
+      if (event.isEncryptedEnvelope) {
+        _handleEncryptedEnvelope(event, subscriptionId);
+        return;
+      }
+
       // Cache the event in the database
       _cacheEvent(event);
 
@@ -310,6 +337,109 @@ class NostrService {
       }
     } catch (e) {
       debugPrint('Error parsing event: $e');
+    }
+  }
+
+  /// Handle encrypted envelope (kind 1059) - decrypt and emit as normal event
+  Future<void> _handleEncryptedEnvelope(
+    NostrEventModel envelope,
+    String subscriptionId,
+  ) async {
+    try {
+      // Get MLS group ID from envelope
+      final groupIdHex = envelope.encryptedEnvelopeMlsGroupId;
+      if (groupIdHex == null || _mlsGroupResolver == null) {
+        debugPrint('Cannot decrypt envelope: missing group ID or MLS resolver');
+        return;
+      }
+
+      // Resolve MLS group
+      final mlsGroup = await _mlsGroupResolver!(groupIdHex);
+      if (mlsGroup == null) {
+        debugPrint('Cannot decrypt envelope: MLS group not found: $groupIdHex');
+        return;
+      }
+
+      // Get encrypted content
+      final encryptedContent = envelope.getEncryptedContent();
+      if (encryptedContent == null) {
+        debugPrint('Cannot decrypt envelope: no encrypted content');
+        return;
+      }
+
+      // Decrypt using MLS
+      // The encrypted content should be a serialized MlsCiphertext
+      // For now, we'll assume it's base64 encoded JSON or similar
+      // In production, you'd need to deserialize the MlsCiphertext properly
+      final encryptedBytes = Uint8List.fromList(utf8.encode(encryptedContent));
+
+      // Try to decrypt - we need to reconstruct MlsCiphertext from the envelope
+      // For simplicity, we'll assume the encrypted content contains the full ciphertext
+      // In a real implementation, you'd need to serialize/deserialize MlsCiphertext properly
+      final decryptedBytes = await _decryptWithMls(
+        mlsGroup,
+        encryptedBytes,
+        groupIdHex,
+      );
+
+      if (decryptedBytes == null) {
+        debugPrint('Failed to decrypt envelope');
+        return;
+      }
+
+      // Parse decrypted content as JSON and create normal event
+      // Note: The inner event should already have the 'g' tag from when it was created
+      // We don't modify it here as events are immutable once signed
+      final decryptedContent = utf8.decode(decryptedBytes);
+      final decryptedEvent = envelope.decryptEvent(decryptedContent);
+
+      // Cache the decrypted event (but not the envelope)
+      _cacheEvent(decryptedEvent);
+
+      // Emit decrypted event to the subscription
+      final controller = _subscriptions[subscriptionId];
+      if (controller != null && !controller.isClosed) {
+        controller.add(decryptedEvent);
+      }
+    } catch (e) {
+      debugPrint('Error decrypting envelope: $e');
+    }
+  }
+
+  /// Decrypt content using MLS group
+  Future<Uint8List?> _decryptWithMls(
+    MlsGroup mlsGroup,
+    Uint8List encryptedBytes,
+    String groupIdHex,
+  ) async {
+    try {
+      // In a real implementation, you'd deserialize MlsCiphertext from encryptedBytes
+      // For now, we'll create a simplified version
+      // The encrypted content should contain: epoch, senderIndex, nonce, ciphertext
+
+      // Parse as JSON first to extract MLS ciphertext components
+      try {
+        final json = jsonDecode(utf8.decode(encryptedBytes));
+        final ciphertext = MlsCiphertext(
+          groupId: mlsGroup.id,
+          epoch: json['epoch'] as int,
+          senderIndex: json['senderIndex'] as int,
+          nonce: Uint8List.fromList(List<int>.from(json['nonce'] as List)),
+          ciphertext: Uint8List.fromList(
+            List<int>.from(json['ciphertext'] as List),
+          ),
+          contentType: MlsContentType.application,
+        );
+
+        return await mlsGroup.decryptApplicationMessage(ciphertext);
+      } catch (e) {
+        // If JSON parsing fails, try direct decryption (simplified)
+        debugPrint('Failed to parse MLS ciphertext JSON: $e');
+        return null;
+      }
+    } catch (e) {
+      debugPrint('Error in MLS decryption: $e');
+      return null;
     }
   }
 
@@ -367,14 +497,105 @@ class NostrService {
   }
 
   /// Publish an event to the relay (public method)
-  void publishEvent(Map<String, dynamic> eventJson) {
+  /// If mlsGroupId is provided, the event will be encrypted and wrapped in kind 1059
+  /// keyPairs is required when encrypting (for signing the envelope)
+  Future<void> publishEvent(
+    Map<String, dynamic> eventJson, {
+    String? mlsGroupId,
+    String? recipientPubkey,
+    NostrKeyPairs? keyPairs,
+  }) async {
     if (!_isConnected || _channel == null) {
       throw Exception('Not connected to relay');
     }
 
-    final List<dynamic> message = ['EVENT', eventJson];
+    Map<String, dynamic> eventToPublish = eventJson;
+
+    // If MLS group is provided, encrypt and wrap in kind 1059
+    if (mlsGroupId != null && _mlsGroupResolver != null) {
+      if (keyPairs == null) {
+        throw Exception('Key pairs required for encrypted envelope');
+      }
+      try {
+        final mlsGroup = await _mlsGroupResolver!(mlsGroupId);
+        if (mlsGroup != null) {
+          eventToPublish = await _encryptAndWrapEvent(
+            eventJson,
+            mlsGroup,
+            mlsGroupId,
+            recipientPubkey,
+            keyPairs,
+          );
+        }
+      } catch (e) {
+        debugPrint('Failed to encrypt event: $e');
+        throw Exception('Failed to encrypt event: $e');
+      }
+    }
+
+    final List<dynamic> message = ['EVENT', eventToPublish];
     final String jsonMessage = jsonEncode(message);
     _channel!.sink.add(jsonMessage);
+  }
+
+  /// Encrypt event with MLS and wrap in kind 1059 envelope
+  Future<Map<String, dynamic>> _encryptAndWrapEvent(
+    Map<String, dynamic> eventJson,
+    MlsGroup mlsGroup,
+    String mlsGroupId,
+    String? recipientPubkey,
+    NostrKeyPairs keyPairs,
+  ) async {
+    // Serialize event to JSON string
+    final eventJsonString = jsonEncode(eventJson);
+    final eventBytes = Uint8List.fromList(utf8.encode(eventJsonString));
+
+    // Encrypt with MLS
+    final mlsCiphertext = await mlsGroup.encryptApplicationMessage(eventBytes);
+
+    // Serialize MlsCiphertext to JSON for storage in envelope
+    final ciphertextJson = {
+      'epoch': mlsCiphertext.epoch,
+      'senderIndex': mlsCiphertext.senderIndex,
+      'nonce': mlsCiphertext.nonce.toList(),
+      'ciphertext': mlsCiphertext.ciphertext.toList(),
+    };
+    final encryptedContent = jsonEncode(ciphertextJson);
+
+    // Get recipient pubkey (use event pubkey if not provided)
+    final recipient = recipientPubkey ?? eventJson['pubkey'] as String?;
+    if (recipient == null) {
+      throw Exception('Recipient pubkey required for encrypted envelope');
+    }
+
+    // Create tags for the envelope
+    final tags = [
+      ['p', recipient],
+      ['g', mlsGroupId],
+      ...addClientIdTag([]),
+    ];
+
+    // Create and sign the envelope using dart_nostr (this computes ID and signs)
+    final nostrEnvelope = NostrEvent.fromPartialData(
+      kind: kindEncryptedEnvelope,
+      content: encryptedContent,
+      keyPairs: keyPairs,
+      tags: tags,
+      createdAt: DateTime.now(),
+    );
+
+    // Convert to our model format
+    final envelope = NostrEventModel(
+      id: nostrEnvelope.id,
+      pubkey: nostrEnvelope.pubkey,
+      kind: nostrEnvelope.kind,
+      content: nostrEnvelope.content,
+      tags: nostrEnvelope.tags,
+      sig: nostrEnvelope.sig,
+      createdAt: nostrEnvelope.createdAt,
+    );
+
+    return envelope.toJson();
   }
 
   /// Listen to events of a specific kind
@@ -411,9 +632,16 @@ class NostrService {
     }
 
     if (tags != null && tags.isNotEmpty) {
-      // For now, we'll handle simple tag filters
-      // In a full implementation, you'd want to support more complex tag queries
-      filter['#t'] = tags;
+      // Support both 't' and 'g' tag filters
+      // If tags contain group IDs, use '#g' filter
+      // Otherwise, use '#t' filter
+      if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
+        // Looks like hex group IDs, use 'g' tag
+        filter['#g'] = tags;
+      } else {
+        // Regular tags, use 't' tag
+        filter['#t'] = tags;
+      }
     }
 
     if (since != null) {
