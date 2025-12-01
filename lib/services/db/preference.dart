@@ -46,7 +46,7 @@ class PreferenceTable extends DBTable {
   @override
   String get createQuery =>
       '''
-    CREATE TABLE $name (
+    CREATE TABLE IF NOT EXISTS $name (
       key TEXT PRIMARY KEY,
       created_at TEXT,
       updated_at TEXT,

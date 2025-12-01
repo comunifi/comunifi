@@ -4,14 +4,15 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:comunifi/models/nostr_event.dart';
+import 'package:comunifi/services/db/app_db.dart';
+import 'package:comunifi/services/db/nostr_event.dart';
 import 'package:comunifi/services/tor/tor_service.dart';
-import 'package:dart_nostr/dart_nostr.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:socks5_proxy/socks.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-/// WebSocket-based Nostr service implementation
+/// WebSocket-based Nostr service implementation with database caching
 class NostrService {
   final TorService _torService = TorService();
 
@@ -23,13 +24,41 @@ class NostrService {
   final Map<String, VoidCallback> _eoseCompleters = {};
   final Random _random = Random();
 
+  // Database caching
+  AppDBService? _dbService;
+  NostrEventTable? _eventTable;
+  bool _cacheInitialized = false;
+
   NostrService(this._relayUrl, {bool useTor = false}) : _useTor = useTor;
+
+  /// Initialize the database cache (optional, called automatically on first use)
+  Future<void> _ensureCacheInitialized() async {
+    if (_cacheInitialized) return;
+
+    try {
+      _dbService = AppDBService();
+      await _dbService!.init('nostr_events');
+      _eventTable = NostrEventTable(_dbService!.database!);
+      // Create tables (will handle "already exists" errors gracefully)
+      await _eventTable!.create(_dbService!.database!);
+      _cacheInitialized = true;
+      debugPrint('Nostr event cache initialized');
+    } catch (e) {
+      debugPrint('Failed to initialize cache: $e');
+      // Continue without cache - not critical
+      // But still mark as initialized to avoid repeated attempts
+      _cacheInitialized = true;
+    }
+  }
 
   /// Connect to the Nostr relay
   Future<void> connect(Function(bool) onConnected) async {
     if (_isConnected) {
       return;
     }
+
+    // Initialize cache if not already done
+    await _ensureCacheInitialized();
 
     try {
       if (_useTor) {
@@ -186,6 +215,54 @@ class NostrService {
     _eoseCompleters.clear();
   }
 
+  /// Get an event from cache by ID
+  Future<NostrEventModel?> getCachedEvent(String eventId) async {
+    if (!_cacheInitialized || _eventTable == null) return null;
+
+    try {
+      return await _eventTable!.getById(eventId);
+    } catch (e) {
+      debugPrint('Error getting cached event: $e');
+      return null;
+    }
+  }
+
+  /// Query cached events
+  Future<List<NostrEventModel>> queryCachedEvents({
+    String? pubkey,
+    int? kind,
+    String? tagKey,
+    String? tagValue,
+    int? limit,
+  }) async {
+    if (!_cacheInitialized || _eventTable == null) return [];
+
+    try {
+      return await _eventTable!.query(
+        pubkey: pubkey,
+        kind: kind,
+        tagKey: tagKey,
+        tagValue: tagValue,
+        limit: limit,
+      );
+    } catch (e) {
+      debugPrint('Error querying cached events: $e');
+      return [];
+    }
+  }
+
+  /// Clear the event cache
+  Future<void> clearCache() async {
+    if (!_cacheInitialized || _eventTable == null) return;
+
+    try {
+      await _eventTable!.clear();
+      debugPrint('Event cache cleared');
+    } catch (e) {
+      debugPrint('Error clearing cache: $e');
+    }
+  }
+
   /// Handle incoming WebSocket messages
   void _handleMessage(dynamic message) {
     try {
@@ -223,6 +300,9 @@ class NostrService {
     try {
       final event = NostrEventModel.fromJson(eventData);
 
+      // Cache the event in the database
+      _cacheEvent(event);
+
       // Emit event to the appropriate subscription
       final controller = _subscriptions[subscriptionId];
       if (controller != null && !controller.isClosed) {
@@ -231,6 +311,16 @@ class NostrService {
     } catch (e) {
       debugPrint('Error parsing event: $e');
     }
+  }
+
+  /// Cache an event in the database (non-blocking)
+  void _cacheEvent(NostrEventModel event) {
+    if (!_cacheInitialized || _eventTable == null) return;
+
+    // Cache asynchronously without blocking
+    _eventTable!.insert(event).catchError((error) {
+      debugPrint('Failed to cache event: $error');
+    });
   }
 
   /// Handle EOSE (End of Stored Events) messages
@@ -288,6 +378,7 @@ class NostrService {
   }
 
   /// Listen to events of a specific kind
+  /// Events are automatically cached as they arrive
   Stream<NostrEventModel> listenToEvents({
     required int kind,
     List<String>? authors,
@@ -299,6 +390,9 @@ class NostrService {
     if (!_isConnected) {
       throw Exception('Not connected to relay. Call connect() first.');
     }
+
+    // Ensure cache is initialized
+    _ensureCacheInitialized();
 
     final String subscriptionId = _generateSubscriptionId();
     final StreamController<NostrEventModel> controller =
@@ -348,6 +442,7 @@ class NostrService {
 
   /// Request past events and return them as a Future that completes when EOSE is received
   /// Perfect for pagination by requesting chunks of events
+  /// If useCache is true, will check cache first before querying relay
   Future<List<NostrEventModel>> requestPastEvents({
     required int kind,
     List<String>? authors,
@@ -355,7 +450,34 @@ class NostrService {
     DateTime? since,
     DateTime? until,
     int? limit,
+    bool useCache = true,
   }) async {
+    // Try to get from cache first if enabled
+    if (useCache && _cacheInitialized && _eventTable != null) {
+      try {
+        final cachedEvents = await _getCachedEvents(
+          kind: kind,
+          authors: authors,
+          tags: tags,
+          since: since,
+          until: until,
+          limit: limit,
+        );
+
+        // If we have cached events and no 'since' filter (meaning we want latest),
+        // or if we got enough events, return cached results
+        if (cachedEvents.isNotEmpty &&
+            (since == null || cachedEvents.length >= (limit ?? 100))) {
+          debugPrint('Returning ${cachedEvents.length} cached events');
+          return cachedEvents;
+        }
+      } catch (e) {
+        debugPrint('Error reading from cache: $e');
+        // Fall through to query relay
+      }
+    }
+
+    // Query relay if not connected, throw error
     if (!_isConnected) {
       throw Exception('Not connected to relay. Call connect() first.');
     }
@@ -432,6 +554,66 @@ class NostrService {
     };
 
     return completer.future.timeout(const Duration(seconds: 10));
+  }
+
+  /// Get cached events from database
+  Future<List<NostrEventModel>> _getCachedEvents({
+    required int kind,
+    List<String>? authors,
+    List<String>? tags,
+    DateTime? since,
+    DateTime? until,
+    int? limit,
+  }) async {
+    if (_eventTable == null) return [];
+
+    // Build query parameters
+    int? queryKind = kind;
+    String? queryPubkey;
+    String? queryTagKey;
+    String? queryTagValue;
+
+    // If authors is provided, query by first author
+    // Note: For multiple authors, we'd need to query each separately and combine
+    if (authors != null && authors.isNotEmpty) {
+      queryPubkey = authors.first;
+    }
+
+    // If tags is provided, extract tag key and value
+    // Assuming tags are hashtags (tag 't')
+    if (tags != null && tags.isNotEmpty) {
+      queryTagKey = 't';
+      queryTagValue = tags.first;
+    }
+
+    // Query the database (increase limit to allow for date filtering)
+    var events = await _eventTable!.query(
+      pubkey: queryPubkey,
+      kind: queryKind,
+      tagKey: queryTagKey,
+      tagValue: queryTagValue,
+      limit: limit != null ? limit * 2 : null, // Get more to filter by date
+    );
+
+    // Filter by date range if specified
+    if (since != null || until != null) {
+      events = events.where((event) {
+        if (since != null && event.createdAt.isBefore(since)) {
+          return false;
+        }
+        if (until != null && event.createdAt.isAfter(until)) {
+          return false;
+        }
+        return true;
+      }).toList();
+    }
+
+    // Apply limit after filtering
+    if (limit != null && events.length > limit) {
+      events = events.take(limit).toList();
+    }
+
+    return events;
   }
 
   /// Unsubscribe from a subscription

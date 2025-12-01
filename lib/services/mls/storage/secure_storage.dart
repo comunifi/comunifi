@@ -151,7 +151,7 @@ class MlsGroupTable extends DBTable {
   @override
   String get createQuery =>
       '''
-    CREATE TABLE $name (
+    CREATE TABLE IF NOT EXISTS $name (
       group_id TEXT PRIMARY KEY,
       group_name TEXT,
       public_state BLOB NOT NULL
