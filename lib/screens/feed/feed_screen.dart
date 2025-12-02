@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/group.dart';
@@ -6,6 +7,7 @@ import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/invite_user_modal.dart';
+import 'package:comunifi/widgets/groups_sidebar.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -40,7 +42,25 @@ class _FeedScreenState extends State<FeedScreen> {
 
       // Also ensure profile immediately if GroupState already has keys
       _ensureUserProfile();
+
+      // Load user profile for display in navigation bar
+      _loadUserProfile();
     });
+  }
+
+  Future<void> _loadUserProfile() async {
+    try {
+      final groupState = context.read<GroupState>();
+      final profileState = context.read<ProfileState>();
+
+      final pubkey = await groupState.getNostrPublicKey();
+      if (pubkey != null) {
+        // Load profile to ensure it's in cache
+        await profileState.getProfile(pubkey);
+      }
+    } catch (e) {
+      debugPrint('FeedScreen: Error loading user profile: $e');
+    }
   }
 
   Future<void> _ensureUserProfile() async {
@@ -160,36 +180,43 @@ class _FeedScreenState extends State<FeedScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<FeedState, GroupState>(
-      builder: (context, feedState, groupState, child) {
+    return Consumer3<FeedState, GroupState, ProfileState>(
+      builder: (context, feedState, groupState, profileState, child) {
         final activeGroup = groupState.activeGroup;
         return CupertinoPageScaffold(
           navigationBar: CupertinoNavigationBar(
+            leading: CupertinoButton(
+              padding: EdgeInsets.zero,
+              onPressed: () {
+                showCupertinoModalPopup(
+                  context: context,
+                  builder: (context) => const GroupsSidebar(),
+                );
+              },
+              child: const Icon(CupertinoIcons.bars),
+            ),
             middle: Text(activeGroup?.name ?? 'Feed'),
-            trailing: activeGroup != null
-                ? Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CupertinoButton(
-                        padding: EdgeInsets.zero,
-                        onPressed: () {
-                          showCupertinoModalPopup(
-                            context: context,
-                            builder: (context) => const InviteUserModal(),
-                          );
-                        },
-                        child: const Icon(CupertinoIcons.person_add),
-                      ),
-                      CupertinoButton(
-                        padding: EdgeInsets.zero,
-                        onPressed: () {
-                          groupState.setActiveGroup(null);
-                        },
-                        child: const Text('Exit Group'),
-                      ),
-                    ],
-                  )
-                : null,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Username button
+                _UsernameButton(),
+                // Group-specific actions
+                if (activeGroup != null) ...[
+                  const SizedBox(width: 8),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: () {
+                      showCupertinoModalPopup(
+                        context: context,
+                        builder: (context) => const InviteUserModal(),
+                      );
+                    },
+                    child: const Icon(CupertinoIcons.person_add),
+                  ),
+                ],
+              ],
+            ),
           ),
           child: SafeArea(
             child: Builder(
@@ -313,7 +340,7 @@ class _FeedScreenState extends State<FeedScreen> {
                               slivers: [
                                 CupertinoSliverRefreshControl(
                                   onRefresh: () async {
-                                    await feedState.retryConnection();
+                                    await feedState.refreshEvents();
                                   },
                                 ),
                                 SliverList(
@@ -378,6 +405,62 @@ class _FeedScreenState extends State<FeedScreen> {
   }
 }
 
+class _UsernameButton extends StatefulWidget {
+  const _UsernameButton();
+
+  @override
+  State<_UsernameButton> createState() => _UsernameButtonState();
+}
+
+class _UsernameButtonState extends State<_UsernameButton> {
+  String? _pubkey;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPubkey();
+  }
+
+  Future<void> _loadPubkey() async {
+    final groupState = context.read<GroupState>();
+    final pubkey = await groupState.getNostrPublicKey();
+    if (mounted) {
+      setState(() {
+        _pubkey = pubkey;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_pubkey == null) {
+      return const SizedBox.shrink();
+    }
+
+    // Watch for profile changes
+    final profile = context.select<ProfileState, ProfileData?>(
+      (profileState) => profileState.profiles[_pubkey!],
+    );
+
+    final username =
+        profile?.getUsername() ??
+        (_pubkey!.length > 12
+            ? '${_pubkey!.substring(0, 6)}...${_pubkey!.substring(_pubkey!.length - 6)}'
+            : _pubkey!);
+
+    return CupertinoButton(
+      padding: EdgeInsets.zero,
+      onPressed: () {
+        context.push('/profile');
+      },
+      child: Text(
+        username,
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
 class _EventItem extends StatefulWidget {
   final NostrEventModel event;
 
@@ -412,27 +495,20 @@ class _EventItemState extends State<_EventItem> {
       (profileState) => profileState.profiles[widget.event.pubkey],
     );
 
+    // Profile will always have a value now (either from network or local username)
+    // So we always show a username, no loading indicator needed
     final username = profile?.getUsername();
     final displayName = username ?? _truncatePubkey(widget.event.pubkey);
 
-    return _EventItemContent(
-      event: widget.event,
-      displayName: displayName,
-      isLoading: profile == null,
-    );
+    return _EventItemContent(event: widget.event, displayName: displayName);
   }
 }
 
 class _EventItemContent extends StatelessWidget {
   final NostrEventModel event;
   final String displayName;
-  final bool isLoading;
 
-  const _EventItemContent({
-    required this.event,
-    required this.displayName,
-    required this.isLoading,
-  });
+  const _EventItemContent({required this.event, required this.displayName});
 
   String _formatDate(DateTime date) {
     final now = DateTime.now();
@@ -449,8 +525,37 @@ class _EventItemContent extends StatelessWidget {
     }
   }
 
+  /// Extract group ID from event's 'g' tag
+  /// Handles both decrypted messages (kind 1) and encrypted envelopes (kind 1059)
+  String? _getGroupIdFromEvent(NostrEventModel event) {
+    // For encrypted envelopes, try the encryptedEnvelopeMlsGroupId property first
+    if (event.isEncryptedEnvelope) {
+      final groupId = event.encryptedEnvelopeMlsGroupId;
+      if (groupId != null) return groupId;
+    }
+
+    // For decrypted messages or as fallback, check 'g' tag
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final groupState = context.watch<GroupState>();
+    final activeGroup = groupState.activeGroup;
+
+    // Only show group name when no active group is selected
+    final shouldShowGroupName = activeGroup == null;
+    final groupIdHex = shouldShowGroupName ? _getGroupIdFromEvent(event) : null;
+    // Use GroupState's getGroupName which resolves from DB and MLS groups
+    final groupName = groupIdHex != null
+        ? groupState.getGroupName(groupIdHex)
+        : null;
+
     return Container(
       padding: const EdgeInsets.all(16.0),
       decoration: const BoxDecoration(
@@ -463,20 +568,13 @@ class _EventItemContent extends StatelessWidget {
         children: [
           Row(
             children: [
-              if (isLoading)
-                const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CupertinoActivityIndicator(radius: 6),
-                )
-              else
-                Text(
-                  displayName,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
-                  ),
+              Text(
+                displayName,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
                 ),
+              ),
               const SizedBox(width: 8),
               Text(
                 _formatDate(event.createdAt),
@@ -487,6 +585,17 @@ class _EventItemContent extends StatelessWidget {
               ),
             ],
           ),
+          if (groupName != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              groupName,
+              style: const TextStyle(
+                color: CupertinoColors.systemBlue,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           Text(event.content, style: const TextStyle(fontSize: 15)),
         ],

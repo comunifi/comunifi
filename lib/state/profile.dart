@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart';
@@ -107,8 +108,36 @@ class ProfileState with ChangeNotifier {
 
       _keysGroup = keysGroup;
       debugPrint('Keys group initialized for profile state');
+
+      // Initialize local username table
+      await _initializeLocalUsernameTable();
     } catch (e) {
       debugPrint('Failed to initialize keys group: $e');
+    }
+  }
+
+  /// Initialize the local username table for storing random usernames
+  Future<void> _initializeLocalUsernameTable() async {
+    try {
+      if (_dbService?.database == null) return;
+
+      await _dbService!.database!.execute('''
+        CREATE TABLE IF NOT EXISTS local_usernames (
+          pubkey TEXT PRIMARY KEY,
+          username TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        )
+      ''');
+
+      // Create index for faster lookups
+      await _dbService!.database!.execute('''
+        CREATE INDEX IF NOT EXISTS idx_local_usernames_pubkey 
+        ON local_usernames(pubkey)
+      ''');
+
+      debugPrint('Local username table initialized');
+    } catch (e) {
+      debugPrint('Failed to initialize local username table: $e');
     }
   }
 
@@ -141,11 +170,108 @@ class ProfileState with ChangeNotifier {
 
   // state methods here
 
+  /// Get or generate a local username for a pubkey
+  /// Returns a random username stored in local DB
+  Future<String> _getOrCreateLocalUsername(String pubkey) async {
+    try {
+      if (_dbService?.database == null) {
+        // Fallback if DB not available
+        return _generateRandomUsername();
+      }
+
+      // Check if we already have a local username for this pubkey
+      final maps = await _dbService!.database!.query(
+        'local_usernames',
+        where: 'pubkey = ?',
+        whereArgs: [pubkey],
+      );
+
+      if (maps.isNotEmpty) {
+        return maps.first['username'] as String;
+      }
+
+      // Generate a new random username
+      final username = _generateRandomUsername();
+
+      // Store it in the database
+      await _dbService!.database!.insert(
+        'local_usernames',
+        {
+          'pubkey': pubkey,
+          'username': username,
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      debugPrint('Generated and stored local username for $pubkey: $username');
+      return username;
+    } catch (e) {
+      debugPrint('Error getting/creating local username: $e');
+      // Fallback to generating without storing
+      return _generateRandomUsername();
+    }
+  }
+
+  /// Get local username from database (returns null if not found)
+  Future<String?> getLocalUsername(String pubkey) async {
+    try {
+      if (_dbService?.database == null) return null;
+
+      final maps = await _dbService!.database!.query(
+        'local_usernames',
+        where: 'pubkey = ?',
+        whereArgs: [pubkey],
+      );
+
+      if (maps.isNotEmpty) {
+        return maps.first['username'] as String;
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Error getting local username: $e');
+      return null;
+    }
+  }
+
+  /// Update local username when real profile is found
+  /// This replaces the random username with the real one
+  Future<void> _updateLocalUsername(String pubkey, String username) async {
+    try {
+      if (_dbService?.database == null) return;
+
+      await _dbService!.database!.insert(
+        'local_usernames',
+        {
+          'pubkey': pubkey,
+          'username': username,
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      debugPrint('Updated local username for $pubkey: $username');
+    } catch (e) {
+      debugPrint('Error updating local username: $e');
+    }
+  }
+
   /// Get profile for a public key
   Future<ProfileData?> getProfile(String pubkey) async {
     if (_profileService == null) {
       debugPrint('Profile service not initialized');
-      return null;
+      // Still generate a local username even if service not initialized
+      final localUsername = await _getOrCreateLocalUsername(pubkey);
+      // Create a temporary profile with the local username
+      final tempProfile = ProfileData(
+        pubkey: pubkey,
+        name: localUsername,
+        displayName: localUsername,
+        rawData: {'name': localUsername, 'display_name': localUsername},
+      );
+      _profiles[pubkey] = tempProfile;
+      safeNotifyListeners();
+      return tempProfile;
     }
 
     // Check if we already have it cached
@@ -153,22 +279,53 @@ class ProfileState with ChangeNotifier {
       return _profiles[pubkey];
     }
 
+    // Get or create local username first (so we can show it immediately)
+    final localUsername = await _getOrCreateLocalUsername(pubkey);
+    // Create a temporary profile with the local username
+    final tempProfile = ProfileData(
+      pubkey: pubkey,
+      name: localUsername,
+      displayName: localUsername,
+      rawData: {'name': localUsername, 'display_name': localUsername},
+    );
+    _profiles[pubkey] = tempProfile;
+    safeNotifyListeners();
+
     try {
       _isLoading = true;
       safeNotifyListeners();
 
       final profile = await _profileService!.getProfile(pubkey);
-      _profiles[pubkey] = profile;
+      
+      if (profile != null) {
+        // Check if profile has a real name (not just pubkey prefix)
+        final realUsername = profile.getUsername();
+        final hasRealName = (profile.name != null && profile.name!.isNotEmpty) ||
+            (profile.displayName != null && profile.displayName!.isNotEmpty);
+        
+        if (hasRealName && realUsername != pubkey.substring(0, 8)) {
+          // Real profile with actual name found, update local username
+          await _updateLocalUsername(pubkey, realUsername);
+          _profiles[pubkey] = profile;
+        } else {
+          // Profile found but no real name, keep using local username
+          // tempProfile is already set
+        }
+      } else {
+        // Profile not found on network, keep using local username
+        // tempProfile is already set
+      }
 
       _isLoading = false;
       safeNotifyListeners();
 
-      return profile;
+      return _profiles[pubkey];
     } catch (e) {
       _isLoading = false;
       debugPrint('Error getting profile: $e');
+      // Keep the local username profile
       safeNotifyListeners();
-      return null;
+      return tempProfile;
     }
   }
 

@@ -29,6 +29,7 @@ import 'package:comunifi/services/mls/messages/messages.dart'
     show AddProposal, Welcome;
 import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
 import 'package:comunifi/services/profile/profile.dart';
+import 'package:comunifi/services/db/nostr_event.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -57,11 +58,16 @@ class GroupState with ChangeNotifier {
   MlsService? _mlsService;
   SecurePersistentMlsStorage? _mlsStorage;
   AppDBService? _dbService;
+  AppDBService? _eventDbService; // Separate DB for Nostr events
+  NostrEventTable? _eventTable;
   MlsGroup? _keysGroup;
   bool _wasNewNostrKeyGenerated = false;
 
   // Map of group ID (hex) to MLS group for quick lookup
   final Map<String, MlsGroup> _mlsGroups = {};
+
+  // Map of group ID (hex) to group name from announcements (cached from DB)
+  final Map<String, String> _groupNameCache = {};
 
   // Callback to ensure user profile (set by widgets that have access to ProfileState)
   Future<void> Function(String pubkey, String privateKey)?
@@ -127,6 +133,9 @@ class GroupState with ChangeNotifier {
         mlsGroupResolver: _resolveMlsGroup,
       );
 
+      // Initialize event database for group announcements
+      await _initializeEventDatabase();
+
       // Connect to relay
       await _nostrService!.connect((connected) {
         if (connected) {
@@ -135,6 +144,8 @@ class GroupState with ChangeNotifier {
           safeNotifyListeners();
           _loadSavedGroups();
           _startListeningForGroupEvents();
+          // Sync group announcements to local DB
+          _syncGroupAnnouncementsToDB();
           // Create personal group if new key was generated
           _ensurePersonalGroup();
           // Try to ensure user profile if callback is set
@@ -328,7 +339,125 @@ class GroupState with ChangeNotifier {
     _messageEventSubscription?.cancel();
     _nostrService?.disconnect();
     _dbService?.database?.close();
+    _eventDbService?.database?.close();
     super.dispose();
+  }
+
+  /// Initialize the event database for storing group announcements
+  Future<void> _initializeEventDatabase() async {
+    try {
+      _eventDbService = AppDBService();
+      await _eventDbService!.init('nostr_events');
+      _eventTable = NostrEventTable(_eventDbService!.database!);
+      await _eventTable!.create(_eventDbService!.database!);
+      debugPrint('Event database initialized for group announcements');
+    } catch (e) {
+      debugPrint('Failed to initialize event database: $e');
+      // Continue without event DB - group name resolution will fall back to MLS groups
+    }
+  }
+
+  /// Sync group announcements from relay to local database
+  /// This ensures we have all group metadata available for resolving group names
+  Future<void> _syncGroupAnnouncementsToDB() async {
+    if (_nostrService == null || !_isConnected || _eventTable == null) {
+      return;
+    }
+
+    try {
+      debugPrint('Syncing group announcements to local DB...');
+
+      // Fetch group announcements from relay (this will also cache them via NostrService)
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindGroupAnnouncement,
+        limit: 1000, // Fetch a large batch
+        useCache: false, // Always fetch fresh from relay for sync
+      );
+
+      // Store all announcements in our event table
+      for (final event in events) {
+        await _eventTable!.insert(event);
+      }
+
+      // Build cache of group names from announcements
+      _groupNameCache.clear();
+      for (final event in events) {
+        final announcement = _parseGroupAnnouncement(event);
+        if (announcement != null &&
+            announcement.mlsGroupId != null &&
+            announcement.name != null) {
+          _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+        }
+      }
+
+      debugPrint(
+        'Synced ${events.length} group announcements to local DB (${_groupNameCache.length} with names)',
+      );
+    } catch (e) {
+      debugPrint('Failed to sync group announcements to DB: $e');
+      // Continue - we can still try to load from cache
+    }
+
+    // Also load existing announcements from DB to populate cache
+    await _loadGroupNamesFromDB();
+  }
+
+  /// Load group names from local database into cache
+  Future<void> _loadGroupNamesFromDB() async {
+    if (_eventTable == null) return;
+
+    try {
+      // Query all kind 40 events (group announcements) from DB
+      final events = await _eventTable!.query(
+        kind: kindGroupAnnouncement,
+        limit: 10000, // Load all cached announcements
+      );
+
+      // Build cache from DB
+      for (final event in events) {
+        final announcement = _parseGroupAnnouncement(event);
+        if (announcement != null &&
+            announcement.mlsGroupId != null &&
+            announcement.name != null) {
+          _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+        }
+      }
+
+      debugPrint('Loaded ${_groupNameCache.length} group names from local DB');
+    } catch (e) {
+      debugPrint('Failed to load group names from DB: $e');
+    }
+  }
+
+  /// Get group name from local database by group ID hex
+  /// Returns null if group not found in DB
+  String? getGroupNameFromDB(String groupIdHex) {
+    // First check cache
+    if (_groupNameCache.containsKey(groupIdHex)) {
+      return _groupNameCache[groupIdHex];
+    }
+
+    // If not in cache, try to query DB (async, but we return synchronously)
+    // This is a fallback - the cache should be populated on load
+    return null;
+  }
+
+  /// Get group name from any available source (DB, MLS groups, etc.)
+  /// This is the main method to use for resolving group names
+  String? getGroupName(String groupIdHex) {
+    // First try DB cache (group announcements)
+    final dbName = getGroupNameFromDB(groupIdHex);
+    if (dbName != null) return dbName;
+
+    // Fallback to MLS groups (groups user is a member of)
+    for (final group in _groups) {
+      final groupIdHexFromGroup = _groupIdToHex(group.id);
+      if (groupIdHexFromGroup == groupIdHex) {
+        return group.name;
+      }
+    }
+
+    return null;
   }
 
   // state variables here
@@ -604,15 +733,12 @@ class GroupState with ChangeNotifier {
 
   /// Start listening for new group events
   /// Note: Groups are now MLS-based, so we just refresh the list periodically
-  /// Also listens for Welcome messages (kind 1060)
+  /// Also listens for Welcome messages (kind 1060) and group announcements (kind 40)
   void _startListeningForGroupEvents() {
-    // Groups are managed through MLS, so we don't need to listen for kind 40 events
-    // Instead, we'll refresh the groups list when needed
-
-    // Listen for Welcome messages (kind 1060)
     if (_nostrService == null || !_isConnected) return;
 
     try {
+      // Listen for Welcome messages (kind 1060)
       _nostrService!
           .listenToEvents(kind: kindMlsWelcome, limit: null)
           .listen(
@@ -626,8 +752,35 @@ class GroupState with ChangeNotifier {
               debugPrint('Error listening to Welcome messages: $error');
             },
           );
+
+      // Listen for new group announcements (kind 40) to keep DB and cache updated
+      _nostrService!
+          .listenToEvents(kind: kindGroupAnnouncement, limit: null)
+          .listen(
+            (event) async {
+              // Store in our event table
+              if (_eventTable != null) {
+                try {
+                  await _eventTable!.insert(event);
+                  // Update cache
+                  final announcement = _parseGroupAnnouncement(event);
+                  if (announcement != null &&
+                      announcement.mlsGroupId != null &&
+                      announcement.name != null) {
+                    _groupNameCache[announcement.mlsGroupId!] =
+                        announcement.name!;
+                  }
+                } catch (e) {
+                  debugPrint('Failed to store new group announcement: $e');
+                }
+              }
+            },
+            onError: (error) {
+              debugPrint('Error listening to group announcements: $error');
+            },
+          );
     } catch (e) {
-      debugPrint('Failed to start listening for Welcome messages: $e');
+      debugPrint('Failed to start listening for group events: $e');
     }
   }
 
@@ -832,6 +985,24 @@ class GroupState with ChangeNotifier {
             until ==
                 null, // Disable cache for pagination or when explicitly disabled
       );
+
+      // Store events in our event table and update cache
+      if (_eventTable != null) {
+        for (final event in events) {
+          try {
+            await _eventTable!.insert(event);
+            // Update cache
+            final announcement = _parseGroupAnnouncement(event);
+            if (announcement != null &&
+                announcement.mlsGroupId != null &&
+                announcement.name != null) {
+              _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+            }
+          } catch (e) {
+            debugPrint('Failed to store group announcement: $e');
+          }
+        }
+      }
 
       // Parse events into GroupAnnouncement objects
       final announcements = <GroupAnnouncement>[];

@@ -294,13 +294,8 @@ class FeedState with ChangeNotifier {
       );
 
       _events = pastEvents;
-      _events.sort(
-        (a, b) => b.createdAt.compareTo(a.createdAt),
-      ); // Newest first
-
-      if (_events.isNotEmpty) {
-        _oldestEventTime = _events.last.createdAt;
-      }
+      // Sort and deduplicate
+      _sortAndDeduplicateEvents();
 
       _isLoading = false;
       safeNotifyListeners();
@@ -331,12 +326,10 @@ class FeedState with ChangeNotifier {
       );
 
       if (pastEvents.isNotEmpty) {
-        // Add new events to the end (they're older)
+        // Add new events (they're older)
         _events.addAll(pastEvents);
-        _events.sort(
-          (a, b) => b.createdAt.compareTo(a.createdAt),
-        ); // Keep sorted
-        _oldestEventTime = _events.last.createdAt;
+        // Sort and deduplicate
+        _sortAndDeduplicateEvents();
       } else {
         // No more events available
         _oldestEventTime = null;
@@ -351,10 +344,36 @@ class FeedState with ChangeNotifier {
     }
   }
 
+  /// Sort events by creation date (newest first) and remove duplicates
+  void _sortAndDeduplicateEvents() {
+    // Remove duplicates by ID
+    final seenIds = <String>{};
+    _events.removeWhere((event) {
+      if (seenIds.contains(event.id)) {
+        return true;
+      }
+      seenIds.add(event.id);
+      return false;
+    });
+
+    // Sort by creation date (newest first)
+    _events.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+    // Update oldest event time
+    if (_events.isNotEmpty) {
+      _oldestEventTime = _events.last.createdAt;
+    } else {
+      _oldestEventTime = null;
+    }
+  }
+
   void _startListeningForNewEvents() {
     if (_nostrService == null || !_isConnected) return;
 
     try {
+      // Cancel existing subscription if any
+      _eventSubscription?.cancel();
+
       // Listen for new events (kind 1 = text notes)
       // This will receive events as they come in real-time
       _eventSubscription = _nostrService!
@@ -366,8 +385,9 @@ class FeedState with ChangeNotifier {
             (event) {
               // Check if we already have this event (avoid duplicates)
               if (!_events.any((e) => e.id == event.id)) {
-                // Add new events at the top (they're newest)
-                _events.insert(0, event);
+                // Add event and maintain sort order
+                _events.add(event);
+                _sortAndDeduplicateEvents();
                 safeNotifyListeners();
               }
             },
@@ -380,6 +400,50 @@ class FeedState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to start listening for events: $e');
       _errorMessage = 'Failed to start listening: $e';
+      safeNotifyListeners();
+    }
+  }
+
+  /// Refresh events from the relay (pull to refresh)
+  /// This fetches the latest events without reinitializing the connection
+  Future<void> refreshEvents() async {
+    if (_nostrService == null || !_isConnected) return;
+
+    try {
+      _isLoading = true;
+      safeNotifyListeners();
+
+      // Get the newest event time we have (or null if empty)
+      final newestEventTime = _events.isNotEmpty
+          ? _events.first.createdAt
+          : null;
+
+      // Request latest events (kind 1 = text notes)
+      // If we have events, only get ones newer than our newest
+      final newEvents = await _nostrService!.requestPastEvents(
+        kind: 1,
+        since: newestEventTime != null
+            ? newestEventTime.add(const Duration(seconds: 1))
+            : null,
+        limit: _pageSize,
+      );
+
+      // Add new events to the list
+      for (final event in newEvents) {
+        // Only add if we don't already have it
+        if (!_events.any((e) => e.id == event.id)) {
+          _events.add(event);
+        }
+      }
+
+      // Sort and deduplicate
+      _sortAndDeduplicateEvents();
+
+      _isLoading = false;
+      safeNotifyListeners();
+    } catch (e) {
+      _isLoading = false;
+      _errorMessage = 'Failed to refresh events: $e';
       safeNotifyListeners();
     }
   }

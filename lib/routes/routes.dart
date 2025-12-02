@@ -1,5 +1,6 @@
 import 'package:comunifi/screens/feed/feed_screen.dart';
 import 'package:comunifi/screens/onboarding_screen.dart';
+import 'package:comunifi/screens/profile_screen.dart';
 import 'package:comunifi/state/feed.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -35,6 +36,14 @@ GoRouter createRouter(
           create: (_) => FeedState(),
           child: const FeedScreen(),
         );
+      },
+    ),
+    GoRoute(
+      name: 'Profile',
+      path: '/profile',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return const ProfileScreen();
       },
     ),
   ],
