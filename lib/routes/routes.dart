@@ -13,7 +13,8 @@ GoRouter createRouter(
   GlobalKey<NavigatorState> placeShellNavigatorKey,
   List<NavigatorObserver> observers,
 ) => GoRouter(
-  initialLocation: '/',
+  initialLocation:
+      '/', // TODO: when we are done debugging, automatically start on feed if the user has credentials
   debugLogDiagnostics: kDebugMode,
   navigatorKey: rootNavigatorKey,
   observers: observers,
