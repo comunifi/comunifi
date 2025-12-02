@@ -21,6 +21,7 @@ class _FeedScreenState extends State<FeedScreen> {
   final TextEditingController _messageController = TextEditingController();
   bool _isPublishing = false;
   String? _publishError;
+  static final Map<String, VoidCallback> _commentCountReloaders = {};
 
   @override
   void initState() {
@@ -176,6 +177,27 @@ class _FeedScreenState extends State<FeedScreen> {
         feedState.loadMoreEvents();
       }
     }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Reload all comment counts when navigating back to feed
+    // This is called when the route becomes active again
+    // Add a small delay to ensure any cached comments are fully written
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (!mounted) return;
+      // Create a copy of the values to avoid issues if map changes during iteration
+      final reloaders = List<VoidCallback>.from(_commentCountReloaders.values);
+      for (final reloader in reloaders) {
+        try {
+          reloader();
+        } catch (e) {
+          // Ignore errors from disposed widgets
+          debugPrint('Error reloading comment count: $e');
+        }
+      }
+    });
   }
 
   @override
@@ -341,6 +363,27 @@ class _FeedScreenState extends State<FeedScreen> {
                                 CupertinoSliverRefreshControl(
                                   onRefresh: () async {
                                     await feedState.refreshEvents();
+                                    // Reload all comment counts after refresh
+                                    // Wait a bit for the refresh to complete
+                                    await Future.delayed(
+                                      const Duration(milliseconds: 100),
+                                    );
+                                    if (mounted) {
+                                      // Create a copy of the values to avoid issues if map changes during iteration
+                                      final reloaders = List<VoidCallback>.from(
+                                        _commentCountReloaders.values,
+                                      );
+                                      for (final reloader in reloaders) {
+                                        try {
+                                          reloader();
+                                        } catch (e) {
+                                          // Ignore errors from disposed widgets
+                                          debugPrint(
+                                            'Error reloading comment count: $e',
+                                          );
+                                        }
+                                      }
+                                    }
                                   },
                                 ),
                                 SliverList(
@@ -504,11 +547,92 @@ class _EventItemState extends State<_EventItem> {
   }
 }
 
-class _EventItemContent extends StatelessWidget {
+class _EventItemContent extends StatefulWidget {
   final NostrEventModel event;
   final String displayName;
 
   const _EventItemContent({required this.event, required this.displayName});
+
+  @override
+  State<_EventItemContent> createState() => _EventItemContentState();
+}
+
+class _EventItemContentState extends State<_EventItemContent> {
+  int _commentCount = 0;
+  bool _isLoadingCount = true;
+  bool _wasLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Register reloader so FeedScreen can trigger reloads
+    _FeedScreenState._commentCountReloaders[widget.event.id] =
+        _loadCommentCount;
+    _loadCommentCount();
+  }
+
+  @override
+  void dispose() {
+    // Unregister reloader
+    _FeedScreenState._commentCountReloaders.remove(widget.event.id);
+    super.dispose();
+  }
+
+  Future<void> _loadCommentCount() async {
+    if (!mounted) return;
+
+    final feedState = context.read<FeedState>();
+    final count = await feedState.getCommentCount(widget.event.id);
+    if (mounted) {
+      setState(() {
+        _commentCount = count;
+        _isLoadingCount = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Listen to FeedState loading state - reload comment count when feed finishes loading/refreshing
+    final isLoading = context.select<FeedState, bool>(
+      (feedState) => feedState.isLoading,
+    );
+
+    // Reload comment count when feed finishes loading (after refresh or initial load)
+    // Only reload once per loading cycle to avoid duplicate loads
+    if (_wasLoading && !isLoading && !_isLoadingCount) {
+      _wasLoading = false; // Set immediately to prevent duplicate reloads
+      // Add a small delay to ensure cache is updated
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (mounted) {
+          _loadCommentCount();
+        }
+      });
+    } else if (isLoading) {
+      _wasLoading = true;
+    }
+
+    return _EventItemContentWidget(
+      event: widget.event,
+      displayName: widget.displayName,
+      commentCount: _commentCount,
+      isLoadingCount: _isLoadingCount,
+    );
+  }
+}
+
+class _EventItemContentWidget extends StatelessWidget {
+  final NostrEventModel event;
+  final String displayName;
+  final int commentCount;
+  final bool isLoadingCount;
+
+  const _EventItemContentWidget({
+    required this.event,
+    required this.displayName,
+    required this.commentCount,
+    required this.isLoadingCount,
+  });
 
   String _formatDate(DateTime date) {
     final now = DateTime.now();
@@ -598,6 +722,45 @@ class _EventItemContent extends StatelessWidget {
           ],
           const SizedBox(height: 8),
           Text(event.content, style: const TextStyle(fontSize: 15)),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              CupertinoButton(
+                padding: EdgeInsets.zero,
+                minSize: 0,
+                onPressed: () {
+                  context.push('/post/${event.id}');
+                },
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      CupertinoIcons.chat_bubble,
+                      size: 20,
+                      color: CupertinoColors.systemBlue,
+                    ),
+                    if (isLoadingCount)
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CupertinoActivityIndicator(radius: 8),
+                      )
+                    else if (commentCount > 0) ...[
+                      const SizedBox(width: 4),
+                      Text(
+                        commentCount.toString(),
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: CupertinoColors.systemBlue,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );

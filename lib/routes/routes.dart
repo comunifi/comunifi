@@ -1,7 +1,9 @@
 import 'package:comunifi/screens/feed/feed_screen.dart';
 import 'package:comunifi/screens/onboarding_screen.dart';
+import 'package:comunifi/screens/post/post_detail_screen.dart';
 import 'package:comunifi/screens/profile_screen.dart';
 import 'package:comunifi/state/feed.dart';
+import 'package:comunifi/state/post_detail.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
@@ -45,6 +47,18 @@ GoRouter createRouter(
       parentNavigatorKey: rootNavigatorKey,
       builder: (context, state) {
         return const ProfileScreen();
+      },
+    ),
+    GoRoute(
+      name: 'PostDetail',
+      path: '/post/:postId',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        final postId = state.pathParameters['postId']!;
+        return ChangeNotifierProvider(
+          create: (_) => PostDetailState(postId),
+          child: PostDetailScreen(postId: postId),
+        );
       },
     ),
   ],

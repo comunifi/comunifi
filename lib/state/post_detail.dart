@@ -12,8 +12,8 @@ import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
 
-class FeedState with ChangeNotifier {
-  // instantiate services here
+class PostDetailState with ChangeNotifier {
+  final String postId;
   NostrService? _nostrService;
   StreamSubscription<NostrEventModel>? _eventSubscription;
   MlsService? _mlsService;
@@ -21,7 +21,7 @@ class FeedState with ChangeNotifier {
   AppDBService? _dbService;
   MlsGroup? _keysGroup;
 
-  FeedState() {
+  PostDetailState(this.postId) {
     _initialize();
   }
 
@@ -37,7 +37,6 @@ class FeedState with ChangeNotifier {
       try {
         await dotenv.load(fileName: '.env');
       } catch (e) {
-        // .env file might not exist, try to continue with environment variables
         debugPrint('Could not load .env file: $e');
       }
 
@@ -58,8 +57,9 @@ class FeedState with ChangeNotifier {
           _isConnected = true;
           _errorMessage = null;
           safeNotifyListeners();
-          _loadInitialEvents();
-          _startListeningForNewEvents();
+          _loadPost();
+          _loadComments();
+          _startListeningForNewComments();
         } else {
           _isConnected = false;
           _errorMessage = 'Failed to connect to relay';
@@ -75,7 +75,7 @@ class FeedState with ChangeNotifier {
   Future<void> _initializeKeysGroup() async {
     try {
       _dbService = AppDBService();
-      await _dbService!.init('feed_keys');
+      await _dbService!.init('post_detail_keys');
 
       _mlsStorage = await SecurePersistentMlsStorage.fromDatabase(
         database: _dbService!.database!,
@@ -111,10 +111,8 @@ class FeedState with ChangeNotifier {
       }
 
       _keysGroup = keysGroup;
-      debugPrint('Keys group initialized: ${_keysGroup!.id.bytes}');
     } catch (e) {
       debugPrint('Failed to initialize keys group: $e');
-      // Continue without keys group - it's not critical for feed functionality
     }
   }
 
@@ -125,60 +123,48 @@ class FeedState with ChangeNotifier {
     }
 
     try {
-      // Try to load existing Nostr key from storage
       final groupIdHex = _keysGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
-      // Check if we have a stored Nostr key ciphertext
       final storedCiphertext = await _loadStoredNostrKeyCiphertext(groupIdHex);
 
       if (storedCiphertext != null) {
-        // Decrypt and verify we have a valid key
         try {
           final decrypted = await _keysGroup!.decryptApplicationMessage(
             storedCiphertext,
           );
           final keyData = jsonDecode(String.fromCharCodes(decrypted));
           debugPrint('Loaded existing Nostr key: ${keyData['public']}');
-          return; // Key already exists
+          return;
         } catch (e) {
           debugPrint('Failed to decrypt stored key, generating new one: $e');
-          // Continue to generate new key
         }
       }
 
-      // Generate new Nostr key pair
-      // Generate a random 32-byte private key (secp256k1 private key size for Nostr)
       final random = Random.secure();
       final privateKeyBytes = Uint8List(32);
       for (int i = 0; i < 32; i++) {
         privateKeyBytes[i] = random.nextInt(256);
       }
 
-      // Convert to hex string (Nostr private keys are hex-encoded)
       final privateKeyHex = privateKeyBytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
-      // Derive public key from private key using dart_nostr
       final keyPair = NostrKeyPairs(private: privateKeyHex);
 
-      // Store both private and public keys
       final keyData = {'private': keyPair.private, 'public': keyPair.public};
       final keyJson = jsonEncode(keyData);
       final keyBytes = Uint8List.fromList(keyJson.codeUnits);
 
-      // Encrypt and store in MLS group
       final ciphertext = await _keysGroup!.encryptApplicationMessage(keyBytes);
 
-      // Store the ciphertext in the database for later retrieval
       await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
 
       debugPrint('Generated and stored new Nostr key: ${keyPair.public}');
     } catch (e) {
       debugPrint('Failed to ensure Nostr key: $e');
-      // Continue without Nostr key - feed can still work for reading
     }
   }
 
@@ -187,6 +173,18 @@ class FeedState with ChangeNotifier {
   ) async {
     try {
       if (_dbService?.database == null) return null;
+      
+      // Ensure table exists before querying
+      await _dbService!.database!.execute('''
+        CREATE TABLE IF NOT EXISTS nostr_key_storage (
+          group_id TEXT PRIMARY KEY,
+          epoch INTEGER NOT NULL,
+          sender_index INTEGER NOT NULL,
+          nonce BLOB NOT NULL,
+          ciphertext BLOB NOT NULL
+        )
+      ''');
+      
       final maps = await _dbService!.database!.query(
         'nostr_key_storage',
         where: 'group_id = ?',
@@ -210,7 +208,7 @@ class FeedState with ChangeNotifier {
         contentType: MlsContentType.application,
       );
     } catch (e) {
-      // Table might not exist yet
+      debugPrint('Error loading stored Nostr key: $e');
       return null;
     }
   }
@@ -222,7 +220,6 @@ class FeedState with ChangeNotifier {
     try {
       if (_dbService?.database == null) return;
 
-      // Create table if it doesn't exist
       await _dbService!.database!.execute('''
         CREATE TABLE IF NOT EXISTS nostr_key_storage (
           group_id TEXT PRIMARY KEY,
@@ -233,7 +230,6 @@ class FeedState with ChangeNotifier {
         )
       ''');
 
-      // Store the ciphertext
       await _dbService!.database!.insert('nostr_key_storage', {
         'group_id': groupIdHex,
         'epoch': ciphertext.epoch,
@@ -246,7 +242,6 @@ class FeedState with ChangeNotifier {
     }
   }
 
-  // private variables here
   bool _mounted = true;
   void safeNotifyListeners() {
     if (_mounted) {
@@ -263,246 +258,173 @@ class FeedState with ChangeNotifier {
     super.dispose();
   }
 
-  // state variables here
   bool _isConnected = false;
   bool _isLoading = false;
-  bool _isLoadingMore = false;
+  bool _isLoadingComments = false;
   String? _errorMessage;
-  List<NostrEventModel> _events = [];
-  DateTime? _oldestEventTime;
-  static const int _pageSize = 20;
+  NostrEventModel? _post;
+  List<NostrEventModel> _comments = [];
 
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
-  bool get isLoadingMore => _isLoadingMore;
+  bool get isLoadingComments => _isLoadingComments;
   String? get errorMessage => _errorMessage;
-  List<NostrEventModel> get events => _events;
-  bool get hasMoreEvents => _oldestEventTime != null;
+  NostrEventModel? get post => _post;
+  List<NostrEventModel> get comments => _comments;
 
-  // state methods here
-  Future<void> _loadInitialEvents() async {
+  Future<void> _loadPost() async {
     if (_nostrService == null || !_isConnected) return;
 
     try {
       _isLoading = true;
       safeNotifyListeners();
 
-      // Request initial batch of events (kind 1 = text notes)
-      final pastEvents = await _nostrService!.requestPastEvents(
+      // Try to get from cache first (most posts will be cached from feed)
+      final cachedPost = await _nostrService!.getCachedEvent(postId);
+      if (cachedPost != null) {
+        _post = cachedPost;
+        _isLoading = false;
+        safeNotifyListeners();
+        return;
+      }
+
+      // If not in cache, query relay for kind 1 events and find the one with matching ID
+      // This is inefficient but necessary since we can't query by event ID directly
+      final events = await _nostrService!.requestPastEvents(
         kind: 1,
-        limit: _pageSize,
+        limit: 1000, // Get a large batch to find the post
       );
 
-      // Filter out comments (events with 'e' tags are replies/comments)
-      _events = pastEvents.where((event) {
-        // Check if event has 'e' tag (which means it's a comment/reply)
-        for (final tag in event.tags) {
-          if (tag.isNotEmpty && tag[0] == 'e') {
-            return false; // This is a comment, exclude it
-          }
-        }
-        return true; // This is a top-level post, include it
-      }).toList();
-
-      // Sort and deduplicate
-      _sortAndDeduplicateEvents();
+      // Find the post by ID
+      try {
+        _post = events.firstWhere((e) => e.id == postId);
+      } catch (e) {
+        // Post not found in the batch, try querying more
+        final moreEvents = await _nostrService!.requestPastEvents(
+          kind: 1,
+          limit: 5000,
+        );
+        _post = moreEvents.firstWhere(
+          (e) => e.id == postId,
+          orElse: () => throw Exception('Post not found'),
+        );
+      }
 
       _isLoading = false;
       safeNotifyListeners();
     } catch (e) {
       _isLoading = false;
-      _errorMessage = 'Failed to load events: $e';
+      _errorMessage = 'Failed to load post: $e';
       safeNotifyListeners();
     }
   }
 
-  Future<void> loadMoreEvents() async {
-    if (_nostrService == null ||
-        !_isConnected ||
-        _isLoadingMore ||
-        _oldestEventTime == null) {
-      return;
-    }
-
-    try {
-      _isLoadingMore = true;
-      safeNotifyListeners();
-
-      // Request events older than the oldest one we have
-      final pastEvents = await _nostrService!.requestPastEvents(
-        kind: 1,
-        until: _oldestEventTime!.subtract(const Duration(seconds: 1)),
-        limit: _pageSize,
-      );
-
-      if (pastEvents.isNotEmpty) {
-        // Filter out comments (events with 'e' tags are replies/comments)
-        final topLevelPosts = pastEvents.where((event) {
-          // Check if event has 'e' tag (which means it's a comment/reply)
-          for (final tag in event.tags) {
-            if (tag.isNotEmpty && tag[0] == 'e') {
-              return false; // This is a comment, exclude it
-            }
-          }
-          return true; // This is a top-level post, include it
-        }).toList();
-
-        // Add new events (they're older)
-        _events.addAll(topLevelPosts);
-        // Sort and deduplicate
-        _sortAndDeduplicateEvents();
-      } else {
-        // No more events available
-        _oldestEventTime = null;
-      }
-
-      _isLoadingMore = false;
-      safeNotifyListeners();
-    } catch (e) {
-      _isLoadingMore = false;
-      _errorMessage = 'Failed to load more events: $e';
-      safeNotifyListeners();
-    }
-  }
-
-  /// Sort events by creation date (newest first) and remove duplicates
-  void _sortAndDeduplicateEvents() {
-    // Remove duplicates by ID
-    final seenIds = <String>{};
-    _events.removeWhere((event) {
-      if (seenIds.contains(event.id)) {
-        return true;
-      }
-      seenIds.add(event.id);
-      return false;
-    });
-
-    // Sort by creation date (newest first)
-    _events.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-    // Update oldest event time
-    if (_events.isNotEmpty) {
-      _oldestEventTime = _events.last.createdAt;
-    } else {
-      _oldestEventTime = null;
-    }
-  }
-
-  void _startListeningForNewEvents() {
+  Future<void> _loadComments() async {
     if (_nostrService == null || !_isConnected) return;
 
     try {
-      // Cancel existing subscription if any
+      _isLoadingComments = true;
+      safeNotifyListeners();
+
+      // Query for comments (kind 1 events with 'e' tag referencing this post)
+      final pastComments = await _nostrService!.requestPastEvents(
+        kind: 1,
+        tags: [postId],
+        tagKey: 'e',
+        limit: 100,
+      );
+
+      // Filter to only include comments that reference this post
+      _comments = pastComments
+          .where((event) {
+            // Check if event has 'e' tag with this post ID
+            for (final tag in event.tags) {
+              if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+                if (tag[1] == postId) {
+                  return true;
+                }
+              }
+            }
+            return false;
+          })
+          .toList();
+
+      // Sort by creation date (oldest first for comments)
+      _comments.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+      _isLoadingComments = false;
+      safeNotifyListeners();
+    } catch (e) {
+      _isLoadingComments = false;
+      _errorMessage = 'Failed to load comments: $e';
+      safeNotifyListeners();
+    }
+  }
+
+  void _startListeningForNewComments() {
+    if (_nostrService == null || !_isConnected) return;
+
+    try {
       _eventSubscription?.cancel();
 
-      // Listen for new events (kind 1 = text notes)
-      // This will receive events as they come in real-time
+      // Listen for all new kind 1 events and filter for comments on this post
+      // Note: We can't use tags filter directly because listenToEvents auto-detects
+      // and might treat postId as a group ID. So we filter manually.
       _eventSubscription = _nostrService!
           .listenToEvents(
             kind: 1,
-            limit: null, // No limit for real-time events
+            limit: null,
           )
           .listen(
             (event) {
-              // Check if this is a comment (has 'e' tag) - exclude it from feed
+              // Check if this is a comment on this post by checking 'e' tag
               bool isComment = false;
               for (final tag in event.tags) {
-                if (tag.isNotEmpty && tag[0] == 'e') {
-                  isComment = true;
-                  break;
+                if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+                  if (tag[1] == postId) {
+                    isComment = true;
+                    break;
+                  }
                 }
               }
 
-              // Only add top-level posts (not comments)
-              if (!isComment && !_events.any((e) => e.id == event.id)) {
-                // Add event and maintain sort order
-                _events.add(event);
-                _sortAndDeduplicateEvents();
+              if (isComment && !_comments.any((e) => e.id == event.id)) {
+                _comments.add(event);
+                _comments.sort((a, b) => a.createdAt.compareTo(b.createdAt));
                 safeNotifyListeners();
               }
             },
             onError: (error) {
-              debugPrint('Error listening to events: $error');
-              _errorMessage = 'Error receiving events: $error';
+              debugPrint('Error listening to comments: $error');
+              _errorMessage = 'Error receiving comments: $error';
               safeNotifyListeners();
             },
           );
     } catch (e) {
-      debugPrint('Failed to start listening for events: $e');
+      debugPrint('Failed to start listening for comments: $e');
       _errorMessage = 'Failed to start listening: $e';
       safeNotifyListeners();
     }
   }
 
-  /// Refresh events from the relay (pull to refresh)
-  /// This fetches the latest events without reinitializing the connection
-  Future<void> refreshEvents() async {
-    if (_nostrService == null || !_isConnected) return;
-
-    try {
-      _isLoading = true;
-      safeNotifyListeners();
-
-      // Get the newest event time we have (or null if empty)
-      final newestEventTime = _events.isNotEmpty
-          ? _events.first.createdAt
-          : null;
-
-      // Request latest events (kind 1 = text notes)
-      // If we have events, only get ones newer than our newest
-      final newEvents = await _nostrService!.requestPastEvents(
-        kind: 1,
-        since: newestEventTime != null
-            ? newestEventTime.add(const Duration(seconds: 1))
-            : null,
-        limit: _pageSize,
-      );
-
-      // Add new events to the list (filter out comments)
-      for (final event in newEvents) {
-        // Check if this is a comment (has 'e' tag) - exclude it from feed
-        bool isComment = false;
-        for (final tag in event.tags) {
-          if (tag.isNotEmpty && tag[0] == 'e') {
-            isComment = true;
-            break;
-          }
-        }
-
-        // Only add top-level posts (not comments) if we don't already have it
-        if (!isComment && !_events.any((e) => e.id == event.id)) {
-          _events.add(event);
-        }
-      }
-
-      // Sort and deduplicate
-      _sortAndDeduplicateEvents();
-
-      _isLoading = false;
-      safeNotifyListeners();
-    } catch (e) {
-      _isLoading = false;
-      _errorMessage = 'Failed to refresh events: $e';
-      safeNotifyListeners();
-    }
+  Future<void> refreshComments() async {
+    await _loadComments();
   }
 
   Future<void> retryConnection() async {
     _errorMessage = null;
-    _events.clear();
-    _oldestEventTime = null;
+    _comments.clear();
     safeNotifyListeners();
     await _initialize();
   }
 
-  /// Publish a simple text message (kind 1) to the Nostr relay
-  Future<void> publishMessage(String content) async {
+  /// Publish a comment (kind 1 event with 'e' tag referencing the post)
+  Future<void> publishComment(String content) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
     }
 
     try {
-      // Get the stored private key
       final privateKey = await _getNostrPrivateKey();
       if (privateKey == null || privateKey.isEmpty) {
         throw Exception(
@@ -510,19 +432,23 @@ class FeedState with ChangeNotifier {
         );
       }
 
-      // Derive key pair from private key using dart_nostr
       final keyPair = NostrKeyPairs(private: privateKey);
 
-      // Create and sign a NostrEvent using dart_nostr
+      // Create tags with 'e' tag referencing the post
+      // Format: ['e', postId, relayUrl, 'reply']
+      final tags = [
+        ['e', postId, '', 'reply'],
+        ...addClientIdTag([]),
+      ];
+
       final nostrEvent = NostrEvent.fromPartialData(
-        kind: 1, // Text note
+        kind: 1, // Text note (comment)
         content: content,
         keyPairs: keyPair,
-        tags: addClientIdTag([]),
+        tags: tags,
         createdAt: DateTime.now(),
       );
 
-      // Convert to our model format for publishing
       final eventModel = NostrEventModel(
         id: nostrEvent.id,
         pubkey: nostrEvent.pubkey,
@@ -533,17 +459,24 @@ class FeedState with ChangeNotifier {
         createdAt: nostrEvent.createdAt,
       );
 
-      // Publish to the relay
       _nostrService!.publishEvent(eventModel.toJson());
 
-      debugPrint('Published message to relay: ${eventModel.id}');
+      // Immediately cache the comment so it shows up in feed counters
+      try {
+        await _nostrService!.cacheEvent(eventModel);
+        debugPrint('Cached published comment: ${eventModel.id}');
+      } catch (e) {
+        debugPrint('Failed to cache published comment: $e');
+        // Don't fail the publish if caching fails
+      }
+
+      debugPrint('Published comment to relay: ${eventModel.id}');
     } catch (e) {
-      debugPrint('Failed to publish message: $e');
+      debugPrint('Failed to publish comment: $e');
       rethrow;
     }
   }
 
-  /// Get the stored Nostr private key
   Future<String?> _getNostrPrivateKey() async {
     if (_keysGroup == null || _dbService?.database == null) {
       return null;
@@ -559,7 +492,6 @@ class FeedState with ChangeNotifier {
         return null;
       }
 
-      // Decrypt the key
       final decrypted = await _keysGroup!.decryptApplicationMessage(
         storedCiphertext,
       );
@@ -570,22 +502,5 @@ class FeedState with ChangeNotifier {
       return null;
     }
   }
-
-  /// Get comment count for a post (events with 'e' tag referencing the post)
-  Future<int> getCommentCount(String postId) async {
-    if (_nostrService == null) return 0;
-
-    try {
-      // Query cached events with 'e' tag matching the post ID
-      final comments = await _nostrService!.queryCachedEvents(
-        kind: 1,
-        tagKey: 'e',
-        tagValue: postId,
-      );
-      return comments.length;
-    } catch (e) {
-      debugPrint('Error getting comment count: $e');
-      return 0;
-    }
-  }
 }
+
