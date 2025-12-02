@@ -5,6 +5,7 @@ import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
+import 'package:comunifi/screens/feed/invite_user_modal.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -166,12 +167,27 @@ class _FeedScreenState extends State<FeedScreen> {
           navigationBar: CupertinoNavigationBar(
             middle: Text(activeGroup?.name ?? 'Feed'),
             trailing: activeGroup != null
-                ? CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    onPressed: () {
-                      groupState.setActiveGroup(null);
-                    },
-                    child: const Text('Exit Group'),
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          showCupertinoModalPopup(
+                            context: context,
+                            builder: (context) => const InviteUserModal(),
+                          );
+                        },
+                        child: const Icon(CupertinoIcons.person_add),
+                      ),
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          groupState.setActiveGroup(null);
+                        },
+                        child: const Text('Exit Group'),
+                      ),
+                    ],
                   )
                 : null,
           ),

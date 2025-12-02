@@ -421,11 +421,17 @@ class ProfileState with ChangeNotifier {
       });
 
       // Create and sign the profile event
+      // Add username as a tag for searchability (normalized to lowercase)
+      final tags = [
+        ['u', username.toLowerCase()], // Username tag for searchability
+        ...addClientIdTag([]),
+      ];
+      
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 0, // Kind 0 is profile metadata
         content: profileJson,
         keyPairs: keyPair,
-        tags: addClientIdTag([]),
+        tags: tags,
         createdAt: DateTime.now(),
       );
 
@@ -443,7 +449,10 @@ class ProfileState with ChangeNotifier {
       // Publish to the relay
       await _nostrService!.publishEvent(eventModel.toJson());
 
-      debugPrint('Published profile event with username: $username');
+      // Immediately cache the event in the database so it persists after app restart
+      await _nostrService!.cacheEvent(eventModel);
+
+      debugPrint('Published and cached profile event with username: $username');
 
       // Update our cached profile
       final newProfile = ProfileData.fromEvent(eventModel);
@@ -465,6 +474,148 @@ class ProfileState with ChangeNotifier {
 
     // Fetch again
     await getProfile(pubkey);
+  }
+
+  /// Search for a user by username
+  /// Returns the profile if found, null otherwise
+  Future<ProfileData?> searchByUsername(String username) async {
+    if (_profileService == null) {
+      debugPrint('Profile service not initialized');
+      return null;
+    }
+
+    try {
+      final profile = await _profileService!.searchByUsername(username);
+      if (profile != null) {
+        // Cache the profile
+        _profiles[profile.pubkey] = profile;
+        safeNotifyListeners();
+      }
+      return profile;
+    } catch (e) {
+      debugPrint('Error searching for username: $e');
+      return null;
+    }
+  }
+
+  /// Check if a username is available (not taken by another user)
+  /// Returns true if username is available, false if taken
+  Future<bool> isUsernameAvailable(String username, String currentUserPubkey) async {
+    if (_profileService == null) {
+      debugPrint('Profile service not initialized');
+      return false;
+    }
+
+    try {
+      return await _profileService!.isUsernameAvailable(username, currentUserPubkey);
+    } catch (e) {
+      debugPrint('Error checking username availability: $e');
+      return false;
+    }
+  }
+
+  /// Update the user's profile with a new username
+  /// [username] - The new username
+  /// [pubkey] - The user's pubkey (optional, will try to get from storage)
+  /// [privateKey] - The user's private key (optional, will try to get from storage)
+  Future<void> updateUsername({
+    required String username,
+    String? pubkey,
+    String? privateKey,
+  }) async {
+    if (!_isConnected || _nostrService == null || _profileService == null) {
+      throw Exception('Not connected to relay or profile service not initialized');
+    }
+
+    try {
+      // Use provided keys or try to get from our own storage
+      final finalPubkey = pubkey ?? await getNostrPublicKey();
+      if (finalPubkey == null) {
+        throw Exception('No pubkey available');
+      }
+
+      // Use provided private key or try to get from our own storage
+      final finalPrivateKey = privateKey ?? await _getNostrPrivateKey();
+      if (finalPrivateKey == null) {
+        throw Exception('No private key available');
+      }
+
+      // Get existing profile to preserve other fields
+      final existingProfile = await _profileService!.getProfile(finalPubkey);
+      final existingAbout = existingProfile?.about;
+      final existingPicture = existingProfile?.picture;
+      final existingBanner = existingProfile?.banner;
+      final existingWebsite = existingProfile?.website;
+      final existingNip05 = existingProfile?.nip05;
+
+      final keyPair = NostrKeyPairs(private: finalPrivateKey);
+
+      // Create profile JSON with new username, preserving other fields
+      final profileData = <String, dynamic>{
+        'name': username,
+        'display_name': username,
+      };
+      
+      if (existingAbout != null) {
+        profileData['about'] = existingAbout;
+      }
+      if (existingPicture != null) {
+        profileData['picture'] = existingPicture;
+      }
+      if (existingBanner != null) {
+        profileData['banner'] = existingBanner;
+      }
+      if (existingWebsite != null) {
+        profileData['website'] = existingWebsite;
+      }
+      if (existingNip05 != null) {
+        profileData['nip05'] = existingNip05;
+      }
+
+      final profileJson = jsonEncode(profileData);
+
+      // Create and sign the profile event
+      // Add username as a tag for searchability (normalized to lowercase)
+      final tags = [
+        ['u', username.toLowerCase()], // Username tag for searchability
+        ...addClientIdTag([]),
+      ];
+      
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 0, // Kind 0 is profile metadata
+        content: profileJson,
+        keyPairs: keyPair,
+        tags: tags,
+        createdAt: DateTime.now(),
+      );
+
+      // Convert to our model format
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      // Publish to the relay
+      await _nostrService!.publishEvent(eventModel.toJson());
+
+      // Immediately cache the event in the database so it persists after app restart
+      await _nostrService!.cacheEvent(eventModel);
+
+      debugPrint('Published and cached updated profile event with username: $username');
+
+      // Update our cached profile
+      final newProfile = ProfileData.fromEvent(eventModel);
+      _profiles[finalPubkey] = newProfile;
+      safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Failed to update username: $e');
+      rethrow;
+    }
   }
 }
 

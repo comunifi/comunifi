@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -24,6 +25,7 @@ class OnboardingScreen extends StatefulWidget {
 class _OnboardingScreenState extends State<OnboardingScreen> {
   final TextEditingController _groupNameController = TextEditingController();
   final TextEditingController _groupAboutController = TextEditingController();
+  final TextEditingController _usernameController = TextEditingController();
   bool _isCreatingGroup = false;
   String? _createGroupError;
   bool _isFetchingGroups = false;
@@ -31,10 +33,20 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   String? _userNostrPubkey;
   String? _userUsername;
   bool _hasFetchedOnConnect = false;
+  bool _isCheckingUsername = false;
+  bool? _usernameAvailable;
+  String? _usernameCheckError;
+  bool _isUpdatingUsername = false;
+  String? _updateUsernameError;
+  Timer? _debounceTimer;
+  bool _skipNextUsernameLoad =
+      false; // Flag to prevent overwriting after update
 
   @override
   void initState() {
     super.initState();
+    _usernameController.addListener(_onUsernameChanged);
+
     // Set up profile callback in GroupState
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final groupState = context.read<GroupState>();
@@ -56,13 +68,167 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     });
   }
 
+  void _onUsernameChanged() {
+    // Reset state when username changes
+    setState(() {
+      _usernameAvailable = null;
+      _usernameCheckError = null;
+      _updateUsernameError = null;
+    });
+
+    // Cancel previous timer
+    _debounceTimer?.cancel();
+
+    final username = _usernameController.text.trim();
+    if (username.isEmpty) {
+      return;
+    }
+
+    // Don't check if it's the same as current username
+    if (username == _userUsername) {
+      setState(() {
+        _usernameAvailable = true; // Their own username is always available
+      });
+      return;
+    }
+
+    // Debounce: wait 500ms after user stops typing
+    _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+      _checkUsernameAvailability(username);
+    });
+  }
+
+  Future<void> _checkUsernameAvailability(String username) async {
+    if (username.isEmpty || _userNostrPubkey == null) {
+      setState(() {
+        _usernameAvailable = null;
+        _isCheckingUsername = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isCheckingUsername = true;
+      _usernameCheckError = null;
+    });
+
+    try {
+      final profileState = context.read<ProfileState>();
+      final isAvailable = await profileState.isUsernameAvailable(
+        username,
+        _userNostrPubkey!,
+      );
+
+      if (mounted) {
+        setState(() {
+          _isCheckingUsername = false;
+          _usernameAvailable = isAvailable;
+          if (!isAvailable) {
+            _usernameCheckError = 'Username is already taken';
+          }
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isCheckingUsername = false;
+          _usernameAvailable = false;
+          _usernameCheckError = 'Error checking username: $e';
+        });
+      }
+    }
+  }
+
+  Future<void> _updateUsername() async {
+    final username = _usernameController.text.trim();
+    if (username.isEmpty) {
+      setState(() {
+        _updateUsernameError = 'Username cannot be empty';
+      });
+      return;
+    }
+
+    if (_usernameAvailable != true) {
+      setState(() {
+        _updateUsernameError = 'Please choose an available username';
+      });
+      return;
+    }
+
+    if (_userNostrPubkey == null) {
+      setState(() {
+        _updateUsernameError = 'No user pubkey available';
+      });
+      return;
+    }
+
+    setState(() {
+      _isUpdatingUsername = true;
+      _updateUsernameError = null;
+    });
+
+    try {
+      final profileState = context.read<ProfileState>();
+      final groupState = context.read<GroupState>();
+
+      // Get private key from GroupState
+      final privateKey = await groupState.getNostrPrivateKey();
+      if (privateKey == null) {
+        throw Exception('No private key available');
+      }
+
+      await profileState.updateUsername(
+        username: username,
+        pubkey: _userNostrPubkey!,
+        privateKey: privateKey,
+      );
+
+      // Update local state immediately with the new username
+      // The updateUsername method already updates the ProfileState cache,
+      // so we don't need to reload from the relay
+      if (mounted) {
+        setState(() {
+          _userUsername = username;
+          _usernameController.text =
+              username; // Ensure text field shows new username
+          _isUpdatingUsername = false;
+          _skipNextUsernameLoad =
+              true; // Prevent _loadUserPubkey from overwriting
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isUpdatingUsername = false;
+          _updateUsernameError = e.toString();
+        });
+      }
+    }
+  }
+
   Future<void> _loadUserPubkey() async {
     final groupState = context.read<GroupState>();
     final profileState = context.read<ProfileState>();
-    final pubkey = await groupState.getNostrPublicKey();
-    setState(() {
-      _userNostrPubkey = pubkey;
-    });
+
+    // Retry mechanism: try up to 5 times with increasing delays
+    String? pubkey;
+    for (int attempt = 0; attempt < 5; attempt++) {
+      pubkey = await groupState.getNostrPublicKey();
+      if (pubkey != null) {
+        break;
+      }
+
+      // Wait before retrying (exponential backoff: 200ms, 400ms, 800ms, 1600ms, 3200ms)
+      if (attempt < 4) {
+        await Future.delayed(Duration(milliseconds: 200 * (1 << attempt)));
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _userNostrPubkey = pubkey;
+      });
+    }
 
     // Ensure user has a profile (will create one if needed)
     if (pubkey != null) {
@@ -75,20 +241,28 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         );
       }
 
-      // Load username
-      final profile = await profileState.getProfile(pubkey);
-      if (mounted) {
-        setState(() {
-          _userUsername = profile?.getUsername();
-        });
+      // Load username (but skip if we just updated it)
+      if (!_skipNextUsernameLoad) {
+        final profile = await profileState.getProfile(pubkey);
+        if (mounted) {
+          setState(() {
+            _userUsername = profile?.getUsername();
+            _usernameController.text = profile?.getUsername() ?? '';
+          });
+        }
+      } else {
+        // Reset the flag after skipping once
+        _skipNextUsernameLoad = false;
       }
     }
   }
 
   @override
   void dispose() {
+    _debounceTimer?.cancel();
     _groupNameController.dispose();
     _groupAboutController.dispose();
+    _usernameController.dispose();
     super.dispose();
   }
 
@@ -204,54 +378,192 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               _hasFetchedOnConnect = false;
             }
 
+            // Try to load pubkey when connected (if not already loaded)
+            if (groupState.isConnected && _userNostrPubkey == null) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _loadUserPubkey();
+              });
+            }
+
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                // User info and connection status
-                if (_userUsername != null || _userNostrPubkey != null)
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    margin: const EdgeInsets.only(bottom: 12),
-                    decoration: BoxDecoration(
-                      color: CupertinoColors.systemBlue.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: CupertinoColors.systemBlue),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          CupertinoIcons.person_fill,
-                          color: CupertinoColors.systemBlue,
+                // Username editing section
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemGrey6,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'Username',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                      ),
+                      const SizedBox(height: 12),
+                      CupertinoTextField(
+                        controller: _usernameController,
+                        placeholder: _userNostrPubkey == null
+                            ? 'Loading...'
+                            : 'Enter username',
+                        padding: const EdgeInsets.all(12),
+                        enabled: _userNostrPubkey != null,
+                        decoration: BoxDecoration(
+                          color: _userNostrPubkey == null
+                              ? CupertinoColors.systemGrey5
+                              : CupertinoColors.systemBackground,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      // Username availability check status
+                      if (_isCheckingUsername)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8.0),
+                          child: Row(
                             children: [
-                              if (_userUsername != null)
-                                Text(
-                                  _userUsername!,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
+                              CupertinoActivityIndicator(radius: 10),
+                              SizedBox(width: 8),
+                              Text(
+                                'Checking availability...',
+                                style: TextStyle(
+                                  color: CupertinoColors.secondaryLabel,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (_usernameAvailable != null)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8.0),
+                          child: Row(
+                            children: [
+                              Icon(
+                                _usernameAvailable!
+                                    ? CupertinoIcons.check_mark_circled_solid
+                                    : CupertinoIcons.xmark_circle,
+                                color: _usernameAvailable!
+                                    ? CupertinoColors.systemGreen
+                                    : CupertinoColors.systemRed,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _usernameAvailable!
+                                      ? 'Username available'
+                                      : (_usernameCheckError ??
+                                            'Username taken'),
+                                  style: TextStyle(
+                                    color: _usernameAvailable!
+                                        ? CupertinoColors.systemGreen
+                                        : CupertinoColors.systemRed,
                                     fontSize: 14,
                                   ),
                                 ),
-                              if (_userNostrPubkey != null)
-                                Text(
-                                  _userNostrPubkey!.length > 20
-                                      ? '${_userNostrPubkey!.substring(0, 10)}...${_userNostrPubkey!.substring(_userNostrPubkey!.length - 10)}'
-                                      : _userNostrPubkey!,
-                                  style: const TextStyle(
-                                    color: CupertinoColors.secondaryLabel,
-                                    fontSize: 11,
-                                  ),
-                                ),
+                              ),
                             ],
                           ),
                         ),
+                      if (_updateUsernameError != null)
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          margin: const EdgeInsets.only(top: 8),
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemRed.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                CupertinoIcons.exclamationmark_triangle,
+                                color: CupertinoColors.systemRed,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _updateUsernameError!,
+                                  style: const TextStyle(
+                                    color: CupertinoColors.systemRed,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                              CupertinoButton(
+                                padding: EdgeInsets.zero,
+                                minSize: 0,
+                                onPressed: () {
+                                  setState(() {
+                                    _updateUsernameError = null;
+                                  });
+                                },
+                                child: const Icon(
+                                  CupertinoIcons.xmark_circle_fill,
+                                  color: CupertinoColors.systemRed,
+                                  size: 20,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      const SizedBox(height: 8),
+                      if (_userNostrPubkey == null)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8.0),
+                          child: Row(
+                            children: [
+                              const CupertinoActivityIndicator(radius: 10),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  groupState.isConnected
+                                      ? 'Initializing user keys...'
+                                      : 'Waiting for connection...',
+                                  style: const TextStyle(
+                                    color: CupertinoColors.secondaryLabel,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      CupertinoButton.filled(
+                        onPressed:
+                            (_userNostrPubkey != null &&
+                                _usernameAvailable == true &&
+                                !_isUpdatingUsername &&
+                                _usernameController.text.trim() !=
+                                    _userUsername)
+                            ? _updateUsername
+                            : null,
+                        child: _isUpdatingUsername
+                            ? const CupertinoActivityIndicator(
+                                color: CupertinoColors.white,
+                              )
+                            : const Text('Update Username'),
+                      ),
+                      if (_userNostrPubkey != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          'Pubkey: ${_userNostrPubkey!.length > 20 ? "${_userNostrPubkey!.substring(0, 10)}...${_userNostrPubkey!.substring(_userNostrPubkey!.length - 10)}" : _userNostrPubkey!}',
+                          style: const TextStyle(
+                            color: CupertinoColors.secondaryLabel,
+                            fontSize: 11,
+                          ),
+                        ),
                       ],
-                    ),
+                    ],
                   ),
+                ),
                 // Connection status
                 Container(
                   padding: const EdgeInsets.all(12),

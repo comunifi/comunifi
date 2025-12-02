@@ -459,6 +459,26 @@ class NostrService {
     });
   }
 
+  /// Manually cache an event in the database
+  /// Useful for caching events we publish ourselves
+  Future<void> cacheEvent(NostrEventModel event) async {
+    if (!_cacheInitialized || _eventTable == null) {
+      await _ensureCacheInitialized();
+    }
+
+    if (_eventTable == null) {
+      debugPrint('Cache not initialized, cannot cache event');
+      return;
+    }
+
+    try {
+      await _eventTable!.insert(event);
+    } catch (error) {
+      debugPrint('Failed to cache event: $error');
+      rethrow;
+    }
+  }
+
   /// Handle EOSE (End of Stored Events) messages
   void _handleEoseMessage(List<dynamic> data) {
     if (data.length < 2) return;
@@ -677,10 +697,13 @@ class NostrService {
   /// Request past events and return them as a Future that completes when EOSE is received
   /// Perfect for pagination by requesting chunks of events
   /// If useCache is true, will check cache first before querying relay
+  /// [tagKey] - Optional tag key to filter by (e.g., 'u' for username, 'g' for group, 't' for hashtag)
+  ///            If not provided, will auto-detect based on tag value format
   Future<List<NostrEventModel>> requestPastEvents({
     required int kind,
     List<String>? authors,
     List<String>? tags,
+    String? tagKey,
     DateTime? since,
     DateTime? until,
     int? limit,
@@ -759,10 +782,10 @@ class NostrService {
     }
 
     if (tags != null && tags.isNotEmpty) {
-      // Support both 't' and 'g' tag filters
-      // If tags contain group IDs, use '#g' filter
-      // Otherwise, use '#t' filter
-      if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
+      // Use specified tagKey if provided, otherwise auto-detect
+      if (tagKey != null) {
+        filter['#$tagKey'] = tags;
+      } else if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
         // Looks like hex group IDs, use 'g' tag
         filter['#g'] = tags;
       } else {

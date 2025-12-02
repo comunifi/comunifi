@@ -28,6 +28,7 @@ import 'package:comunifi/models/nostr_event.dart'
 import 'package:comunifi/services/mls/messages/messages.dart'
     show AddProposal, Welcome;
 import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
+import 'package:comunifi/services/profile/profile.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -1025,6 +1026,75 @@ class GroupState with ChangeNotifier {
       await _loadSavedGroups();
     } catch (e) {
       debugPrint('Failed to invite member: $e');
+      rethrow;
+    }
+  }
+
+  /// Invite a member to the active group by username
+  ///
+  /// [username] - The username of the person to invite
+  ///
+  /// This will:
+  /// 1. Search for the user by username to get their pubkey
+  /// 2. Generate temporary MLS keys (since key exchange isn't implemented yet)
+  /// 3. Create an AddProposal and send Welcome message
+  ///
+  /// Note: The invitee will need to provide their real MLS keys later.
+  /// For now, we generate temporary keys to allow the invitation flow to work.
+  Future<void> inviteMemberByUsername(String username) async {
+    if (_activeGroup == null) {
+      throw Exception('No active group selected. Please select a group first.');
+    }
+
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    if (_mlsService == null) {
+      throw Exception('MLS service not initialized');
+    }
+
+    try {
+      // Search for user by username
+      // Note: This requires ProfileState to be available
+      // We'll need to get it from context or pass it in
+      // For now, we'll create a ProfileService directly
+      final profileService = ProfileService(_nostrService!);
+      final profile = await profileService.searchByUsername(username);
+
+      if (profile == null) {
+        throw Exception('User not found: $username');
+      }
+
+      final inviteeNostrPubkey = profile.pubkey;
+
+      // Prevent inviting yourself
+      final currentUserPubkey = await getNostrPublicKey();
+      if (currentUserPubkey != null &&
+          inviteeNostrPubkey == currentUserPubkey) {
+        throw Exception('You cannot invite yourself to the group');
+      }
+
+      // Generate temporary MLS keys for the invitee
+      // TODO: In production, the invitee should provide their own keys
+      final cryptoProvider = DefaultMlsCryptoProvider();
+      final identityKeyPair = await cryptoProvider.signatureScheme
+          .generateKeyPair();
+      final hpkeKeyPair = await cryptoProvider.hpke.generateKeyPair();
+
+      // Invite the member with the generated keys
+      await inviteMember(
+        inviteeNostrPubkey: inviteeNostrPubkey,
+        inviteeIdentityKey: identityKeyPair.publicKey,
+        inviteeHpkePublicKey: hpkeKeyPair.publicKey,
+        inviteeUserId: username,
+      );
+
+      debugPrint(
+        'Invited user $username (${inviteeNostrPubkey.substring(0, 8)}...) to group',
+      );
+    } catch (e) {
+      debugPrint('Failed to invite member by username: $e');
       rethrow;
     }
   }

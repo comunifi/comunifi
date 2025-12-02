@@ -146,5 +146,105 @@ class ProfileService {
     
     return profiles;
   }
+
+  /// Search for a user by username
+  /// Uses the 'u' tag for efficient relay-level filtering
+  Future<ProfileData?> searchByUsername(String username) async {
+    if (username.isEmpty) {
+      return null;
+    }
+
+    try {
+      // Normalize username for comparison (case-insensitive, trim)
+      final normalizedSearch = username.trim().toLowerCase();
+
+      // First, check cache for profiles with matching username tag
+      final cachedEvents = await _nostrService.queryCachedEvents(
+        kind: 0,
+        tagKey: 'u',
+        tagValue: normalizedSearch,
+        limit: 1,
+      );
+
+      if (cachedEvents.isNotEmpty) {
+        // Get the most recent profile event
+        cachedEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        return ProfileData.fromEvent(cachedEvents.first);
+      }
+
+      // If not in cache, query relay using username tag filter
+      if (!_nostrService.isConnected) {
+        debugPrint('Not connected to relay, cannot search for username');
+        return null;
+      }
+
+      // Query relay for profile events with matching username tag
+      // Use 'u' tag filter for efficient relay-level filtering
+      final remoteEvents = await _nostrService.requestPastEvents(
+        kind: 0,
+        tags: [normalizedSearch],
+        tagKey: 'u', // Use 'u' tag for username filtering
+        limit: 1,
+        useCache: false,
+      );
+
+      if (remoteEvents.isNotEmpty) {
+        // Get the most recent profile event
+        remoteEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        final profile = ProfileData.fromEvent(remoteEvents.first);
+        
+        // Double-check the username matches (in case of tag collision)
+        if (profile.getUsername().toLowerCase() == normalizedSearch) {
+          return profile;
+        }
+      }
+
+      if (remoteEvents.isNotEmpty) {
+        // Get the most recent profile event
+        remoteEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        final profile = ProfileData.fromEvent(remoteEvents.first);
+        
+        // Double-check the username matches (in case of tag collision)
+        if (profile.getUsername().toLowerCase() == normalizedSearch) {
+          return profile;
+        }
+      }
+
+      return null;
+    } catch (e) {
+      debugPrint('Error searching for username: $e');
+      return null;
+    }
+  }
+
+  /// Check if a username is available (not taken by another user)
+  /// [username] - The username to check
+  /// [currentUserPubkey] - The pubkey of the current user (username is available if it's their own)
+  /// Returns true if username is available, false if taken by another user
+  Future<bool> isUsernameAvailable(String username, String currentUserPubkey) async {
+    if (username.isEmpty) {
+      return false;
+    }
+
+    try {
+      final profile = await searchByUsername(username);
+      
+      // If no profile found, username is available
+      if (profile == null) {
+        return true;
+      }
+      
+      // If profile belongs to current user, username is available (they can keep their own)
+      if (profile.pubkey == currentUserPubkey) {
+        return true;
+      }
+      
+      // Username is taken by another user
+      return false;
+    } catch (e) {
+      debugPrint('Error checking username availability: $e');
+      return false;
+    }
+  }
 }
 
