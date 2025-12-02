@@ -4,6 +4,7 @@ import 'package:comunifi/state/post_detail.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/profile/profile.dart';
+import 'package:comunifi/widgets/heart_button.dart';
 
 class PostDetailScreen extends StatefulWidget {
   final String postId;
@@ -247,7 +248,7 @@ class _PostItemState extends State<_PostItem> {
   }
 }
 
-class _PostItemContent extends StatelessWidget {
+class _PostItemContent extends StatefulWidget {
   final NostrEventModel event;
   final String displayName;
 
@@ -255,6 +256,70 @@ class _PostItemContent extends StatelessWidget {
     required this.event,
     required this.displayName,
   });
+
+  @override
+  State<_PostItemContent> createState() => _PostItemContentState();
+}
+
+class _PostItemContentState extends State<_PostItemContent> {
+  int _reactionCount = 0;
+  bool _isLoadingReactionCount = true;
+  bool _hasUserReacted = false;
+  bool _isReacting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadReactionData();
+  }
+
+  Future<void> _loadReactionData() async {
+    if (!mounted) return;
+
+    final postDetailState = context.read<PostDetailState>();
+    final count = await postDetailState.getReactionCount(widget.event.id);
+    final hasReacted = await postDetailState.hasUserReacted(widget.event.id);
+    if (mounted) {
+      setState(() {
+        _reactionCount = count;
+        _hasUserReacted = hasReacted;
+        _isLoadingReactionCount = false;
+      });
+    }
+  }
+
+  Future<void> _toggleReaction() async {
+    if (_isReacting || !mounted) return;
+
+    setState(() {
+      _isReacting = true;
+    });
+
+    try {
+      final postDetailState = context.read<PostDetailState>();
+
+      // If user has already reacted, publish an unlike reaction
+      // Some Nostr clients use "-" content to indicate unliking
+      await postDetailState.publishReaction(
+        widget.event.id,
+        widget.event.pubkey,
+        isUnlike: _hasUserReacted,
+      );
+
+      // Add a small delay to ensure cache is written before reloading
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      await _loadReactionData();
+    } catch (e) {
+      debugPrint('Failed to toggle reaction: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isReacting = false;
+        });
+      }
+    }
+  }
 
   String _formatDate(DateTime date) {
     final now = DateTime.now();
@@ -286,7 +351,7 @@ class _PostItemContent extends StatelessWidget {
           Row(
             children: [
               Text(
-                displayName,
+                widget.displayName,
                 style: const TextStyle(
                   fontWeight: FontWeight.w600,
                   fontSize: 14,
@@ -294,7 +359,7 @@ class _PostItemContent extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Text(
-                _formatDate(event.createdAt),
+                _formatDate(widget.event.createdAt),
                 style: const TextStyle(
                   color: CupertinoColors.secondaryLabel,
                   fontSize: 12,
@@ -303,7 +368,20 @@ class _PostItemContent extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
-          Text(event.content, style: const TextStyle(fontSize: 15)),
+          Text(widget.event.content, style: const TextStyle(fontSize: 15)),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              HeartButton(
+                eventId: widget.event.id,
+                reactionCount: _reactionCount,
+                isLoadingCount: _isLoadingReactionCount || _isReacting,
+                isReacted: _hasUserReacted,
+                onPressed: _isReacting ? () {} : _toggleReaction,
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -349,7 +427,7 @@ class _CommentItemState extends State<_CommentItem> {
   }
 }
 
-class _CommentItemContent extends StatelessWidget {
+class _CommentItemContent extends StatefulWidget {
   final NostrEventModel event;
   final String displayName;
 
@@ -357,6 +435,70 @@ class _CommentItemContent extends StatelessWidget {
     required this.event,
     required this.displayName,
   });
+
+  @override
+  State<_CommentItemContent> createState() => _CommentItemContentState();
+}
+
+class _CommentItemContentState extends State<_CommentItemContent> {
+  int _reactionCount = 0;
+  bool _isLoadingReactionCount = true;
+  bool _hasUserReacted = false;
+  bool _isReacting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadReactionData();
+  }
+
+  Future<void> _loadReactionData() async {
+    if (!mounted) return;
+
+    final postDetailState = context.read<PostDetailState>();
+    final count = await postDetailState.getReactionCount(widget.event.id);
+    final hasReacted = await postDetailState.hasUserReacted(widget.event.id);
+    if (mounted) {
+      setState(() {
+        _reactionCount = count;
+        _hasUserReacted = hasReacted;
+        _isLoadingReactionCount = false;
+      });
+    }
+  }
+
+  Future<void> _toggleReaction() async {
+    if (_isReacting || !mounted) return;
+
+    setState(() {
+      _isReacting = true;
+    });
+
+    try {
+      final postDetailState = context.read<PostDetailState>();
+
+      // If user has already reacted, publish an unlike reaction
+      // Some Nostr clients use "-" content to indicate unliking
+      await postDetailState.publishReaction(
+        widget.event.id,
+        widget.event.pubkey,
+        isUnlike: _hasUserReacted,
+      );
+
+      // Add a small delay to ensure cache is written before reloading
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      await _loadReactionData();
+    } catch (e) {
+      debugPrint('Failed to toggle reaction: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isReacting = false;
+        });
+      }
+    }
+  }
 
   String _formatDate(DateTime date) {
     final now = DateTime.now();
@@ -388,7 +530,7 @@ class _CommentItemContent extends StatelessWidget {
           Row(
             children: [
               Text(
-                displayName,
+                widget.displayName,
                 style: const TextStyle(
                   fontWeight: FontWeight.w600,
                   fontSize: 14,
@@ -396,7 +538,7 @@ class _CommentItemContent extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Text(
-                _formatDate(event.createdAt),
+                _formatDate(widget.event.createdAt),
                 style: const TextStyle(
                   color: CupertinoColors.secondaryLabel,
                   fontSize: 12,
@@ -405,7 +547,20 @@ class _CommentItemContent extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
-          Text(event.content, style: const TextStyle(fontSize: 15)),
+          Text(widget.event.content, style: const TextStyle(fontSize: 15)),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              HeartButton(
+                eventId: widget.event.id,
+                reactionCount: _reactionCount,
+                isLoadingCount: _isLoadingReactionCount || _isReacting,
+                isReacted: _hasUserReacted,
+                onPressed: _isReacting ? () {} : _toggleReaction,
+              ),
+            ],
+          ),
         ],
       ),
     );

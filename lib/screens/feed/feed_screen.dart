@@ -8,6 +8,8 @@ import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/invite_user_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
+import 'package:comunifi/widgets/comment_bubble.dart';
+import 'package:comunifi/widgets/heart_button.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -560,6 +562,10 @@ class _EventItemContent extends StatefulWidget {
 class _EventItemContentState extends State<_EventItemContent> {
   int _commentCount = 0;
   bool _isLoadingCount = true;
+  int _reactionCount = 0;
+  bool _isLoadingReactionCount = true;
+  bool _hasUserReacted = false;
+  bool _isReacting = false;
   bool _wasLoading = false;
 
   @override
@@ -569,6 +575,7 @@ class _EventItemContentState extends State<_EventItemContent> {
     _FeedScreenState._commentCountReloaders[widget.event.id] =
         _loadCommentCount;
     _loadCommentCount();
+    _loadReactionData();
   }
 
   @override
@@ -591,6 +598,55 @@ class _EventItemContentState extends State<_EventItemContent> {
     }
   }
 
+  Future<void> _loadReactionData() async {
+    if (!mounted) return;
+
+    final feedState = context.read<FeedState>();
+    final count = await feedState.getReactionCount(widget.event.id);
+    final hasReacted = await feedState.hasUserReacted(widget.event.id);
+    if (mounted) {
+      setState(() {
+        _reactionCount = count;
+        _hasUserReacted = hasReacted;
+        _isLoadingReactionCount = false;
+      });
+    }
+  }
+
+  Future<void> _toggleReaction() async {
+    if (_isReacting || !mounted) return;
+
+    setState(() {
+      _isReacting = true;
+    });
+
+    try {
+      final feedState = context.read<FeedState>();
+
+      // If user has already reacted, publish an unlike reaction
+      // Some Nostr clients use "-" content to indicate unliking
+      await feedState.publishReaction(
+        widget.event.id,
+        widget.event.pubkey,
+        isUnlike: _hasUserReacted,
+      );
+
+      // Add a small delay to ensure cache is written before reloading
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      // Reload reaction data after publishing
+      await _loadReactionData();
+    } catch (e) {
+      debugPrint('Failed to toggle reaction: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isReacting = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // Listen to FeedState loading state - reload comment count when feed finishes loading/refreshing
@@ -606,6 +662,7 @@ class _EventItemContentState extends State<_EventItemContent> {
       Future.delayed(const Duration(milliseconds: 100), () {
         if (mounted) {
           _loadCommentCount();
+          _loadReactionData();
         }
       });
     } else if (isLoading) {
@@ -617,6 +674,11 @@ class _EventItemContentState extends State<_EventItemContent> {
       displayName: widget.displayName,
       commentCount: _commentCount,
       isLoadingCount: _isLoadingCount,
+      reactionCount: _reactionCount,
+      isLoadingReactionCount: _isLoadingReactionCount,
+      hasUserReacted: _hasUserReacted,
+      isReacting: _isReacting,
+      onReactionPressed: _toggleReaction,
     );
   }
 }
@@ -626,12 +688,22 @@ class _EventItemContentWidget extends StatelessWidget {
   final String displayName;
   final int commentCount;
   final bool isLoadingCount;
+  final int reactionCount;
+  final bool isLoadingReactionCount;
+  final bool hasUserReacted;
+  final bool isReacting;
+  final VoidCallback onReactionPressed;
 
   const _EventItemContentWidget({
     required this.event,
     required this.displayName,
     required this.commentCount,
     required this.isLoadingCount,
+    required this.reactionCount,
+    required this.isLoadingReactionCount,
+    required this.hasUserReacted,
+    required this.isReacting,
+    required this.onReactionPressed,
   });
 
   String _formatDate(DateTime date) {
@@ -726,38 +798,18 @@ class _EventItemContentWidget extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              CupertinoButton(
-                padding: EdgeInsets.zero,
-                minSize: 0,
-                onPressed: () {
-                  context.push('/post/${event.id}');
-                },
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      CupertinoIcons.chat_bubble,
-                      size: 20,
-                      color: CupertinoColors.systemBlue,
-                    ),
-                    if (isLoadingCount)
-                      const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CupertinoActivityIndicator(radius: 8),
-                      )
-                    else if (commentCount > 0) ...[
-                      const SizedBox(width: 4),
-                      Text(
-                        commentCount.toString(),
-                        style: const TextStyle(
-                          fontSize: 14,
-                          color: CupertinoColors.systemBlue,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
+              HeartButton(
+                eventId: event.id,
+                reactionCount: reactionCount,
+                isLoadingCount: isLoadingReactionCount || isReacting,
+                isReacted: hasUserReacted,
+                onPressed: isReacting ? () {} : onReactionPressed,
+              ),
+              const SizedBox(width: 16),
+              CommentBubble(
+                eventId: event.id,
+                commentCount: commentCount,
+                isLoadingCount: isLoadingCount,
               ),
             ],
           ),
