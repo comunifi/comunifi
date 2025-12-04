@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
@@ -326,10 +327,22 @@ class GroupState with ChangeNotifier {
 
   // private variables here
   bool _mounted = true;
+  bool _isScheduled = false;
   void safeNotifyListeners() {
-    if (_mounted) {
-      notifyListeners();
-    }
+    if (!_mounted) return;
+    
+    // If we're already scheduled to notify, don't schedule again
+    if (_isScheduled) return;
+    
+    // Check if we're in a build phase by trying to schedule for next frame
+    // This prevents calling notifyListeners() during build
+    _isScheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _isScheduled = false;
+      if (_mounted) {
+        notifyListeners();
+      }
+    });
   }
 
   @override
