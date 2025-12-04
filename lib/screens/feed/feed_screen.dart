@@ -1,5 +1,4 @@
 import 'package:flutter/cupertino.dart';
-import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/group.dart';
@@ -8,6 +7,8 @@ import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/invite_user_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
+import 'package:comunifi/widgets/profile_sidebar.dart';
+import 'package:comunifi/widgets/slide_in_sidebar.dart';
 import 'package:comunifi/widgets/comment_bubble.dart';
 import 'package:comunifi/widgets/heart_button.dart';
 
@@ -23,6 +24,8 @@ class _FeedScreenState extends State<FeedScreen> {
   final TextEditingController _messageController = TextEditingController();
   bool _isPublishing = false;
   String? _publishError;
+  bool _isLeftSidebarOpen = false;
+  bool _isRightSidebarOpen = false;
   static final Map<String, VoidCallback> _commentCountReloaders = {};
 
   @override
@@ -207,243 +210,372 @@ class _FeedScreenState extends State<FeedScreen> {
     return Consumer3<FeedState, GroupState, ProfileState>(
       builder: (context, feedState, groupState, profileState, child) {
         final activeGroup = groupState.activeGroup;
-        return CupertinoPageScaffold(
-          navigationBar: CupertinoNavigationBar(
-            leading: CupertinoButton(
-              padding: EdgeInsets.zero,
-              onPressed: () {
-                showCupertinoModalPopup(
-                  context: context,
-                  builder: (context) => const GroupsSidebar(),
-                );
-              },
-              child: const Icon(CupertinoIcons.bars),
+        final screenWidth = MediaQuery.of(context).size.width;
+        final isWideScreen = screenWidth > 1000;
+        final sidebarWidth = 320.0;
+
+        // For wide screens, use persistent sidebars in a Row layout
+        if (isWideScreen) {
+          return Row(
+            children: [
+              // Left sidebar (Groups) - always visible on wide screens
+              Container(
+                width: sidebarWidth,
+                decoration: const BoxDecoration(
+                  color: CupertinoColors.systemBackground,
+                  border: Border(
+                    right: BorderSide(
+                      color: CupertinoColors.separator,
+                      width: 0.5,
+                    ),
+                  ),
+                ),
+                child: GroupsSidebar(
+                  onClose: () {
+                    // On wide screens, sidebars are persistent, so this is a no-op
+                    // But we keep it for consistency with the sidebar widget
+                  },
+                ),
+              ),
+              // Main feed content
+              Expanded(
+                child: CupertinoPageScaffold(
+                  navigationBar: CupertinoNavigationBar(
+                    middle: Text(activeGroup?.name ?? 'Feed'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Username display (not a button on wide screens)
+                        _UsernameButton(),
+                        // Group-specific actions
+                        if (activeGroup != null) ...[
+                          const SizedBox(width: 8),
+                          CupertinoButton(
+                            padding: EdgeInsets.zero,
+                            onPressed: () {
+                              showCupertinoModalPopup(
+                                context: context,
+                                builder: (context) => const InviteUserModal(),
+                              );
+                            },
+                            child: const Icon(CupertinoIcons.person_add),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  child: SafeArea(
+                    child: _buildFeedContent(
+                      feedState,
+                      groupState,
+                      activeGroup,
+                    ),
+                  ),
+                ),
+              ),
+              // Right sidebar (Profile) - always visible on wide screens
+              Container(
+                width: sidebarWidth,
+                decoration: const BoxDecoration(
+                  color: CupertinoColors.systemBackground,
+                  border: Border(
+                    left: BorderSide(
+                      color: CupertinoColors.separator,
+                      width: 0.5,
+                    ),
+                  ),
+                ),
+                child: ProfileSidebar(
+                  onClose: () {
+                    // On wide screens, sidebars are persistent, so this is a no-op
+                    // But we keep it for consistency with the sidebar widget
+                  },
+                ),
+              ),
+            ],
+          );
+        }
+
+        // For narrow screens, use overlay sidebars
+        return Stack(
+          children: [
+            CupertinoPageScaffold(
+              navigationBar: CupertinoNavigationBar(
+                leading: CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  onPressed: () {
+                    setState(() {
+                      _isLeftSidebarOpen = true;
+                    });
+                  },
+                  child: const Icon(CupertinoIcons.bars),
+                ),
+                middle: Text(activeGroup?.name ?? 'Feed'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Username button
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      onPressed: () {
+                        setState(() {
+                          _isRightSidebarOpen = true;
+                        });
+                      },
+                      child: _UsernameButton(),
+                    ),
+                    // Group-specific actions
+                    if (activeGroup != null) ...[
+                      const SizedBox(width: 8),
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          showCupertinoModalPopup(
+                            context: context,
+                            builder: (context) => const InviteUserModal(),
+                          );
+                        },
+                        child: const Icon(CupertinoIcons.person_add),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              child: SafeArea(
+                child: _buildFeedContent(feedState, groupState, activeGroup),
+              ),
             ),
-            middle: Text(activeGroup?.name ?? 'Feed'),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Username button
-                _UsernameButton(),
-                // Group-specific actions
-                if (activeGroup != null) ...[
-                  const SizedBox(width: 8),
+            // Left sidebar (Groups) - overlay on narrow screens
+            SlideInSidebar(
+              isOpen: _isLeftSidebarOpen,
+              onClose: () {
+                setState(() {
+                  _isLeftSidebarOpen = false;
+                });
+              },
+              position: SlideInSidebarPosition.left,
+              width: sidebarWidth,
+              child: GroupsSidebar(
+                onClose: () {
+                  setState(() {
+                    _isLeftSidebarOpen = false;
+                  });
+                },
+              ),
+            ),
+            // Right sidebar (Profile) - overlay on narrow screens
+            SlideInSidebar(
+              isOpen: _isRightSidebarOpen,
+              onClose: () {
+                setState(() {
+                  _isRightSidebarOpen = false;
+                });
+              },
+              position: SlideInSidebarPosition.right,
+              width: sidebarWidth,
+              child: ProfileSidebar(
+                onClose: () {
+                  setState(() {
+                    _isRightSidebarOpen = false;
+                  });
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildFeedContent(
+    FeedState feedState,
+    GroupState groupState,
+    dynamic activeGroup,
+  ) {
+    return Builder(
+      builder: (context) {
+        // If there's an active group, show group messages
+        if (activeGroup != null) {
+          if (!groupState.isConnected && groupState.errorMessage != null) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    groupState.errorMessage!,
+                    style: const TextStyle(color: CupertinoColors.systemRed),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
                   CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    onPressed: () {
-                      showCupertinoModalPopup(
-                        context: context,
-                        builder: (context) => const InviteUserModal(),
-                      );
-                    },
-                    child: const Icon(CupertinoIcons.person_add),
+                    onPressed: groupState.retryConnection,
+                    child: const Text('Retry'),
                   ),
                 ],
-              ],
-            ),
-          ),
-          child: SafeArea(
-            child: Builder(
-              builder: (context) {
-                // If there's an active group, show group messages
-                if (groupState.activeGroup != null) {
-                  if (!groupState.isConnected &&
-                      groupState.errorMessage != null) {
-                    return Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            groupState.errorMessage!,
-                            style: const TextStyle(
-                              color: CupertinoColors.systemRed,
-                            ),
-                            textAlign: TextAlign.center,
+              ),
+            );
+          }
+
+          if (groupState.isLoading && groupState.groupMessages.isEmpty) {
+            return const Center(child: CupertinoActivityIndicator());
+          }
+
+          return Column(
+            children: [
+              Expanded(
+                child: groupState.groupMessages.isEmpty
+                    ? const Center(child: Text('No messages in this group yet'))
+                    : CustomScrollView(
+                        controller: _scrollController,
+                        slivers: [
+                          CupertinoSliverRefreshControl(
+                            onRefresh: () async {
+                              await groupState.refreshActiveGroupMessages();
+                            },
                           ),
-                          const SizedBox(height: 16),
-                          CupertinoButton(
-                            onPressed: groupState.retryConnection,
-                            child: const Text('Retry'),
+                          SliverList(
+                            delegate: SliverChildBuilderDelegate((
+                              context,
+                              index,
+                            ) {
+                              if (index < groupState.groupMessages.length) {
+                                return _EventItem(
+                                  event: groupState.groupMessages[index],
+                                );
+                              }
+                              return const SizedBox.shrink();
+                            }, childCount: groupState.groupMessages.length),
                           ),
                         ],
                       ),
-                    );
-                  }
+              ),
+              _ComposeMessageWidget(
+                controller: _messageController,
+                isPublishing: _isPublishing,
+                error: _publishError,
+                onPublish: _publishMessage,
+                placeholder:
+                    'Write a message to ${groupState.activeGroup!.name}...',
+                onErrorDismiss: () {
+                  setState(() {
+                    _publishError = null;
+                  });
+                },
+              ),
+            ],
+          );
+        }
 
-                  if (groupState.isLoading &&
-                      groupState.groupMessages.isEmpty) {
-                    return const Center(child: CupertinoActivityIndicator());
-                  }
+        // Otherwise, show regular feed
+        if (!feedState.isConnected && feedState.errorMessage != null) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  feedState.errorMessage!,
+                  style: const TextStyle(color: CupertinoColors.systemRed),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                CupertinoButton(
+                  onPressed: feedState.retryConnection,
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          );
+        }
 
-                  return Column(
-                    children: [
-                      Expanded(
-                        child: groupState.groupMessages.isEmpty
-                            ? const Center(
-                                child: Text('No messages in this group yet'),
-                              )
-                            : CustomScrollView(
-                                controller: _scrollController,
-                                slivers: [
-                                  CupertinoSliverRefreshControl(
-                                    onRefresh: () async {
-                                      await groupState
-                                          .refreshActiveGroupMessages();
-                                    },
+        if (feedState.isLoading && feedState.events.isEmpty) {
+          return const Center(child: CupertinoActivityIndicator());
+        }
+
+        return Column(
+          children: [
+            Expanded(
+              child: feedState.events.isEmpty
+                  ? const Center(child: Text('No events yet'))
+                  : CustomScrollView(
+                      controller: _scrollController,
+                      slivers: [
+                        CupertinoSliverRefreshControl(
+                          onRefresh: () async {
+                            await feedState.refreshEvents();
+                            // Reload all comment counts after refresh
+                            // Wait a bit for the refresh to complete
+                            await Future.delayed(
+                              const Duration(milliseconds: 100),
+                            );
+                            if (mounted) {
+                              // Create a copy of the values to avoid issues if map changes during iteration
+                              final reloaders = List<VoidCallback>.from(
+                                _commentCountReloaders.values,
+                              );
+                              for (final reloader in reloaders) {
+                                try {
+                                  reloader();
+                                } catch (e) {
+                                  // Ignore errors from disposed widgets
+                                  debugPrint(
+                                    'Error reloading comment count: $e',
+                                  );
+                                }
+                              }
+                            }
+                          },
+                        ),
+                        SliverList(
+                          delegate: SliverChildBuilderDelegate(
+                            (context, index) {
+                              if (index < feedState.events.length) {
+                                return _EventItem(
+                                  event: feedState.events[index],
+                                );
+                              } else if (feedState.isLoadingMore) {
+                                return const Padding(
+                                  padding: EdgeInsets.all(16.0),
+                                  child: Center(
+                                    child: CupertinoActivityIndicator(),
                                   ),
-                                  SliverList(
-                                    delegate: SliverChildBuilderDelegate(
-                                      (context, index) {
-                                        if (index <
-                                            groupState.groupMessages.length) {
-                                          return _EventItem(
-                                            event:
-                                                groupState.groupMessages[index],
-                                          );
-                                        }
-                                        return const SizedBox.shrink();
-                                      },
-                                      childCount:
-                                          groupState.groupMessages.length,
+                                );
+                              } else if (feedState.hasMoreEvents) {
+                                return const SizedBox.shrink();
+                              } else {
+                                return const Padding(
+                                  padding: EdgeInsets.all(16.0),
+                                  child: Center(
+                                    child: Text(
+                                      'No more events',
+                                      style: TextStyle(
+                                        color: CupertinoColors.secondaryLabel,
+                                      ),
                                     ),
                                   ),
-                                ],
-                              ),
-                      ),
-                      _ComposeMessageWidget(
-                        controller: _messageController,
-                        isPublishing: _isPublishing,
-                        error: _publishError,
-                        onPublish: _publishMessage,
-                        placeholder:
-                            'Write a message to ${groupState.activeGroup!.name}...',
-                        onErrorDismiss: () {
-                          setState(() {
-                            _publishError = null;
-                          });
-                        },
-                      ),
-                    ],
-                  );
-                }
-
-                // Otherwise, show regular feed
-                if (!feedState.isConnected && feedState.errorMessage != null) {
-                  return Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          feedState.errorMessage!,
-                          style: const TextStyle(
-                            color: CupertinoColors.systemRed,
+                                );
+                              }
+                            },
+                            childCount:
+                                feedState.events.length +
+                                (feedState.isLoadingMore ? 1 : 0) +
+                                (feedState.hasMoreEvents ? 0 : 1),
                           ),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 16),
-                        CupertinoButton(
-                          onPressed: feedState.retryConnection,
-                          child: const Text('Retry'),
                         ),
                       ],
                     ),
-                  );
-                }
-
-                if (feedState.isLoading && feedState.events.isEmpty) {
-                  return const Center(child: CupertinoActivityIndicator());
-                }
-
-                return Column(
-                  children: [
-                    Expanded(
-                      child: feedState.events.isEmpty
-                          ? const Center(child: Text('No events yet'))
-                          : CustomScrollView(
-                              controller: _scrollController,
-                              slivers: [
-                                CupertinoSliverRefreshControl(
-                                  onRefresh: () async {
-                                    await feedState.refreshEvents();
-                                    // Reload all comment counts after refresh
-                                    // Wait a bit for the refresh to complete
-                                    await Future.delayed(
-                                      const Duration(milliseconds: 100),
-                                    );
-                                    if (mounted) {
-                                      // Create a copy of the values to avoid issues if map changes during iteration
-                                      final reloaders = List<VoidCallback>.from(
-                                        _commentCountReloaders.values,
-                                      );
-                                      for (final reloader in reloaders) {
-                                        try {
-                                          reloader();
-                                        } catch (e) {
-                                          // Ignore errors from disposed widgets
-                                          debugPrint(
-                                            'Error reloading comment count: $e',
-                                          );
-                                        }
-                                      }
-                                    }
-                                  },
-                                ),
-                                SliverList(
-                                  delegate: SliverChildBuilderDelegate(
-                                    (context, index) {
-                                      if (index < feedState.events.length) {
-                                        return _EventItem(
-                                          event: feedState.events[index],
-                                        );
-                                      } else if (feedState.isLoadingMore) {
-                                        return const Padding(
-                                          padding: EdgeInsets.all(16.0),
-                                          child: Center(
-                                            child: CupertinoActivityIndicator(),
-                                          ),
-                                        );
-                                      } else if (feedState.hasMoreEvents) {
-                                        return const SizedBox.shrink();
-                                      } else {
-                                        return const Padding(
-                                          padding: EdgeInsets.all(16.0),
-                                          child: Center(
-                                            child: Text(
-                                              'No more events',
-                                              style: TextStyle(
-                                                color: CupertinoColors
-                                                    .secondaryLabel,
-                                              ),
-                                            ),
-                                          ),
-                                        );
-                                      }
-                                    },
-                                    childCount:
-                                        feedState.events.length +
-                                        (feedState.isLoadingMore ? 1 : 0) +
-                                        (feedState.hasMoreEvents ? 0 : 1),
-                                  ),
-                                ),
-                              ],
-                            ),
-                    ),
-                    _ComposeMessageWidget(
-                      controller: _messageController,
-                      isPublishing: _isPublishing,
-                      error: _publishError,
-                      onPublish: _publishMessage,
-                      onErrorDismiss: () {
-                        setState(() {
-                          _publishError = null;
-                        });
-                      },
-                    ),
-                  ],
-                );
+            ),
+            _ComposeMessageWidget(
+              controller: _messageController,
+              isPublishing: _isPublishing,
+              error: _publishError,
+              onPublish: _publishMessage,
+              onErrorDismiss: () {
+                setState(() {
+                  _publishError = null;
+                });
               },
             ),
-          ),
+          ],
         );
       },
     );
@@ -493,15 +625,9 @@ class _UsernameButtonState extends State<_UsernameButton> {
             ? '${_pubkey!.substring(0, 6)}...${_pubkey!.substring(_pubkey!.length - 6)}'
             : _pubkey!);
 
-    return CupertinoButton(
-      padding: EdgeInsets.zero,
-      onPressed: () {
-        context.push('/profile');
-      },
-      child: Text(
-        username,
-        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-      ),
+    return Text(
+      username,
+      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
     );
   }
 }

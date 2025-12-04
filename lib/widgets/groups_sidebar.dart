@@ -14,7 +14,9 @@ class _GroupItem {
 }
 
 class GroupsSidebar extends StatefulWidget {
-  const GroupsSidebar({super.key});
+  final VoidCallback onClose;
+
+  const GroupsSidebar({super.key, required this.onClose});
 
   @override
   State<GroupsSidebar> createState() => _GroupsSidebarState();
@@ -142,7 +144,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     }
   }
 
-  void _toggleGroup(MlsGroup group) {
+  void _toggleGroup(MlsGroup group, VoidCallback onClose) {
     final groupState = context.read<GroupState>();
     if (groupState.activeGroup?.id.bytes.toString() ==
         group.id.bytes.toString()) {
@@ -153,7 +155,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
       groupState.setActiveGroup(group);
     }
     // Close sidebar
-    Navigator.of(context).pop();
+    onClose();
   }
 
   String _groupIdToHex(MlsGroup group) {
@@ -177,21 +179,43 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
           _hasFetchedOnConnect = false;
         }
 
-        return CupertinoPageScaffold(
-          navigationBar: CupertinoNavigationBar(
-            middle: const Text('Groups'),
-            leading: CupertinoButton(
-              padding: EdgeInsets.zero,
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-              child: const Icon(CupertinoIcons.xmark),
-            ),
-          ),
-          child: SafeArea(
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
+        return SafeArea(
+          child: Column(
+            children: [
+              // Header with close button
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: const BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: CupertinoColors.separator,
+                      width: 0.5,
+                    ),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Text(
+                      'Groups',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const Spacer(),
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      minSize: 0,
+                      onPressed: widget.onClose,
+                      child: const Icon(CupertinoIcons.xmark),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
                 // Group creation section
                 Container(
                   padding: const EdgeInsets.all(16),
@@ -602,7 +626,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                                               padding: EdgeInsets.zero,
                                               minSize: 0,
                                               onPressed: () =>
-                                                  _toggleGroup(group),
+                                                  _toggleGroup(group, widget.onClose),
                                               child: Text(
                                                 isActive
                                                     ? 'Deselect'
@@ -635,8 +659,10 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                     ],
                   ),
                 ),
-              ],
-            ),
+                  ],
+                ),
+              ),
+            ],
           ),
         );
       },
