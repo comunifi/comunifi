@@ -35,6 +35,9 @@ class _FeedScreenState extends State<FeedScreen> {
 
     // Set up profile callback in GroupState so it can trigger profile creation
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Check if widget is still mounted before accessing context
+      if (!mounted) return;
+
       final groupState = context.read<GroupState>();
       final profileState = context.read<ProfileState>();
 
@@ -649,6 +652,8 @@ class _EventItemState extends State<_EventItem> {
     super.initState();
     // Load profile asynchronously after build
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Check if widget is still mounted before accessing context
+      if (!mounted) return;
       final profileState = context.read<ProfileState>();
       if (!profileState.profiles.containsKey(widget.event.pubkey)) {
         profileState.getProfile(widget.event.pubkey);

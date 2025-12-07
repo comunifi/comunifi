@@ -11,6 +11,12 @@ const int kindEncryptedEnvelope = 1059;
 /// Kind 1060: MLS Welcome message (encrypted invitation to join a group)
 const int kindMlsWelcome = 1060;
 
+/// Kind 10078: Encrypted identity backup (replaceable event)
+/// Contains the user's Nostr keypair encrypted with their personal MLS group.
+/// This allows identity recovery from the relay if the local cache is lost.
+/// The 'g' tag contains the MLS group ID used for encryption.
+const int kindEncryptedIdentity = 10078;
+
 class NostrEventModel {
   final String id;
   final String pubkey;

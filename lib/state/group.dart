@@ -23,6 +23,7 @@ import 'package:comunifi/services/mls/storage/secure_storage.dart'
 import 'package:comunifi/models/nostr_event.dart'
     show
         kindEncryptedEnvelope,
+        kindEncryptedIdentity,
         kindGroupAnnouncement,
         kindMlsWelcome,
         NostrEventModel;
@@ -139,11 +140,18 @@ class GroupState with ChangeNotifier {
       await _initializeEventDatabase();
 
       // Connect to relay
-      await _nostrService!.connect((connected) {
+      await _nostrService!.connect((connected) async {
         if (connected) {
           _isConnected = true;
           _errorMessage = null;
           safeNotifyListeners();
+
+          // Recover or generate Nostr key from relay (if needed)
+          await _recoverOrGenerateNostrKey();
+
+          // Ensure locally cached key is synced to relay
+          await _ensureKeyIsSyncedToRelay();
+
           _loadSavedGroups();
           _startListeningForGroupEvents();
           // Sync group announcements to local DB
@@ -220,6 +228,7 @@ class GroupState with ChangeNotifier {
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
+      // Step 1: Try to load from local cache first
       final storedCiphertext = await _loadStoredNostrKeyCiphertext(groupIdHex);
 
       if (storedCiphertext != null) {
@@ -228,40 +237,296 @@ class GroupState with ChangeNotifier {
             storedCiphertext,
           );
           final keyData = jsonDecode(String.fromCharCodes(decrypted));
-          debugPrint('Loaded existing Nostr key: ${keyData['public']}');
+          debugPrint(
+            'Loaded existing Nostr key from cache: ${keyData['public']}',
+          );
+          // Key found in cache - still need to ensure it's synced to relay
+          _needsRelaySyncCheck = true;
           return;
         } catch (e) {
-          debugPrint('Failed to decrypt stored key, generating new one: $e');
+          debugPrint('Failed to decrypt cached key: $e');
+          // Continue to try relay recovery
         }
       }
 
-      // Generate new Nostr key pair
-      final random = Random.secure();
-      final privateKeyBytes = Uint8List(32);
-      for (int i = 0; i < 32; i++) {
-        privateKeyBytes[i] = random.nextInt(256);
-      }
+      // Step 2: Key not in local cache - will try relay recovery after connection
+      // Mark that we need to recover or generate key
+      _needsNostrKeyRecovery = true;
+      debugPrint(
+        'No local Nostr key found, will attempt relay recovery after connection',
+      );
+    } catch (e) {
+      debugPrint('Failed to check local Nostr key: $e');
+      _needsNostrKeyRecovery = true;
+    }
+  }
 
-      final privateKeyHex = privateKeyBytes
+  /// Attempt to recover Nostr key from relay or generate a new one
+  /// This should be called after relay connection is established
+  Future<void> _recoverOrGenerateNostrKey() async {
+    if (!_needsNostrKeyRecovery || _keysGroup == null) {
+      return;
+    }
+
+    if (!_isConnected || _nostrService == null) {
+      debugPrint('Not connected to relay, cannot recover Nostr key');
+      return;
+    }
+
+    try {
+      final groupIdHex = _keysGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
-      final keyPair = NostrKeyPairs(private: privateKeyHex);
+      // Try to fetch encrypted identity from relay
+      debugPrint('Attempting to recover Nostr key from relay...');
+      final recoveredKey = await _fetchNostrKeyFromRelay(groupIdHex);
 
-      final keyData = {'private': keyPair.private, 'public': keyPair.public};
-      final keyJson = jsonEncode(keyData);
-      final keyBytes = Uint8List.fromList(keyJson.codeUnits);
+      if (recoveredKey != null) {
+        debugPrint('Recovered Nostr key from relay: ${recoveredKey['public']}');
+        _needsNostrKeyRecovery = false;
+        return;
+      }
 
-      final ciphertext = await _keysGroup!.encryptApplicationMessage(keyBytes);
+      // No key found on relay - generate new one
+      debugPrint('No key found on relay, generating new Nostr key...');
+      await _generateAndPublishNostrKey(groupIdHex);
 
+      _needsNostrKeyRecovery = false;
+      _wasNewNostrKeyGenerated = true;
+    } catch (e) {
+      debugPrint('Failed to recover or generate Nostr key: $e');
+    }
+  }
+
+  /// Fetch encrypted Nostr key from relay and decrypt it
+  /// Returns the key data if found and decrypted, null otherwise
+  Future<Map<String, dynamic>?> _fetchNostrKeyFromRelay(
+    String groupIdHex,
+  ) async {
+    if (_nostrService == null || _keysGroup == null) return null;
+
+    try {
+      // Query for kind 10078 events with our keys group ID
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindEncryptedIdentity,
+        tags: [groupIdHex],
+        tagKey: 'g',
+        limit: 1,
+        useCache: false, // Always fetch fresh from relay for recovery
+      );
+
+      if (events.isEmpty) {
+        debugPrint(
+          'No encrypted identity found on relay for group $groupIdHex',
+        );
+        return null;
+      }
+
+      // Get the most recent event (replaceable events should only have one)
+      final event = events.first;
+      debugPrint('Found encrypted identity event: ${event.id}');
+
+      // Parse the encrypted content
+      final encryptedContent = event.content;
+      final encryptedJson = jsonDecode(encryptedContent);
+
+      // Reconstruct MlsCiphertext from the event content
+      final ciphertext = MlsCiphertext(
+        groupId: _keysGroup!.id,
+        epoch: encryptedJson['epoch'] as int,
+        senderIndex: encryptedJson['senderIndex'] as int,
+        nonce: Uint8List.fromList(
+          List<int>.from(encryptedJson['nonce'] as List),
+        ),
+        ciphertext: Uint8List.fromList(
+          List<int>.from(encryptedJson['ciphertext'] as List),
+        ),
+        contentType: MlsContentType.application,
+      );
+
+      // Decrypt using the keys group
+      final decrypted = await _keysGroup!.decryptApplicationMessage(ciphertext);
+      final keyData =
+          jsonDecode(String.fromCharCodes(decrypted)) as Map<String, dynamic>;
+
+      // Cache locally for quick access
       await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
 
-      // Mark that a new key was generated - we'll create personal group after relay connection
-      _wasNewNostrKeyGenerated = true;
-
-      debugPrint('Generated and stored new Nostr key: ${keyPair.public}');
+      debugPrint('Successfully recovered and cached Nostr key from relay');
+      return keyData;
     } catch (e) {
-      debugPrint('Failed to ensure Nostr key: $e');
+      debugPrint('Failed to fetch/decrypt Nostr key from relay: $e');
+      return null;
+    }
+  }
+
+  /// Generate a new Nostr keypair and publish to relay
+  Future<void> _generateAndPublishNostrKey(String groupIdHex) async {
+    if (_keysGroup == null || _nostrService == null) return;
+
+    // Generate new Nostr key pair
+    final random = Random.secure();
+    final privateKeyBytes = Uint8List(32);
+    for (int i = 0; i < 32; i++) {
+      privateKeyBytes[i] = random.nextInt(256);
+    }
+
+    final privateKeyHex = privateKeyBytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+
+    final keyPair = NostrKeyPairs(private: privateKeyHex);
+
+    final keyData = {'private': keyPair.private, 'public': keyPair.public};
+    final keyJson = jsonEncode(keyData);
+    final keyBytes = Uint8List.fromList(keyJson.codeUnits);
+
+    // Encrypt with the keys group
+    final ciphertext = await _keysGroup!.encryptApplicationMessage(keyBytes);
+
+    // Cache locally
+    await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
+
+    // Publish to relay as kind 10078 (replaceable event)
+    await _publishNostrKeyToRelay(keyPair, groupIdHex, ciphertext);
+
+    debugPrint('Generated and published new Nostr key: ${keyPair.public}');
+  }
+
+  /// Publish encrypted Nostr key to relay
+  Future<void> _publishNostrKeyToRelay(
+    NostrKeyPairs keyPair,
+    String groupIdHex,
+    MlsCiphertext ciphertext,
+  ) async {
+    if (_nostrService == null) return;
+
+    try {
+      // Serialize MlsCiphertext to JSON for storage in the event content
+      final ciphertextJson = jsonEncode({
+        'epoch': ciphertext.epoch,
+        'senderIndex': ciphertext.senderIndex,
+        'nonce': ciphertext.nonce.toList(),
+        'ciphertext': ciphertext.ciphertext.toList(),
+      });
+
+      // Create kind 10078 event (replaceable event for encrypted identity)
+      final createdAt = DateTime.now();
+      final tags = await addClientTagsWithSignature([
+        ['g', groupIdHex], // MLS group ID used for encryption
+      ], createdAt: createdAt);
+
+      final identityEvent = NostrEvent.fromPartialData(
+        kind: kindEncryptedIdentity,
+        content: ciphertextJson,
+        keyPairs: keyPair,
+        tags: tags,
+        createdAt: createdAt,
+      );
+
+      final eventModel = NostrEventModel(
+        id: identityEvent.id,
+        pubkey: identityEvent.pubkey,
+        kind: identityEvent.kind,
+        content: identityEvent.content,
+        tags: identityEvent.tags,
+        sig: identityEvent.sig,
+        createdAt: identityEvent.createdAt,
+      );
+
+      // Publish to relay (unencrypted envelope - the content itself is MLS encrypted)
+      await _nostrService!.publishEvent(eventModel.toJson());
+
+      debugPrint('Published encrypted identity to relay: ${eventModel.id}');
+    } catch (e) {
+      debugPrint('Failed to publish encrypted identity to relay: $e');
+      // Don't throw - local storage is still valid
+    }
+  }
+
+  // Flag to track if we need to recover/generate key after connection
+  bool _needsNostrKeyRecovery = false;
+
+  // Flag to track if we need to check/sync key to relay after connection
+  bool _needsRelaySyncCheck = false;
+
+  /// Ensure the locally cached key is synced to the relay
+  /// This is called after connection when we have a local key but need to verify it's on relay
+  Future<void> _ensureKeyIsSyncedToRelay() async {
+    if (!_needsRelaySyncCheck || _keysGroup == null) {
+      return;
+    }
+
+    if (!_isConnected || _nostrService == null) {
+      debugPrint('Not connected to relay, cannot sync Nostr key');
+      return;
+    }
+
+    try {
+      final groupIdHex = _keysGroup!.id.bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      // Check if key exists on relay
+      debugPrint('Checking if Nostr identity exists on relay...');
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindEncryptedIdentity,
+        tags: [groupIdHex],
+        tagKey: 'g',
+        limit: 1,
+        useCache: false,
+      );
+
+      if (events.isNotEmpty) {
+        debugPrint('Nostr identity already exists on relay');
+        _needsRelaySyncCheck = false;
+        return;
+      }
+
+      // Key not on relay - publish it
+      debugPrint('Nostr identity not found on relay, publishing...');
+      await republishNostrIdentity();
+
+      _needsRelaySyncCheck = false;
+    } catch (e) {
+      debugPrint('Failed to sync Nostr key to relay: $e');
+      // Don't clear flag - will retry on next app start
+    }
+  }
+
+  /// Republish the current Nostr identity to the relay
+  /// This is useful if the relay event was lost or to ensure backup is up-to-date
+  Future<void> republishNostrIdentity() async {
+    if (_keysGroup == null || _nostrService == null || !_isConnected) {
+      throw Exception('Not connected or keys group not initialized');
+    }
+
+    try {
+      final groupIdHex = _keysGroup!.id.bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      // Load the current key from local cache
+      final storedCiphertext = await _loadStoredNostrKeyCiphertext(groupIdHex);
+      if (storedCiphertext == null) {
+        throw Exception('No Nostr key found in local cache');
+      }
+
+      // Decrypt to get the keypair (we need it to sign the event)
+      final decrypted = await _keysGroup!.decryptApplicationMessage(
+        storedCiphertext,
+      );
+      final keyData = jsonDecode(String.fromCharCodes(decrypted));
+      final keyPair = NostrKeyPairs(private: keyData['private'] as String);
+
+      // Republish to relay
+      await _publishNostrKeyToRelay(keyPair, groupIdHex, storedCiphertext);
+
+      debugPrint('Successfully republished Nostr identity to relay');
+    } catch (e) {
+      debugPrint('Failed to republish Nostr identity: $e');
+      rethrow;
     }
   }
 
