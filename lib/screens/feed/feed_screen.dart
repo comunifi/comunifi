@@ -532,55 +532,61 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
             return const Center(child: CupertinoActivityIndicator());
           }
 
-          return Column(
-            children: [
-              Expanded(
-                child: groupState.groupMessages.isEmpty
-                    ? const Center(child: Text('No messages in this group yet'))
-                    : CustomScrollView(
-                        controller: _scrollController,
-                        slivers: [
-                          CupertinoSliverRefreshControl(
-                            onRefresh: () async {
-                              await groupState.refreshActiveGroupMessages();
-                            },
-                          ),
-                          SliverList(
-                            delegate: SliverChildBuilderDelegate((
-                              context,
-                              index,
-                            ) {
-                              if (index < groupState.groupMessages.length) {
-                                final event = groupState.groupMessages[index];
-                                return _EventItem(
-                                  key: ValueKey(event.id),
-                                  event: event,
-                                );
-                              }
-                              return const SizedBox.shrink();
-                            }, childCount: groupState.groupMessages.length),
-                          ),
-                        ],
-                      ),
-              ),
-              _ComposeMessageWidget(
-                controller: _messageController,
-                isPublishing: _isPublishing,
-                error: _publishError,
-                onPublish: _publishMessage,
-                placeholder:
-                    'Write a message to ${groupState.activeGroup!.name}...',
-                onErrorDismiss: () {
-                  setState(() {
-                    _publishError = null;
-                  });
-                },
-                onPickImage: _pickImage,
-                selectedImageBytes: _selectedImageBytes,
-                onClearImage: _clearSelectedImage,
-                showImagePicker: true,
-              ),
-            ],
+          return GestureDetector(
+            onTap: () => FocusScope.of(context).unfocus(),
+            behavior: HitTestBehavior.translucent,
+            child: Column(
+              children: [
+                Expanded(
+                  child: groupState.groupMessages.isEmpty
+                      ? const Center(
+                          child: Text('No messages in this group yet'),
+                        )
+                      : CustomScrollView(
+                          controller: _scrollController,
+                          slivers: [
+                            CupertinoSliverRefreshControl(
+                              onRefresh: () async {
+                                await groupState.refreshActiveGroupMessages();
+                              },
+                            ),
+                            SliverList(
+                              delegate: SliverChildBuilderDelegate((
+                                context,
+                                index,
+                              ) {
+                                if (index < groupState.groupMessages.length) {
+                                  final event = groupState.groupMessages[index];
+                                  return _EventItem(
+                                    key: ValueKey(event.id),
+                                    event: event,
+                                  );
+                                }
+                                return const SizedBox.shrink();
+                              }, childCount: groupState.groupMessages.length),
+                            ),
+                          ],
+                        ),
+                ),
+                _ComposeMessageWidget(
+                  controller: _messageController,
+                  isPublishing: _isPublishing,
+                  error: _publishError,
+                  onPublish: _publishMessage,
+                  placeholder:
+                      'Write a message to ${groupState.activeGroup!.name}...',
+                  onErrorDismiss: () {
+                    setState(() {
+                      _publishError = null;
+                    });
+                  },
+                  onPickImage: _pickImage,
+                  selectedImageBytes: _selectedImageBytes,
+                  onClearImage: _clearSelectedImage,
+                  showImagePicker: true,
+                ),
+              ],
+            ),
           );
         }
 
@@ -609,97 +615,101 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
           return const Center(child: CupertinoActivityIndicator());
         }
 
-        return Column(
-          children: [
-            Expanded(
-              child: feedState.events.isEmpty
-                  ? const Center(child: Text('No events yet'))
-                  : CustomScrollView(
-                      controller: _scrollController,
-                      slivers: [
-                        CupertinoSliverRefreshControl(
-                          onRefresh: () async {
-                            await feedState.refreshEvents();
-                            // Reload all comment counts after refresh
-                            // Wait a bit for the refresh to complete
-                            await Future.delayed(
-                              const Duration(milliseconds: 100),
-                            );
-                            if (mounted) {
-                              // Create a copy of the values to avoid issues if map changes during iteration
-                              final reloaders = List<VoidCallback>.from(
-                                _commentCountReloaders.values,
+        return GestureDetector(
+          onTap: () => FocusScope.of(context).unfocus(),
+          behavior: HitTestBehavior.translucent,
+          child: Column(
+            children: [
+              Expanded(
+                child: feedState.events.isEmpty
+                    ? const Center(child: Text('No events yet'))
+                    : CustomScrollView(
+                        controller: _scrollController,
+                        slivers: [
+                          CupertinoSliverRefreshControl(
+                            onRefresh: () async {
+                              await feedState.refreshEvents();
+                              // Reload all comment counts after refresh
+                              // Wait a bit for the refresh to complete
+                              await Future.delayed(
+                                const Duration(milliseconds: 100),
                               );
-                              for (final reloader in reloaders) {
-                                try {
-                                  reloader();
-                                } catch (e) {
-                                  // Ignore errors from disposed widgets
-                                  debugPrint(
-                                    'Error reloading comment count: $e',
-                                  );
+                              if (mounted) {
+                                // Create a copy of the values to avoid issues if map changes during iteration
+                                final reloaders = List<VoidCallback>.from(
+                                  _commentCountReloaders.values,
+                                );
+                                for (final reloader in reloaders) {
+                                  try {
+                                    reloader();
+                                  } catch (e) {
+                                    // Ignore errors from disposed widgets
+                                    debugPrint(
+                                      'Error reloading comment count: $e',
+                                    );
+                                  }
                                 }
                               }
-                            }
-                          },
-                        ),
-                        SliverList(
-                          delegate: SliverChildBuilderDelegate(
-                            (context, index) {
-                              if (index < feedState.events.length) {
-                                final event = feedState.events[index];
-                                return _EventItem(
-                                  key: ValueKey(event.id),
-                                  event: event,
-                                );
-                              } else if (feedState.isLoadingMore) {
-                                return const Padding(
-                                  padding: EdgeInsets.all(16.0),
-                                  child: Center(
-                                    child: CupertinoActivityIndicator(),
-                                  ),
-                                );
-                              } else if (feedState.hasMoreEvents) {
-                                return const SizedBox.shrink();
-                              } else {
-                                return const Padding(
-                                  padding: EdgeInsets.all(16.0),
-                                  child: Center(
-                                    child: Text(
-                                      'No more events',
-                                      style: TextStyle(
-                                        color: CupertinoColors.secondaryLabel,
+                            },
+                          ),
+                          SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) {
+                                if (index < feedState.events.length) {
+                                  final event = feedState.events[index];
+                                  return _EventItem(
+                                    key: ValueKey(event.id),
+                                    event: event,
+                                  );
+                                } else if (feedState.isLoadingMore) {
+                                  return const Padding(
+                                    padding: EdgeInsets.all(16.0),
+                                    child: Center(
+                                      child: CupertinoActivityIndicator(),
+                                    ),
+                                  );
+                                } else if (feedState.hasMoreEvents) {
+                                  return const SizedBox.shrink();
+                                } else {
+                                  return const Padding(
+                                    padding: EdgeInsets.all(16.0),
+                                    child: Center(
+                                      child: Text(
+                                        'No more events',
+                                        style: TextStyle(
+                                          color: CupertinoColors.secondaryLabel,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                );
-                              }
-                            },
-                            childCount:
-                                feedState.events.length +
-                                (feedState.isLoadingMore ? 1 : 0) +
-                                (feedState.hasMoreEvents ? 0 : 1),
+                                  );
+                                }
+                              },
+                              childCount:
+                                  feedState.events.length +
+                                  (feedState.isLoadingMore ? 1 : 0) +
+                                  (feedState.hasMoreEvents ? 0 : 1),
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-            ),
-            _ComposeMessageWidget(
-              controller: _messageController,
-              isPublishing: _isPublishing,
-              error: _publishError,
-              onPublish: _publishMessage,
-              onErrorDismiss: () {
-                setState(() {
-                  _publishError = null;
-                });
-              },
-              onPickImage: _pickImage,
-              selectedImageBytes: _selectedImageBytes,
-              onClearImage: _clearSelectedImage,
-              showImagePicker: false, // No image upload for regular feed
-            ),
-          ],
+                        ],
+                      ),
+              ),
+              _ComposeMessageWidget(
+                controller: _messageController,
+                isPublishing: _isPublishing,
+                error: _publishError,
+                onPublish: _publishMessage,
+                onErrorDismiss: () {
+                  setState(() {
+                    _publishError = null;
+                  });
+                },
+                onPickImage: _pickImage,
+                selectedImageBytes: _selectedImageBytes,
+                onClearImage: _clearSelectedImage,
+                showImagePicker: false, // No image upload for regular feed
+              ),
+            ],
+          ),
         );
       },
     );
