@@ -2,7 +2,57 @@ import 'dart:convert';
 
 import 'package:dart_nostr/dart_nostr.dart';
 
-/// Kind 40: Channel/Group announcement
+// =============================================================================
+// NIP-29: Relay-based Groups
+// https://github.com/nostr-protocol/nips/blob/master/29.md
+// =============================================================================
+
+/// Kind 9000: put-user - Add user to group with optional roles (moderation event)
+/// Tags: ['h', groupId], ['p', pubkey, ...roles]
+const int kindPutUser = 9000;
+
+/// Kind 9001: remove-user - Remove user from group (moderation event)
+/// Tags: ['h', groupId], ['p', pubkey]
+const int kindRemoveUser = 9001;
+
+/// Kind 9002: edit-metadata - Edit group metadata (moderation event)
+const int kindEditMetadata = 9002;
+
+/// Kind 9005: delete-event - Delete an event from group (moderation event)
+const int kindDeleteEvent = 9005;
+
+/// Kind 9007: create-group - Create a new group (moderation event)
+const int kindCreateGroup = 9007;
+
+/// Kind 9008: delete-group - Delete a group (moderation event)
+const int kindDeleteGroup = 9008;
+
+/// Kind 9021: join-request - User requests to join a group
+/// Tags: ['h', groupId], optional ['code', inviteCode]
+const int kindJoinRequest = 9021;
+
+/// Kind 9022: leave-request - User requests to leave a group
+/// Tags: ['h', groupId]
+const int kindLeaveRequest = 9022;
+
+/// Kind 39000: Group metadata (relay-generated, addressable)
+/// Tags: ['d', groupId], ['name', ...], ['about', ...], ['public'/'private'], ['open'/'closed']
+const int kindGroupMetadata = 39000;
+
+/// Kind 39001: Group admins (relay-generated, addressable)
+/// Tags: ['d', groupId], ['p', pubkey, ...roles]
+const int kindGroupAdmins = 39001;
+
+/// Kind 39002: Group members (relay-generated, addressable)
+/// Tags: ['d', groupId], ['p', pubkey]
+const int kindGroupMembers = 39002;
+
+// =============================================================================
+// Legacy/Custom kinds (keeping for backwards compatibility)
+// =============================================================================
+
+/// Kind 40: Channel/Group announcement (NIP-28, legacy)
+/// @deprecated Use NIP-29 kinds instead
 const int kindGroupAnnouncement = 40;
 
 /// Kind 1059: Encrypted envelope containing an encrypted Nostr event
@@ -11,8 +61,8 @@ const int kindEncryptedEnvelope = 1059;
 /// Kind 1060: MLS Welcome message (encrypted invitation to join a group)
 const int kindMlsWelcome = 1060;
 
-/// Kind 1061: MLS Member Joined event (emitted when a user joins a group via Welcome)
-/// Tags: ['g', groupIdHex], ['p', inviterPubkey]
+/// Kind 1061: MLS Member Joined event (legacy, use kindJoinRequest instead)
+/// @deprecated Use kind 9021 (join request) instead per NIP-29
 const int kindMlsMemberJoined = 1061;
 
 /// Kind 10078: Encrypted identity backup (replaceable event)
@@ -301,6 +351,30 @@ class NostrEventModel {
     }
     return null;
   }
+
+  /// Get image URLs from the event (NIP-92 imeta tags)
+  /// Returns a list of image URLs found in imeta tags
+  List<String> get imageUrls {
+    final urls = <String>[];
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'imeta') {
+        // imeta tag format: ['imeta', 'url <url>', 'blurhash <hash>', ...]
+        for (int i = 1; i < tag.length; i++) {
+          final value = tag[i];
+          if (value.startsWith('url ')) {
+            final url = value.substring(4).trim();
+            if (url.isNotEmpty) {
+              urls.add(url);
+            }
+          }
+        }
+      }
+    }
+    return urls;
+  }
+
+  /// Check if this event has images attached
+  bool get hasImages => imageUrls.isNotEmpty;
 
   @override
   String toString() {

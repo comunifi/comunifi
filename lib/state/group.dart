@@ -22,11 +22,13 @@ import 'package:comunifi/services/mls/storage/secure_storage.dart'
     show MlsGroupTable;
 import 'package:comunifi/models/nostr_event.dart'
     show
+        kindCreateGroup,
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
-        kindGroupAnnouncement,
-        kindMlsMemberJoined,
+        kindGroupAnnouncement, // Legacy, for backwards compatibility
+        kindJoinRequest,
         kindMlsWelcome,
+        kindPutUser,
         NostrEventModel;
 import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/messages/messages.dart'
@@ -35,6 +37,7 @@ import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
+import 'package:comunifi/services/media/media_upload.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -873,56 +876,86 @@ class GroupState with ChangeNotifier {
 
       debugPrint('Created MLS group: ${mlsGroup.name} (${groupIdHex})');
 
-      // Publish group announcement to relay (kind 40)
+      // Publish NIP-29 group creation event (kind 9007)
       try {
         final privateKey = await getNostrPrivateKey();
         if (privateKey != null && privateKey.isNotEmpty) {
           final keyPair = NostrKeyPairs(private: privateKey);
 
-          // Create content as JSON
-          final contentJson = <String, dynamic>{'name': name};
-          if (about != null && about.isNotEmpty) {
-            contentJson['about'] = about;
-          }
-          final content = jsonEncode(contentJson);
+          // Create kind 9007 event (create-group) per NIP-29
+          // https://github.com/nostr-protocol/nips/blob/master/29.md
+          final createGroupCreatedAt = DateTime.now();
+          final createGroupTags = await addClientTagsWithSignature([
+            ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
+            ['name', name],
+            if (about != null && about.isNotEmpty) ['about', about],
+            ['public'], // Group is readable by anyone
+            ['open'], // Anyone can join
+          ], createdAt: createGroupCreatedAt);
 
-          // Create kind 40 event (group announcement)
-          final announcementCreatedAt = DateTime.now();
-          final announcementTags = await addClientTagsWithSignature([
-            ['g', groupIdHex], // MLS group ID tag
-          ], createdAt: announcementCreatedAt);
-
-          final announcementEvent = NostrEvent.fromPartialData(
-            kind: kindGroupAnnouncement,
-            content: content,
+          final createGroupEvent = NostrEvent.fromPartialData(
+            kind: kindCreateGroup,
+            content: '', // NIP-29 uses tags for metadata
             keyPairs: keyPair,
-            tags: announcementTags,
-            createdAt: announcementCreatedAt,
+            tags: createGroupTags,
+            createdAt: createGroupCreatedAt,
           );
 
-          final announcementModel = NostrEventModel(
-            id: announcementEvent.id,
-            pubkey: announcementEvent.pubkey,
-            kind: announcementEvent.kind,
-            content: announcementEvent.content,
-            tags: announcementEvent.tags,
-            sig: announcementEvent.sig,
-            createdAt: announcementEvent.createdAt,
+          final createGroupModel = NostrEventModel(
+            id: createGroupEvent.id,
+            pubkey: createGroupEvent.pubkey,
+            kind: createGroupEvent.kind,
+            content: createGroupEvent.content,
+            tags: createGroupEvent.tags,
+            sig: createGroupEvent.sig,
+            createdAt: createGroupEvent.createdAt,
           );
 
-          // Publish to relay (not encrypted, this is a public announcement)
-          await _nostrService!.publishEvent(announcementModel.toJson());
+          // Publish to relay (public event)
+          await _nostrService!.publishEvent(createGroupModel.toJson());
 
           debugPrint(
-            'Published group announcement to relay: ${announcementModel.id}',
+            'Published NIP-29 create-group (kind 9007) to relay: ${createGroupModel.id}',
+          );
+
+          // Now add creator as admin with kind 9000 (put-user)
+          final putUserCreatedAt = DateTime.now();
+          final putUserTags = await addClientTagsWithSignature([
+            ['h', groupIdHex], // Group ID
+            ['p', keyPair.public, 'admin'], // Add creator with admin role
+          ], createdAt: putUserCreatedAt);
+
+          final putUserEvent = NostrEvent.fromPartialData(
+            kind: kindPutUser,
+            content: '', // Optional reason
+            keyPairs: keyPair,
+            tags: putUserTags,
+            createdAt: putUserCreatedAt,
+          );
+
+          final putUserModel = NostrEventModel(
+            id: putUserEvent.id,
+            pubkey: putUserEvent.pubkey,
+            kind: putUserEvent.kind,
+            content: putUserEvent.content,
+            tags: putUserEvent.tags,
+            sig: putUserEvent.sig,
+            createdAt: putUserEvent.createdAt,
+          );
+
+          // Publish to relay (public event)
+          await _nostrService!.publishEvent(putUserModel.toJson());
+
+          debugPrint(
+            'Published NIP-29 put-user (kind 9000) to add creator as admin: ${putUserModel.id}',
           );
         } else {
           debugPrint(
-            'Warning: No Nostr key found, group announcement not published',
+            'Warning: No Nostr key found, group creation event not published',
           );
         }
       } catch (e) {
-        debugPrint('Failed to publish group announcement to relay: $e');
+        debugPrint('Failed to publish group creation event to relay: $e');
         // Don't fail group creation if announcement fails
       }
     } catch (e) {
@@ -1131,13 +1164,20 @@ class GroupState with ChangeNotifier {
   // Link preview service for URL extraction
   final LinkPreviewService _linkPreviewService = LinkPreviewService();
 
+  // Media upload service
+  final MediaUploadService _mediaUploadService = MediaUploadService();
+
   /// Get the link preview service for widgets to use
   LinkPreviewService get linkPreviewService => _linkPreviewService;
+
+  /// Get the media upload service for widgets to use
+  MediaUploadService get mediaUploadService => _mediaUploadService;
 
   /// Post a message to the active group
   /// Message will be encrypted with MLS and sent as kind 1059 envelope
   /// Automatically extracts URLs from content and adds 'r' tags (Nostr convention)
-  Future<void> postMessage(String content) async {
+  /// If [imageUrl] is provided, it will be added as an 'imeta' tag (NIP-92)
+  Future<void> postMessage(String content, {String? imageUrl}) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
     }
@@ -1162,14 +1202,25 @@ class GroupState with ChangeNotifier {
       // Extract URLs and generate 'r' tags (Nostr convention for URL references)
       final urlTags = _linkPreviewService.generateUrlTags(content);
 
+      // Build tags list
+      final baseTags = <List<String>>[
+        ['g', groupIdHex], // Add group ID tag
+        ...urlTags, // Add URL reference tags
+      ];
+
+      // Add image tag if provided (NIP-92 imeta format)
+      if (imageUrl != null) {
+        baseTags.add(['imeta', 'url $imageUrl']);
+      }
+
       // Create a normal Nostr event (kind 1 = text note)
       // Add group ID as 'g' tag so it can be filtered after decryption
       // Also add 'r' tags for any URLs in the content
       final messageCreatedAt = DateTime.now();
-      final messageTags = await addClientTagsWithSignature([
-        ['g', groupIdHex], // Add group ID tag
-        ...urlTags, // Add URL reference tags
-      ], createdAt: messageCreatedAt);
+      final messageTags = await addClientTagsWithSignature(
+        baseTags,
+        createdAt: messageCreatedAt,
+      );
 
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 1, // Text note
@@ -1211,10 +1262,41 @@ class GroupState with ChangeNotifier {
       if (urlTags.isNotEmpty) {
         debugPrint('Added ${urlTags.length} URL reference tag(s)');
       }
+      if (imageUrl != null) {
+        debugPrint('Added image: $imageUrl');
+      }
     } catch (e) {
       debugPrint('Failed to post message: $e');
       rethrow;
     }
+  }
+
+  /// Upload media to the relay and return the URL
+  ///
+  /// Uses the Blossom protocol with the active group's ID
+  Future<String> uploadMedia(Uint8List fileBytes, String mimeType) async {
+    if (_activeGroup == null) {
+      throw Exception('No active group selected. Please select a group first.');
+    }
+
+    final privateKey = await getNostrPrivateKey();
+    if (privateKey == null || privateKey.isEmpty) {
+      throw Exception(
+        'No Nostr key found. Please ensure keys are initialized.',
+      );
+    }
+
+    final keyPair = NostrKeyPairs(private: privateKey);
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+
+    final result = await _mediaUploadService.upload(
+      fileBytes: fileBytes,
+      mimeType: mimeType,
+      groupId: groupIdHex,
+      keyPairs: keyPair,
+    );
+
+    return result.url;
   }
 
   /// Get the stored Nostr private key
@@ -1853,36 +1935,36 @@ class GroupState with ChangeNotifier {
         if (privateKey != null && privateKey.isNotEmpty) {
           final keyPair = NostrKeyPairs(private: privateKey);
 
-          // Create kind 1061 event (MLS member joined)
-          final joinedCreatedAt = DateTime.now();
-          final joinedTags = await addClientTagsWithSignature([
-            ['g', groupIdHex], // Group ID
-            ['p', welcomeEvent.pubkey], // Inviter's pubkey
-          ], createdAt: joinedCreatedAt);
+          // Create NIP-29 join-request event (kind 9021)
+          // https://github.com/nostr-protocol/nips/blob/master/29.md
+          final joinRequestCreatedAt = DateTime.now();
+          final joinRequestTags = await addClientTagsWithSignature([
+            ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
+          ], createdAt: joinRequestCreatedAt);
 
-          final joinedEvent = NostrEvent.fromPartialData(
-            kind: kindMlsMemberJoined,
-            content: '', // No content needed
+          final joinRequestEvent = NostrEvent.fromPartialData(
+            kind: kindJoinRequest,
+            content: 'Joined via MLS Welcome', // Optional reason
             keyPairs: keyPair,
-            tags: joinedTags,
-            createdAt: joinedCreatedAt,
+            tags: joinRequestTags,
+            createdAt: joinRequestCreatedAt,
           );
 
-          final joinedEventModel = NostrEventModel(
-            id: joinedEvent.id,
-            pubkey: joinedEvent.pubkey,
-            kind: joinedEvent.kind,
-            content: joinedEvent.content,
-            tags: joinedEvent.tags,
-            sig: joinedEvent.sig,
-            createdAt: joinedEvent.createdAt,
+          final joinRequestModel = NostrEventModel(
+            id: joinRequestEvent.id,
+            pubkey: joinRequestEvent.pubkey,
+            kind: joinRequestEvent.kind,
+            content: joinRequestEvent.content,
+            tags: joinRequestEvent.tags,
+            sig: joinRequestEvent.sig,
+            createdAt: joinRequestEvent.createdAt,
           );
 
-          // Publish to relay
-          await _nostrService!.publishEvent(joinedEventModel.toJson());
+          // Publish to relay (public event)
+          await _nostrService!.publishEvent(joinRequestModel.toJson());
 
           debugPrint(
-            'Published member joined event for group $groupIdHex: ${joinedEventModel.id}',
+            'Published NIP-29 join-request (kind 9021) for group $groupIdHex: ${joinRequestModel.id}',
           );
         }
       } catch (e) {

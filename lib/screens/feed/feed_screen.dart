@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/main.dart' show routeObserver;
 import 'package:comunifi/state/feed.dart';
@@ -33,10 +34,13 @@ class FeedScreen extends StatefulWidget {
 class _FeedScreenState extends State<FeedScreen> with RouteAware {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
+  final ImagePicker _imagePicker = ImagePicker();
   bool _isPublishing = false;
   String? _publishError;
   bool _isLeftSidebarOpen = false;
   bool _isRightSidebarOpen = false;
+  Uint8List? _selectedImageBytes;
+  String? _selectedImageMimeType;
   static final Map<String, VoidCallback> _commentCountReloaders = {};
   static final Map<String, VoidCallback> _reactionDataReloaders = {};
 
@@ -181,9 +185,43 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     super.dispose();
   }
 
+  Future<void> _pickImage() async {
+    try {
+      final XFile? image = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 85,
+      );
+
+      if (image != null) {
+        final bytes = await image.readAsBytes();
+        final mimeType = image.mimeType ?? 'image/jpeg';
+
+        setState(() {
+          _selectedImageBytes = bytes;
+          _selectedImageMimeType = mimeType;
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to pick image: $e');
+      setState(() {
+        _publishError = 'Failed to select image';
+      });
+    }
+  }
+
+  void _clearSelectedImage() {
+    setState(() {
+      _selectedImageBytes = null;
+      _selectedImageMimeType = null;
+    });
+  }
+
   Future<void> _publishMessage() async {
     final content = _messageController.text.trim();
-    if (content.isEmpty || _isPublishing) return;
+    if (content.isEmpty && _selectedImageBytes == null) return;
+    if (_isPublishing) return;
 
     final groupState = context.read<GroupState>();
 
@@ -202,8 +240,19 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
       });
 
       try {
-        await groupState.postMessage(content);
+        String? imageUrl;
+
+        // Upload image if selected
+        if (_selectedImageBytes != null) {
+          imageUrl = await groupState.uploadMedia(
+            _selectedImageBytes!,
+            _selectedImageMimeType ?? 'image/jpeg',
+          );
+        }
+
+        await groupState.postMessage(content, imageUrl: imageUrl);
         _messageController.clear();
+        _clearSelectedImage();
         setState(() {
           _isPublishing = false;
         });
@@ -216,7 +265,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
       return;
     }
 
-    // Otherwise, use regular feed
+    // Otherwise, use regular feed (no image support for now)
     final feedState = context.read<FeedState>();
     if (!feedState.isConnected) {
       setState(() {
@@ -233,6 +282,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     try {
       await feedState.publishMessage(content);
       _messageController.clear();
+      _clearSelectedImage();
       setState(() {
         _isPublishing = false;
       });
@@ -525,6 +575,10 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     _publishError = null;
                   });
                 },
+                onPickImage: _pickImage,
+                selectedImageBytes: _selectedImageBytes,
+                onClearImage: _clearSelectedImage,
+                showImagePicker: true,
               ),
             ],
           );
@@ -640,6 +694,10 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   _publishError = null;
                 });
               },
+              onPickImage: _pickImage,
+              selectedImageBytes: _selectedImageBytes,
+              onClearImage: _clearSelectedImage,
+              showImagePicker: false, // No image upload for regular feed
             ),
           ],
         );
@@ -1060,6 +1118,8 @@ class _EventItemContentWidget extends StatelessWidget {
               ],
               const SizedBox(height: 8),
               _RichContentText(content: event.content),
+              // Display attached images (NIP-92 imeta)
+              if (event.hasImages) _EventImages(imageUrls: event.imageUrls),
               // Link previews
               ContentLinkPreviews(
                 content: event.content,
@@ -1196,6 +1256,110 @@ class _RichContentText extends StatelessWidget {
   }
 }
 
+/// Widget to display images attached to an event
+class _EventImages extends StatelessWidget {
+  final List<String> imageUrls;
+
+  const _EventImages({required this.imageUrls});
+
+  @override
+  Widget build(BuildContext context) {
+    if (imageUrls.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8.0),
+      child: Column(
+        children: imageUrls.map((url) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12.0),
+              child: GestureDetector(
+                onTap: () => _showFullImage(context, url),
+                child: Image.network(
+                  url,
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  loadingBuilder: (context, child, loadingProgress) {
+                    if (loadingProgress == null) return child;
+                    return Container(
+                      height: 200,
+                      decoration: BoxDecoration(
+                        color: CupertinoColors.systemGrey5,
+                        borderRadius: BorderRadius.circular(12.0),
+                      ),
+                      child: const Center(child: CupertinoActivityIndicator()),
+                    );
+                  },
+                  errorBuilder: (context, error, stackTrace) {
+                    return Container(
+                      height: 100,
+                      decoration: BoxDecoration(
+                        color: CupertinoColors.systemGrey5,
+                        borderRadius: BorderRadius.circular(12.0),
+                      ),
+                      child: const Center(
+                        child: Icon(
+                          CupertinoIcons.photo,
+                          color: CupertinoColors.systemGrey,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  void _showFullImage(BuildContext context, String url) {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoPageScaffold(
+        backgroundColor: CupertinoColors.black,
+        navigationBar: CupertinoNavigationBar(
+          backgroundColor: CupertinoColors.black.withOpacity(0.8),
+          leading: CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Icon(
+              CupertinoIcons.xmark,
+              color: CupertinoColors.white,
+            ),
+          ),
+          middle: const Text(
+            'Image',
+            style: TextStyle(color: CupertinoColors.white),
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: Image.network(
+                url,
+                fit: BoxFit.contain,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return const Center(
+                    child: CupertinoActivityIndicator(
+                      color: CupertinoColors.white,
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ComposeMessageWidget extends StatelessWidget {
   final TextEditingController controller;
   final bool isPublishing;
@@ -1203,6 +1367,10 @@ class _ComposeMessageWidget extends StatelessWidget {
   final VoidCallback onPublish;
   final VoidCallback onErrorDismiss;
   final String? placeholder;
+  final VoidCallback? onPickImage;
+  final Uint8List? selectedImageBytes;
+  final VoidCallback? onClearImage;
+  final bool showImagePicker;
 
   const _ComposeMessageWidget({
     required this.controller,
@@ -1211,6 +1379,10 @@ class _ComposeMessageWidget extends StatelessWidget {
     required this.onPublish,
     required this.onErrorDismiss,
     this.placeholder,
+    this.onPickImage,
+    this.selectedImageBytes,
+    this.onClearImage,
+    this.showImagePicker = false,
   });
 
   @override
@@ -1258,11 +1430,78 @@ class _ComposeMessageWidget extends StatelessWidget {
                   ],
                 ),
               ),
+            // Selected image preview
+            if (selectedImageBytes != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(8.0, 8.0, 8.0, 0),
+                  child: Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12.0),
+                        child: Image.memory(
+                          selectedImageBytes!,
+                          height: 80,
+                          width: 80,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: CupertinoButton(
+                          padding: EdgeInsets.zero,
+                          minSize: 0,
+                          onPressed: onClearImage,
+                          child: Container(
+                            width: 20,
+                            height: 20,
+                            decoration: BoxDecoration(
+                              color: CupertinoColors.black.withOpacity(0.6),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              CupertinoIcons.xmark,
+                              color: CupertinoColors.white,
+                              size: 12,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.all(8.0),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
+                  // Image picker button
+                  if (showImagePicker && onPickImage != null)
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      minSize: 0,
+                      onPressed: isPublishing ? null : onPickImage,
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemGrey5,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          CupertinoIcons.photo,
+                          color: isPublishing
+                              ? CupertinoColors.systemGrey
+                              : CupertinoColors.systemBlue,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  if (showImagePicker && onPickImage != null)
+                    const SizedBox(width: 8),
                   Expanded(
                     child: Focus(
                       onKeyEvent: (node, event) {
