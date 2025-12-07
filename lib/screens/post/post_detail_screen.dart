@@ -1,5 +1,7 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/post_detail.dart';
 import 'package:comunifi/state/profile.dart';
@@ -259,6 +261,12 @@ class _PostItemContent extends StatefulWidget {
   final NostrEventModel event;
   final String displayName;
 
+  /// Wide screen breakpoint (same as feed_screen.dart)
+  static const double wideScreenBreakpoint = 1000;
+
+  /// Sidebar width (same as feed_screen.dart)
+  static const double sidebarWidth = 320;
+
   const _PostItemContent({
     required this.event,
     required this.displayName,
@@ -361,71 +369,84 @@ class _PostItemContentState extends State<_PostItemContent> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16.0),
-      decoration: const BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                widget.displayName,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                _formatDate(widget.event.createdAt),
-                style: const TextStyle(
-                  color: CupertinoColors.secondaryLabel,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          _RichContentText(content: widget.event.content),
-          // Link previews
-          Builder(
-            builder: (context) {
-              final postDetailState = context.read<PostDetailState>();
-              return ContentLinkPreviews(
-                content: widget.event.content,
-                linkPreviewService: postDetailState.linkPreviewService,
-              );
-            },
-          ),
-          // Quoted post preview (if this is a quote post)
-          if (widget.event.isQuotePost && widget.event.quotedEventId != null)
-            QuotedPostPreview(
-              quotedEventId: widget.event.quotedEventId!,
+    // Calculate max width based on feed area (screen width minus sidebars on wide screens)
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isWideScreen = screenWidth > _PostItemContent.wideScreenBreakpoint;
+    final maxContentWidth = isWideScreen
+        ? screenWidth - (_PostItemContent.sidebarWidth * 2)
+        : screenWidth;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxContentWidth),
+        child: Container(
+          padding: const EdgeInsets.all(16.0),
+          decoration: const BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
             ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              HeartButton(
-                eventId: widget.event.id,
-                reactionCount: _reactionCount,
-                isLoadingCount: _isLoadingReactionCount || _isReacting,
-                isReacted: _hasUserReacted,
-                onPressed: _isReacting ? () {} : _toggleReaction,
+              Row(
+                children: [
+                  Text(
+                    widget.displayName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _formatDate(widget.event.createdAt),
+                    style: const TextStyle(
+                      color: CupertinoColors.secondaryLabel,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 16),
-              QuoteButton(
-                event: widget.event,
-                onPressed: () => _openQuoteModal(context),
+              const SizedBox(height: 8),
+              _RichContentText(content: widget.event.content),
+              // Link previews
+              Builder(
+                builder: (context) {
+                  final postDetailState = context.read<PostDetailState>();
+                  return ContentLinkPreviews(
+                    content: widget.event.content,
+                    linkPreviewService: postDetailState.linkPreviewService,
+                  );
+                },
+              ),
+              // Quoted post preview (if this is a quote post)
+              if (widget.event.isQuotePost && widget.event.quotedEventId != null)
+                QuotedPostPreview(
+                  quotedEventId: widget.event.quotedEventId!,
+                ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  HeartButton(
+                    eventId: widget.event.id,
+                    reactionCount: _reactionCount,
+                    isLoadingCount: _isLoadingReactionCount || _isReacting,
+                    isReacted: _hasUserReacted,
+                    onPressed: _isReacting ? () {} : _toggleReaction,
+                  ),
+                  const SizedBox(width: 16),
+                  QuoteButton(
+                    event: widget.event,
+                    onPressed: () => _openQuoteModal(context),
+                  ),
+                ],
               ),
             ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -488,6 +509,12 @@ class _CommentItemState extends State<_CommentItem> {
 class _CommentItemContent extends StatefulWidget {
   final NostrEventModel event;
   final String displayName;
+
+  /// Wide screen breakpoint (same as feed_screen.dart)
+  static const double wideScreenBreakpoint = 1000;
+
+  /// Sidebar width (same as feed_screen.dart)
+  static const double sidebarWidth = 320;
 
   const _CommentItemContent({
     required this.event,
@@ -591,61 +618,74 @@ class _CommentItemContentState extends State<_CommentItemContent> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16.0),
-      decoration: const BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
+    // Calculate max width based on feed area (screen width minus sidebars on wide screens)
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isWideScreen = screenWidth > _CommentItemContent.wideScreenBreakpoint;
+    final maxContentWidth = isWideScreen
+        ? screenWidth - (_CommentItemContent.sidebarWidth * 2)
+        : screenWidth;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxContentWidth),
+        child: Container(
+          padding: const EdgeInsets.all(16.0),
+          decoration: const BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    widget.displayName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _formatDate(widget.event.createdAt),
+                    style: const TextStyle(
+                      color: CupertinoColors.secondaryLabel,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _RichContentText(content: widget.event.content),
+              // Link previews for comments
+              Builder(
+                builder: (context) {
+                  final postDetailState = context.read<PostDetailState>();
+                  return ContentLinkPreviews(
+                    content: widget.event.content,
+                    linkPreviewService: postDetailState.linkPreviewService,
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  HeartButton(
+                    eventId: widget.event.id,
+                    reactionCount: _reactionCount,
+                    isLoadingCount: _isLoadingReactionCount || _isReacting,
+                    isReacted: _hasUserReacted,
+                    onPressed: _isReacting ? () {} : _toggleReaction,
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                widget.displayName,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                _formatDate(widget.event.createdAt),
-                style: const TextStyle(
-                  color: CupertinoColors.secondaryLabel,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          _RichContentText(content: widget.event.content),
-          // Link previews for comments
-          Builder(
-            builder: (context) {
-              final postDetailState = context.read<PostDetailState>();
-              return ContentLinkPreviews(
-                content: widget.event.content,
-                linkPreviewService: postDetailState.linkPreviewService,
-              );
-            },
-          ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              HeartButton(
-                eventId: widget.event.id,
-                reactionCount: _reactionCount,
-                isLoadingCount: _isLoadingReactionCount || _isReacting,
-                isReacted: _hasUserReacted,
-                onPressed: _isReacting ? () {} : _toggleReaction,
-              ),
-            ],
-          ),
-        ],
       ),
     );
   }
@@ -806,19 +846,38 @@ class _ComposeCommentWidget extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Expanded(
-                    child: CupertinoTextField(
-                      controller: controller,
-                      placeholder: 'Write a comment...',
-                      maxLines: null,
-                      minLines: 1,
-                      textInputAction: TextInputAction.newline,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12.0,
-                        vertical: 8.0,
-                      ),
-                      decoration: BoxDecoration(
-                        color: CupertinoColors.systemGrey6,
-                        borderRadius: BorderRadius.circular(20.0),
+                    child: Focus(
+                      onKeyEvent: (node, event) {
+                        final isDesktop =
+                            defaultTargetPlatform == TargetPlatform.macOS ||
+                                defaultTargetPlatform ==
+                                    TargetPlatform.windows ||
+                                defaultTargetPlatform == TargetPlatform.linux;
+                        if (isDesktop &&
+                            event is KeyDownEvent &&
+                            event.logicalKey == LogicalKeyboardKey.enter &&
+                            !HardwareKeyboard.instance.isShiftPressed) {
+                          if (!isPublishing) {
+                            onPublish();
+                          }
+                          return KeyEventResult.handled;
+                        }
+                        return KeyEventResult.ignored;
+                      },
+                      child: CupertinoTextField(
+                        controller: controller,
+                        placeholder: 'Write a comment...',
+                        maxLines: null,
+                        minLines: 1,
+                        textInputAction: TextInputAction.newline,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12.0,
+                          vertical: 8.0,
+                        ),
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemGrey6,
+                          borderRadius: BorderRadius.circular(20.0),
+                        ),
                       ),
                     ),
                   ),

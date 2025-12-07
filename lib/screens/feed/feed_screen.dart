@@ -1,5 +1,7 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/main.dart' show routeObserver;
 import 'package:comunifi/state/feed.dart';
@@ -923,6 +925,12 @@ class _EventItemContentWidget extends StatelessWidget {
   final VoidCallback onReactionPressed;
   final VoidCallback onQuotePressed;
 
+  /// Wide screen breakpoint (same as sidebar layout)
+  static const double wideScreenBreakpoint = 1000;
+
+  /// Sidebar width (same as sidebar layout)
+  static const double sidebarWidth = 320;
+
   const _EventItemContentWidget({
     required this.event,
     required this.displayName,
@@ -982,95 +990,108 @@ class _EventItemContentWidget extends StatelessWidget {
         ? groupState.getGroupName(groupIdHex)
         : null;
 
-    return Container(
-      padding: const EdgeInsets.all(16.0),
-      decoration: const BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                displayName,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                _formatDate(event.createdAt),
-                style: const TextStyle(
-                  color: CupertinoColors.secondaryLabel,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
-          if (groupName != null && groupIdHex != null) ...[
-            const SizedBox(height: 4),
-            GestureDetector(
-              onTap: () {
-                // Find the MlsGroup by groupIdHex and select it
-                final matchingGroup = groupState.groups
-                    .cast<MlsGroup?>()
-                    .firstWhere((g) {
-                      if (g == null) return false;
-                      final gIdHex = g.id.bytes
-                          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-                          .join();
-                      return gIdHex == groupIdHex;
-                    }, orElse: () => null);
-                if (matchingGroup != null) {
-                  groupState.setActiveGroup(matchingGroup);
-                }
-              },
-              child: Text(
-                groupName,
-                style: const TextStyle(
-                  color: CupertinoColors.systemBlue,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
+    // Calculate max width based on feed area (screen width minus sidebars on wide screens)
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isWideScreen = screenWidth > wideScreenBreakpoint;
+    final maxContentWidth = isWideScreen
+        ? screenWidth - (sidebarWidth * 2)
+        : screenWidth;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxContentWidth),
+        child: Container(
+          padding: const EdgeInsets.all(16.0),
+          decoration: const BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
             ),
-          ],
-          const SizedBox(height: 8),
-          _RichContentText(content: event.content),
-          // Link previews
-          ContentLinkPreviews(
-            content: event.content,
-            linkPreviewService: groupState.linkPreviewService,
           ),
-          // Quoted post preview (if this is a quote post)
-          if (event.isQuotePost && event.quotedEventId != null)
-            QuotedPostPreview(quotedEventId: event.quotedEventId!),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              HeartButton(
-                eventId: event.id,
-                reactionCount: reactionCount,
-                isLoadingCount: isLoadingReactionCount || isReacting,
-                isReacted: hasUserReacted,
-                onPressed: isReacting ? () {} : onReactionPressed,
+              Row(
+                children: [
+                  Text(
+                    displayName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _formatDate(event.createdAt),
+                    style: const TextStyle(
+                      color: CupertinoColors.secondaryLabel,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 16),
-              QuoteButton(event: event, onPressed: onQuotePressed),
-              const SizedBox(width: 16),
-              CommentBubble(
-                eventId: event.id,
-                commentCount: commentCount,
-                isLoadingCount: isLoadingCount,
+              if (groupName != null && groupIdHex != null) ...[
+                const SizedBox(height: 4),
+                GestureDetector(
+                  onTap: () {
+                    // Find the MlsGroup by groupIdHex and select it
+                    final matchingGroup = groupState.groups
+                        .cast<MlsGroup?>()
+                        .firstWhere((g) {
+                          if (g == null) return false;
+                          final gIdHex = g.id.bytes
+                              .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                              .join();
+                          return gIdHex == groupIdHex;
+                        }, orElse: () => null);
+                    if (matchingGroup != null) {
+                      groupState.setActiveGroup(matchingGroup);
+                    }
+                  },
+                  child: Text(
+                    groupName,
+                    style: const TextStyle(
+                      color: CupertinoColors.systemBlue,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              _RichContentText(content: event.content),
+              // Link previews
+              ContentLinkPreviews(
+                content: event.content,
+                linkPreviewService: groupState.linkPreviewService,
+              ),
+              // Quoted post preview (if this is a quote post)
+              if (event.isQuotePost && event.quotedEventId != null)
+                QuotedPostPreview(quotedEventId: event.quotedEventId!),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  HeartButton(
+                    eventId: event.id,
+                    reactionCount: reactionCount,
+                    isLoadingCount: isLoadingReactionCount || isReacting,
+                    isReacted: hasUserReacted,
+                    onPressed: isReacting ? () {} : onReactionPressed,
+                  ),
+                  const SizedBox(width: 16),
+                  QuoteButton(event: event, onPressed: onQuotePressed),
+                  const SizedBox(width: 16),
+                  CommentBubble(
+                    eventId: event.id,
+                    commentCount: commentCount,
+                    isLoadingCount: isLoadingCount,
+                  ),
+                ],
               ),
             ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1243,19 +1264,37 @@ class _ComposeMessageWidget extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Expanded(
-                    child: CupertinoTextField(
-                      controller: controller,
-                      placeholder: placeholder ?? 'Write a message...',
-                      maxLines: null,
-                      minLines: 1,
-                      textInputAction: TextInputAction.newline,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12.0,
-                        vertical: 8.0,
-                      ),
-                      decoration: BoxDecoration(
-                        color: CupertinoColors.systemGrey6,
-                        borderRadius: BorderRadius.circular(20.0),
+                    child: Focus(
+                      onKeyEvent: (node, event) {
+                        final isDesktop =
+                            defaultTargetPlatform == TargetPlatform.macOS ||
+                            defaultTargetPlatform == TargetPlatform.windows ||
+                            defaultTargetPlatform == TargetPlatform.linux;
+                        if (isDesktop &&
+                            event is KeyDownEvent &&
+                            event.logicalKey == LogicalKeyboardKey.enter &&
+                            !HardwareKeyboard.instance.isShiftPressed) {
+                          if (!isPublishing) {
+                            onPublish();
+                          }
+                          return KeyEventResult.handled;
+                        }
+                        return KeyEventResult.ignored;
+                      },
+                      child: CupertinoTextField(
+                        controller: controller,
+                        placeholder: placeholder ?? 'Write a message...',
+                        maxLines: null,
+                        minLines: 1,
+                        textInputAction: TextInputAction.newline,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12.0,
+                          vertical: 8.0,
+                        ),
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemGrey6,
+                          borderRadius: BorderRadius.circular(20.0),
+                        ),
                       ),
                     ),
                   ),

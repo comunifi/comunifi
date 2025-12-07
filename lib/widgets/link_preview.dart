@@ -286,6 +286,9 @@ class ContentLinkPreviews extends StatelessWidget {
   final LinkPreviewService? linkPreviewService;
   final int maxPreviews;
 
+  /// Fixed max width for link preview cards
+  static const double maxPreviewWidth = 500;
+
   const ContentLinkPreviews({
     super.key,
     required this.content,
@@ -306,11 +309,14 @@ class ContentLinkPreviews extends StatelessWidget {
     final previewUrls = urls.take(maxPreviews).toList();
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: previewUrls.map((url) {
-        return LinkPreview(
-          url: url,
-          linkPreviewService: service,
+        return ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: maxPreviewWidth),
+          child: LinkPreview(
+            url: url,
+            linkPreviewService: service,
+          ),
         );
       }).toList(),
     );
