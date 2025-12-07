@@ -1260,6 +1260,12 @@ class _RichContentText extends StatelessWidget {
 class _EventImages extends StatelessWidget {
   final List<String> imageUrls;
 
+  /// Fixed max width for images (same as link previews)
+  static const double maxImageWidth = 500;
+
+  /// Fixed max height for images in feed
+  static const double maxImageHeight = 400;
+
   const _EventImages({required this.imageUrls});
 
   @override
@@ -1269,43 +1275,49 @@ class _EventImages extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: 8.0),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: imageUrls.map((url) {
           return Padding(
             padding: const EdgeInsets.only(bottom: 8.0),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(12.0),
-              child: GestureDetector(
-                onTap: () => _showFullImage(context, url),
-                child: Image.network(
-                  url,
-                  fit: BoxFit.cover,
-                  width: double.infinity,
-                  loadingBuilder: (context, child, loadingProgress) {
-                    if (loadingProgress == null) return child;
-                    return Container(
-                      height: 200,
-                      decoration: BoxDecoration(
-                        color: CupertinoColors.systemGrey5,
-                        borderRadius: BorderRadius.circular(12.0),
-                      ),
-                      child: const Center(child: CupertinoActivityIndicator()),
-                    );
-                  },
-                  errorBuilder: (context, error, stackTrace) {
-                    return Container(
-                      height: 100,
-                      decoration: BoxDecoration(
-                        color: CupertinoColors.systemGrey5,
-                        borderRadius: BorderRadius.circular(12.0),
-                      ),
-                      child: const Center(
-                        child: Icon(
-                          CupertinoIcons.photo,
-                          color: CupertinoColors.systemGrey,
-                        ),
-                      ),
-                    );
-                  },
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: maxImageWidth,
+                maxHeight: maxImageHeight,
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12.0),
+                child: GestureDetector(
+                  onTap: () => _showFullImage(context, url),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemGrey5,
+                      borderRadius: BorderRadius.circular(12.0),
+                    ),
+                    child: Image.network(
+                      url,
+                      fit: BoxFit.contain,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return const SizedBox(
+                          width: maxImageWidth,
+                          height: maxImageHeight,
+                          child: Center(child: CupertinoActivityIndicator()),
+                        );
+                      },
+                      errorBuilder: (context, error, stackTrace) {
+                        return const SizedBox(
+                          width: maxImageWidth,
+                          height: 100,
+                          child: Center(
+                            child: Icon(
+                              CupertinoIcons.photo,
+                              color: CupertinoColors.systemGrey,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
                 ),
               ),
             ),

@@ -411,6 +411,9 @@ class _PostItemContentState extends State<_PostItemContent> {
               ),
               const SizedBox(height: 8),
               _RichContentText(content: widget.event.content),
+              // Display attached images (NIP-92 imeta)
+              if (widget.event.hasImages)
+                _EventImages(imageUrls: widget.event.imageUrls),
               // Link previews
               Builder(
                 builder: (context) {
@@ -660,6 +663,9 @@ class _CommentItemContentState extends State<_CommentItemContent> {
               ),
               const SizedBox(height: 8),
               _RichContentText(content: widget.event.content),
+              // Display attached images (NIP-92 imeta)
+              if (widget.event.hasImages)
+                _EventImages(imageUrls: widget.event.imageUrls),
               // Link previews for comments
               Builder(
                 builder: (context) {
@@ -777,6 +783,124 @@ class _RichContentText extends StatelessWidget {
         debugPrint('Could not launch URL: $e');
       }
     }
+  }
+}
+
+/// Widget to display images attached to an event
+class _EventImages extends StatelessWidget {
+  final List<String> imageUrls;
+
+  /// Fixed max width for images (same as link previews)
+  static const double maxImageWidth = 500;
+
+  /// Fixed max height for images
+  static const double maxImageHeight = 400;
+
+  const _EventImages({required this.imageUrls});
+
+  @override
+  Widget build(BuildContext context) {
+    if (imageUrls.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: imageUrls.map((url) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: maxImageWidth,
+                maxHeight: maxImageHeight,
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12.0),
+                child: GestureDetector(
+                  onTap: () => _showFullImage(context, url),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemGrey5,
+                      borderRadius: BorderRadius.circular(12.0),
+                    ),
+                    child: Image.network(
+                      url,
+                      fit: BoxFit.contain,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return const SizedBox(
+                          width: maxImageWidth,
+                          height: maxImageHeight,
+                          child: Center(
+                            child: CupertinoActivityIndicator(),
+                          ),
+                        );
+                      },
+                      errorBuilder: (context, error, stackTrace) {
+                        return const SizedBox(
+                          width: maxImageWidth,
+                          height: 100,
+                          child: Center(
+                            child: Icon(
+                              CupertinoIcons.photo,
+                              color: CupertinoColors.systemGrey,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  void _showFullImage(BuildContext context, String url) {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoPageScaffold(
+        backgroundColor: CupertinoColors.black,
+        navigationBar: CupertinoNavigationBar(
+          backgroundColor: CupertinoColors.black.withValues(alpha: 0.8),
+          leading: CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Icon(
+              CupertinoIcons.xmark,
+              color: CupertinoColors.white,
+            ),
+          ),
+          middle: const Text(
+            'Image',
+            style: TextStyle(color: CupertinoColors.white),
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: Image.network(
+                url,
+                fit: BoxFit.contain,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return const Center(
+                    child: CupertinoActivityIndicator(
+                      color: CupertinoColors.white,
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

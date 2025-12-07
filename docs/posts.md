@@ -550,6 +550,143 @@ class _PostCardState extends State<PostCard> {
 
 ---
 
+## Image Attachments
+
+Posts can include image attachments stored using NIP-92 `imeta` tags.
+
+### Image Data in Events
+
+Images are attached to events via `imeta` tags:
+
+```dart
+// Example event with image
+NostrEventModel(
+  kind: 1,
+  content: "Check out this photo!",
+  tags: [
+    ['imeta', 'url https://example.com/image.jpg', 'blurhash <hash>'],
+    ['client', 'comunifi'],
+  ],
+)
+```
+
+### Model Helpers
+
+```dart
+// Check if event has images
+event.hasImages  // true if has 'imeta' tag with URL
+
+// Get all image URLs
+event.imageUrls  // Returns List<String> of image URLs
+```
+
+### Rendering Images
+
+Images are rendered with the following constraints to maintain visual consistency with link previews:
+
+| Property | Value |
+|----------|-------|
+| Fit | Contain (preserves aspect ratio) |
+| Max width | 500px (same as link previews) |
+| Max height | 400px |
+| Alignment | Left-aligned |
+| Border radius | 12px |
+| Background | Grey (visible when image doesn't fill bounds) |
+| Tap action | Opens full-screen viewer |
+
+**Implementation:**
+
+```dart
+/// Widget to display images attached to an event
+class _EventImages extends StatelessWidget {
+  final List<String> imageUrls;
+
+  /// Fixed max width for images (same as link previews)
+  static const double maxImageWidth = 500;
+
+  /// Fixed max height for images
+  static const double maxImageHeight = 400;
+
+  @override
+  Widget build(BuildContext context) {
+    if (imageUrls.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: imageUrls.map((url) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: maxImageWidth,
+                maxHeight: maxImageHeight,
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12.0),
+                child: GestureDetector(
+                  onTap: () => _showFullImage(context, url),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemGrey5,
+                      borderRadius: BorderRadius.circular(12.0),
+                    ),
+                    child: Image.network(
+                      url,
+                      fit: BoxFit.contain,
+                      // ... loading and error builders
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+```
+
+**Usage in screens:**
+
+Both `FeedScreen` and `PostDetailScreen` render images the same way:
+
+```dart
+// In post/comment widget build method
+Column(
+  crossAxisAlignment: CrossAxisAlignment.start,
+  children: [
+    // ... author info, timestamp
+    _RichContentText(content: event.content),
+    // Display attached images (NIP-92 imeta)
+    if (event.hasImages) _EventImages(imageUrls: event.imageUrls),
+    // Link previews
+    ContentLinkPreviews(content: event.content),
+    // ... reactions, buttons
+  ],
+)
+```
+
+### Full-Screen Image Viewer
+
+Tapping an image opens a full-screen viewer with:
+- Black background
+- Close button in navigation bar
+- `InteractiveViewer` for pinch-to-zoom (0.5x to 4x scale)
+- Image displayed with `BoxFit.contain`
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `lib/models/nostr_event.dart` | `hasImages`, `imageUrls` getters |
+| `lib/screens/feed/feed_screen.dart` | `_EventImages` widget for feed |
+| `lib/screens/post/post_detail_screen.dart` | `_EventImages` widget for detail view |
+
+---
+
 ## Quote Posts
 
 Quote posts allow users to repost another post with their own comment, similar to Twitter's quote tweet. They are implemented using the Nostr NIP-18 convention.
