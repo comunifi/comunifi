@@ -11,6 +11,10 @@ const int kindEncryptedEnvelope = 1059;
 /// Kind 1060: MLS Welcome message (encrypted invitation to join a group)
 const int kindMlsWelcome = 1060;
 
+/// Kind 1061: MLS Member Joined event (emitted when a user joins a group via Welcome)
+/// Tags: ['g', groupIdHex], ['p', inviterPubkey]
+const int kindMlsMemberJoined = 1061;
+
 /// Kind 10078: Encrypted identity backup (replaceable event)
 /// Contains the user's Nostr keypair encrypted with their personal MLS group.
 /// This allows identity recovery from the relay if the local cache is lost.
@@ -264,6 +268,38 @@ class NostrEventModel {
 
     // Create and return the decrypted event
     return NostrEventModel.fromJson(eventJson);
+  }
+
+  /// Check if this event quotes another event (has 'q' tag - NIP-18)
+  bool get isQuotePost {
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'q' && tag.length > 1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Get the quoted event ID from a quote post
+  /// Returns null if this is not a quote post or if no 'q' tag is found
+  String? get quotedEventId {
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'q' && tag.length > 1) {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
+  /// Get the quoted event pubkey from a quote post (if available)
+  /// Returns null if not found
+  String? get quotedEventPubkey {
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'q' && tag.length > 3) {
+        return tag[3];
+      }
+    }
+    return null;
   }
 
   @override

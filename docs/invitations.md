@@ -79,10 +79,11 @@ Welcome messages are automatically handled when received from the relay. The `Gr
 1. Welcome message arrives via Nostr (kind 1060)
 2. `GroupState` checks if it's addressed to the current user (via `p` tag)
 3. Deserializes the Welcome message
-4. Generates a new HPKE key pair (since key storage isn't implemented yet)
+4. Uses the derived HPKE key pair (from Nostr private key) to decrypt
 5. Joins the group using `MlsGroup.joinFromWelcome`
 6. Adds the group to the groups list
 7. Updates the UI
+8. **Publishes a "member joined" event (kind 1061)** to notify other group members
 
 ### Manual Handling (Advanced)
 
@@ -177,7 +178,9 @@ The encrypted content includes:
 - `ratchetTree`: The current ratchet tree structure
 - `members`: Public keys of all group members
 
-### Nostr Event Format
+### Nostr Event Formats
+
+#### Welcome Message (kind 1060)
 
 Welcome messages are sent as Nostr events with:
 - **Kind**: 1060 (`kindMlsWelcome`)
@@ -186,6 +189,21 @@ Welcome messages are sent as Nostr events with:
   - `['p', inviteeNostrPubkey]`: Recipient's Nostr pubkey
   - `['g', groupIdHex]`: MLS group ID (hex-encoded)
   - `['client', 'comunifi']`: Client identifier
+
+#### Member Joined Event (kind 1061)
+
+When a user successfully joins a group via Welcome message, they emit:
+- **Kind**: 1061 (`kindMlsMemberJoined`)
+- **Content**: Empty
+- **Tags**:
+  - `['g', groupIdHex]`: MLS group ID (hex-encoded)
+  - `['p', inviterPubkey]`: The pubkey of the user who sent the invitation
+  - `['client', 'comunifi']`: Client identifier
+
+This event serves as:
+1. Confirmation that the invitation was successfully processed
+2. Notification to other group members that someone joined
+3. An audit trail of group membership changes
 
 ## Security Considerations
 

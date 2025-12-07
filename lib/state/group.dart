@@ -25,6 +25,7 @@ import 'package:comunifi/models/nostr_event.dart'
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
         kindGroupAnnouncement,
+        kindMlsMemberJoined,
         kindMlsWelcome,
         NostrEventModel;
 import 'package:comunifi/services/nostr/client_signature.dart';
@@ -1845,6 +1846,49 @@ class GroupState with ChangeNotifier {
 
       // Update UI
       safeNotifyListeners();
+
+      // Publish "member joined" event (kind 1061)
+      try {
+        final privateKey = await getNostrPrivateKey();
+        if (privateKey != null && privateKey.isNotEmpty) {
+          final keyPair = NostrKeyPairs(private: privateKey);
+
+          // Create kind 1061 event (MLS member joined)
+          final joinedCreatedAt = DateTime.now();
+          final joinedTags = await addClientTagsWithSignature([
+            ['g', groupIdHex], // Group ID
+            ['p', welcomeEvent.pubkey], // Inviter's pubkey
+          ], createdAt: joinedCreatedAt);
+
+          final joinedEvent = NostrEvent.fromPartialData(
+            kind: kindMlsMemberJoined,
+            content: '', // No content needed
+            keyPairs: keyPair,
+            tags: joinedTags,
+            createdAt: joinedCreatedAt,
+          );
+
+          final joinedEventModel = NostrEventModel(
+            id: joinedEvent.id,
+            pubkey: joinedEvent.pubkey,
+            kind: joinedEvent.kind,
+            content: joinedEvent.content,
+            tags: joinedEvent.tags,
+            sig: joinedEvent.sig,
+            createdAt: joinedEvent.createdAt,
+          );
+
+          // Publish to relay
+          await _nostrService!.publishEvent(joinedEventModel.toJson());
+
+          debugPrint(
+            'Published member joined event for group $groupIdHex: ${joinedEventModel.id}',
+          );
+        }
+      } catch (e) {
+        debugPrint('Failed to publish member joined event: $e');
+        // Don't fail the join if event publication fails
+      }
 
       debugPrint(
         'Successfully joined group ${properGroupName ?? group.name} ($groupIdHex)',

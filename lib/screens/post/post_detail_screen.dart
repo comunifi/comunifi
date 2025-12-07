@@ -6,8 +6,11 @@ import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/widgets/heart_button.dart';
+import 'package:comunifi/widgets/quote_button.dart';
+import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
+import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class PostDetailScreen extends StatefulWidget {
@@ -383,6 +386,11 @@ class _PostItemContentState extends State<_PostItemContent> {
               );
             },
           ),
+          // Quoted post preview (if this is a quote post)
+          if (widget.event.isQuotePost && widget.event.quotedEventId != null)
+            QuotedPostPreview(
+              quotedEventId: widget.event.quotedEventId!,
+            ),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
@@ -394,9 +402,29 @@ class _PostItemContentState extends State<_PostItemContent> {
                 isReacted: _hasUserReacted,
                 onPressed: _isReacting ? () {} : _toggleReaction,
               ),
+              const SizedBox(width: 16),
+              QuoteButton(
+                event: widget.event,
+                onPressed: () => _openQuoteModal(context),
+              ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  void _openQuoteModal(BuildContext context) {
+    final postDetailState = context.read<PostDetailState>();
+    showCupertinoModalPopup(
+      context: context,
+      builder: (modalContext) => SizedBox(
+        height: MediaQuery.of(context).size.height * 0.9,
+        child: QuotePostModal(
+          quotedEvent: widget.event,
+          isConnected: postDetailState.isConnected,
+          onPublishQuotePost: postDetailState.publishQuotePost,
+        ),
       ),
     );
   }

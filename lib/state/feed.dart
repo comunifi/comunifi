@@ -763,4 +763,103 @@ class FeedState with ChangeNotifier {
       return false;
     }
   }
+
+  /// Get a specific event by ID (from cache or relay)
+  Future<NostrEventModel?> getEvent(String eventId) async {
+    if (_nostrService == null) return null;
+
+    try {
+      // Try cache first
+      final cachedEvent = await _nostrService!.getCachedEvent(eventId);
+      if (cachedEvent != null) {
+        return cachedEvent;
+      }
+
+      // Check if it's in our current events list
+      final localEvent = _events.where((e) => e.id == eventId).firstOrNull;
+      if (localEvent != null) {
+        return localEvent;
+      }
+
+      // Query relay for the event
+      if (_isConnected) {
+        final events = await _nostrService!.requestPastEvents(
+          kind: 1,
+          limit: 100,
+        );
+        final event = events.where((e) => e.id == eventId).firstOrNull;
+        return event;
+      }
+
+      return null;
+    } catch (e) {
+      debugPrint('Error getting event: $e');
+      return null;
+    }
+  }
+
+  /// Publish a quote post (kind 1 with 'q' tag referencing another post)
+  /// This creates a new post that quotes/references another post
+  /// The quoted post will be displayed as a preview below the new content
+  Future<void> publishQuotePost(
+    String content,
+    NostrEventModel quotedEvent,
+  ) async {
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    try {
+      // Get the stored private key
+      final privateKey = await _getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception(
+          'No Nostr key found. Please ensure keys are initialized.',
+        );
+      }
+
+      // Derive key pair from private key using dart_nostr
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Extract URLs and generate 'r' tags (Nostr convention for URL references)
+      final urlTags = _linkPreviewService.generateUrlTags(content);
+
+      // Create quote post tags with 'q' tag (NIP-18)
+      // Format: ['q', '<event_id>', '<relay_url>', '<pubkey>']
+      final createdAt = DateTime.now();
+      final tags = await addClientTagsWithSignature([
+        ['q', quotedEvent.id, '', quotedEvent.pubkey],
+        ...urlTags,
+      ], createdAt: createdAt);
+
+      // Create and sign a NostrEvent using dart_nostr
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 1, // Text note (quote post is still kind 1)
+        content: content,
+        keyPairs: keyPair,
+        tags: tags,
+        createdAt: createdAt,
+      );
+
+      // Convert to our model format for publishing
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      // Publish to the relay
+      _nostrService!.publishEvent(eventModel.toJson());
+
+      debugPrint('Published quote post to relay: ${eventModel.id}');
+      debugPrint('Quoting event: ${quotedEvent.id}');
+    } catch (e) {
+      debugPrint('Failed to publish quote post: $e');
+      rethrow;
+    }
+  }
 }

@@ -8,11 +8,14 @@ import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/invite_user_modal.dart';
+import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
 import 'package:comunifi/widgets/slide_in_sidebar.dart';
 import 'package:comunifi/widgets/comment_bubble.dart';
 import 'package:comunifi/widgets/heart_button.dart';
+import 'package:comunifi/widgets/quote_button.dart';
+import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -471,8 +474,10 @@ class _FeedScreenState extends State<FeedScreen> {
                               index,
                             ) {
                               if (index < groupState.groupMessages.length) {
+                                final event = groupState.groupMessages[index];
                                 return _EventItem(
-                                  event: groupState.groupMessages[index],
+                                  key: ValueKey(event.id),
+                                  event: event,
                                 );
                               }
                               return const SizedBox.shrink();
@@ -561,8 +566,10 @@ class _FeedScreenState extends State<FeedScreen> {
                           delegate: SliverChildBuilderDelegate(
                             (context, index) {
                               if (index < feedState.events.length) {
+                                final event = feedState.events[index];
                                 return _EventItem(
-                                  event: feedState.events[index],
+                                  key: ValueKey(event.id),
+                                  event: event,
                                 );
                               } else if (feedState.isLoadingMore) {
                                 return const Padding(
@@ -667,7 +674,7 @@ class _UsernameButtonState extends State<_UsernameButton> {
 class _EventItem extends StatefulWidget {
   final NostrEventModel event;
 
-  const _EventItem({required this.event});
+  const _EventItem({super.key, required this.event});
 
   @override
   State<_EventItem> createState() => _EventItemState();
@@ -839,6 +846,22 @@ class _EventItemContentState extends State<_EventItemContent> {
       hasUserReacted: _hasUserReacted,
       isReacting: _isReacting,
       onReactionPressed: _toggleReaction,
+      onQuotePressed: () => _openQuoteModal(context),
+    );
+  }
+
+  void _openQuoteModal(BuildContext context) {
+    final feedState = context.read<FeedState>();
+    showCupertinoModalPopup(
+      context: context,
+      builder: (modalContext) => SizedBox(
+        height: MediaQuery.of(context).size.height * 0.9,
+        child: QuotePostModal(
+          quotedEvent: widget.event,
+          isConnected: feedState.isConnected,
+          onPublishQuotePost: feedState.publishQuotePost,
+        ),
+      ),
     );
   }
 }
@@ -853,6 +876,7 @@ class _EventItemContentWidget extends StatelessWidget {
   final bool hasUserReacted;
   final bool isReacting;
   final VoidCallback onReactionPressed;
+  final VoidCallback onQuotePressed;
 
   const _EventItemContentWidget({
     required this.event,
@@ -864,6 +888,7 @@ class _EventItemContentWidget extends StatelessWidget {
     required this.hasUserReacted,
     required this.isReacting,
     required this.onReactionPressed,
+    required this.onQuotePressed,
   });
 
   String _formatDate(DateTime date) {
@@ -959,6 +984,9 @@ class _EventItemContentWidget extends StatelessWidget {
             content: event.content,
             linkPreviewService: groupState.linkPreviewService,
           ),
+          // Quoted post preview (if this is a quote post)
+          if (event.isQuotePost && event.quotedEventId != null)
+            QuotedPostPreview(quotedEventId: event.quotedEventId!),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
@@ -970,6 +998,8 @@ class _EventItemContentWidget extends StatelessWidget {
                 isReacted: hasUserReacted,
                 onPressed: isReacting ? () {} : onReactionPressed,
               ),
+              const SizedBox(width: 16),
+              QuoteButton(event: event, onPressed: onQuotePressed),
               const SizedBox(width: 16),
               CommentBubble(
                 eventId: event.id,
