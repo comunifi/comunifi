@@ -9,6 +9,7 @@ import 'package:comunifi/models/nostr_event.dart'
 import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
+import 'package:comunifi/services/db/pending_event.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/services/mls/messages/messages.dart';
 import 'package:comunifi/services/tor/tor_service.dart';
@@ -38,8 +39,27 @@ class NostrService {
   NostrEventTable? _eventTable;
   bool _cacheInitialized = false;
 
+  // Pending events queue
+  AppDBService? _pendingDbService;
+  PendingEventTable? _pendingEventTable;
+  bool _pendingQueueInitialized = false;
+  bool _isFlushingQueue = false;
+
+  // Auto-reconnect
+  bool _autoReconnect = true;
+  bool _isReconnecting = false;
+  int _reconnectAttempts = 0;
+  static const int _maxReconnectAttempts = 10;
+  static const Duration _initialReconnectDelay = Duration(seconds: 1);
+  static const Duration _maxReconnectDelay = Duration(seconds: 60);
+  Timer? _reconnectTimer;
+  Function(bool)? _onConnectedCallback;
+
   // MLS group resolver for encryption/decryption
   MlsGroupResolver? _mlsGroupResolver;
+
+  // Key pairs for re-signing queued encrypted events
+  NostrKeyPairs? _keyPairs;
 
   NostrService(
     this._relayUrl, {
@@ -51,6 +71,19 @@ class NostrService {
   /// Set the MLS group resolver for encryption/decryption
   void setMlsGroupResolver(MlsGroupResolver resolver) {
     _mlsGroupResolver = resolver;
+  }
+
+  /// Set key pairs for signing encrypted events from the queue
+  void setKeyPairs(NostrKeyPairs keyPairs) {
+    _keyPairs = keyPairs;
+  }
+
+  /// Enable or disable auto-reconnect (default: enabled)
+  void setAutoReconnect(bool enabled) {
+    _autoReconnect = enabled;
+    if (!enabled) {
+      _cancelReconnect();
+    }
   }
 
   /// Initialize the database cache (optional, called automatically on first use)
@@ -73,14 +106,37 @@ class NostrService {
     }
   }
 
+  /// Initialize the pending events queue
+  Future<void> _ensurePendingQueueInitialized() async {
+    if (_pendingQueueInitialized) return;
+
+    try {
+      _pendingDbService = AppDBService();
+      await _pendingDbService!.init('pending_events');
+      _pendingEventTable = PendingEventTable(_pendingDbService!.database!);
+      await _pendingEventTable!.create(_pendingDbService!.database!);
+      // Reset any events that were "sending" when app closed
+      await _pendingEventTable!.resetSendingToPending();
+      _pendingQueueInitialized = true;
+      debugPrint('Pending event queue initialized');
+    } catch (e) {
+      debugPrint('Failed to initialize pending queue: $e');
+      _pendingQueueInitialized = true;
+    }
+  }
+
   /// Connect to the Nostr relay
   Future<void> connect(Function(bool) onConnected) async {
     if (_isConnected) {
       return;
     }
 
-    // Initialize cache if not already done
+    // Store callback for reconnection
+    _onConnectedCallback = onConnected;
+
+    // Initialize cache and pending queue
     await _ensureCacheInitialized();
+    await _ensurePendingQueueInitialized();
 
     try {
       if (_useTor) {
@@ -93,6 +149,8 @@ class NostrService {
       debugPrint('Failed to connect to relay: $e');
       _isConnected = false;
       onConnected(false);
+      // Start reconnection attempts
+      _scheduleReconnect();
       rethrow;
     }
   }
@@ -197,13 +255,11 @@ class NostrService {
       _handleMessage,
       onError: (error) {
         debugPrint('WebSocket error: $error');
-        _isConnected = false;
-        onConnected(false);
+        _handleDisconnect(onConnected);
       },
       onDone: () {
         debugPrint('WebSocket connection closed');
-        _isConnected = false;
-        onConnected(false);
+        _handleDisconnect(onConnected);
       },
     );
 
@@ -211,12 +267,93 @@ class NostrService {
     await Future.delayed(const Duration(milliseconds: 100));
 
     _isConnected = true;
+    _reconnectAttempts = 0; // Reset on successful connection
+    _isReconnecting = false;
     debugPrint('Connected to relay${_useTor ? ' via Tor' : ''}');
     onConnected(true);
+
+    // Flush pending queue after successful connection
+    _flushPendingQueue();
+  }
+
+  /// Handle disconnection - notify callback and schedule reconnect
+  void _handleDisconnect(Function(bool) onConnected) {
+    if (!_isConnected) return; // Already disconnected
+
+    _isConnected = false;
+    _channel = null;
+    onConnected(false);
+
+    // Schedule reconnection if auto-reconnect is enabled
+    _scheduleReconnect();
+  }
+
+  /// Schedule a reconnection attempt with exponential backoff
+  void _scheduleReconnect() {
+    if (!_autoReconnect || _isReconnecting) return;
+    if (_reconnectAttempts >= _maxReconnectAttempts) {
+      debugPrint('Max reconnection attempts reached ($_maxReconnectAttempts)');
+      return;
+    }
+
+    _isReconnecting = true;
+    _reconnectAttempts++;
+
+    // Calculate delay with exponential backoff
+    final delay = Duration(
+      milliseconds: min(
+        _initialReconnectDelay.inMilliseconds *
+            (1 << (_reconnectAttempts - 1)),
+        _maxReconnectDelay.inMilliseconds,
+      ),
+    );
+
+    debugPrint(
+      'Scheduling reconnect attempt $_reconnectAttempts/$_maxReconnectAttempts in ${delay.inSeconds}s',
+    );
+
+    _reconnectTimer = Timer(delay, () async {
+      if (!_autoReconnect) return;
+
+      try {
+        debugPrint('Attempting to reconnect...');
+        if (_useTor) {
+          await _connectThroughTor(_onConnectedCallback ?? (_) {});
+        } else {
+          _channel = WebSocketChannel.connect(Uri.parse(_relayUrl));
+          await _setupConnection(_onConnectedCallback ?? (_) {});
+        }
+      } catch (e) {
+        debugPrint('Reconnection failed: $e');
+        _isReconnecting = false;
+        // Schedule another attempt
+        _scheduleReconnect();
+      }
+    });
+  }
+
+  /// Cancel any pending reconnection
+  void _cancelReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _isReconnecting = false;
+  }
+
+  /// Reset reconnection attempts (call after manual disconnect)
+  void resetReconnectAttempts() {
+    _reconnectAttempts = 0;
   }
 
   /// Disconnect from the relay
-  Future<void> disconnect() async {
+  /// Set [permanent] to true to disable auto-reconnect
+  Future<void> disconnect({bool permanent = false}) async {
+    if (permanent) {
+      _autoReconnect = false;
+    }
+
+    // Cancel any pending reconnection
+    _cancelReconnect();
+
     if (_isConnected) {
       debugPrint('Disconnected from relay${_useTor ? ' (Tor)' : ''}');
     }
@@ -526,21 +663,32 @@ class NostrService {
   /// Publish an event to the relay (public method)
   /// If mlsGroupId is provided, the event will be encrypted and wrapped in kind 1059
   /// keyPairs is required when encrypting (for signing the envelope)
-  Future<void> publishEvent(
+  ///
+  /// If offline, the event will be queued and published when connection is restored.
+  /// Returns true if published immediately, false if queued.
+  Future<bool> publishEvent(
     Map<String, dynamic> eventJson, {
     String? mlsGroupId,
     String? recipientPubkey,
     NostrKeyPairs? keyPairs,
   }) async {
+    // If offline, queue the event
     if (!_isConnected || _channel == null) {
-      throw Exception('Not connected to relay');
+      await _enqueueEvent(
+        eventJson,
+        mlsGroupId: mlsGroupId,
+        recipientPubkey: recipientPubkey,
+      );
+      debugPrint('Event queued for later (offline)');
+      return false;
     }
 
     Map<String, dynamic> eventToPublish = eventJson;
 
     // If MLS group is provided, encrypt and wrap in kind 1059
     if (mlsGroupId != null && _mlsGroupResolver != null) {
-      if (keyPairs == null) {
+      final effectiveKeyPairs = keyPairs ?? _keyPairs;
+      if (effectiveKeyPairs == null) {
         throw Exception('Key pairs required for encrypted envelope');
       }
       try {
@@ -551,7 +699,7 @@ class NostrService {
             mlsGroup,
             mlsGroupId,
             recipientPubkey,
-            keyPairs,
+            effectiveKeyPairs,
           );
         }
       } catch (e) {
@@ -563,6 +711,131 @@ class NostrService {
     final List<dynamic> message = ['EVENT', eventToPublish];
     final String jsonMessage = jsonEncode(message);
     _channel!.sink.add(jsonMessage);
+    return true;
+  }
+
+  /// Queue an event for later publishing
+  Future<void> _enqueueEvent(
+    Map<String, dynamic> eventJson, {
+    String? mlsGroupId,
+    String? recipientPubkey,
+  }) async {
+    await _ensurePendingQueueInitialized();
+    if (_pendingEventTable == null) return;
+
+    final eventId = eventJson['id'] as String? ?? _generateSubscriptionId();
+    final pendingEvent = PendingEvent(
+      id: eventId,
+      eventJson: eventJson,
+      mlsGroupId: mlsGroupId,
+      recipientPubkey: recipientPubkey,
+      createdAt: DateTime.now(),
+    );
+
+    await _pendingEventTable!.enqueue(pendingEvent);
+    debugPrint('Event $eventId added to pending queue');
+  }
+
+  /// Flush the pending event queue (called when connection is restored)
+  Future<void> _flushPendingQueue() async {
+    if (_isFlushingQueue) return;
+    if (!_isConnected || _channel == null) return;
+
+    await _ensurePendingQueueInitialized();
+    if (_pendingEventTable == null) return;
+
+    _isFlushingQueue = true;
+
+    try {
+      final pendingCount = await _pendingEventTable!.getPendingCount();
+      if (pendingCount == 0) {
+        debugPrint('No pending events to flush');
+        return;
+      }
+
+      debugPrint('Flushing $pendingCount pending events...');
+
+      while (_isConnected) {
+        final event = await _pendingEventTable!.peek();
+        if (event == null) break;
+
+        try {
+          // Mark as sending
+          await _pendingEventTable!.updateStatus(
+            event.id,
+            PendingEventStatus.sending,
+          );
+
+          // Publish the event
+          Map<String, dynamic> eventToPublish = event.eventJson;
+
+          // Handle MLS encryption if needed
+          if (event.mlsGroupId != null && _mlsGroupResolver != null) {
+            if (_keyPairs == null) {
+              debugPrint('Cannot flush encrypted event: no key pairs set');
+              await _pendingEventTable!.incrementRetry(
+                event.id,
+                status: PendingEventStatus.pending,
+              );
+              continue;
+            }
+
+            final mlsGroup = await _mlsGroupResolver!(event.mlsGroupId!);
+            if (mlsGroup != null) {
+              eventToPublish = await _encryptAndWrapEvent(
+                event.eventJson,
+                mlsGroup,
+                event.mlsGroupId!,
+                event.recipientPubkey,
+                _keyPairs!,
+              );
+            }
+          }
+
+          final List<dynamic> message = ['EVENT', eventToPublish];
+          final String jsonMessage = jsonEncode(message);
+          _channel!.sink.add(jsonMessage);
+
+          // Remove from queue on success
+          await _pendingEventTable!.remove(event.id);
+          debugPrint('Flushed pending event ${event.id}');
+
+          // Small delay between events to avoid overwhelming relay
+          await Future.delayed(const Duration(milliseconds: 50));
+        } catch (e) {
+          debugPrint('Failed to flush event ${event.id}: $e');
+          await _pendingEventTable!.incrementRetry(
+            event.id,
+            status: PendingEventStatus.pending,
+          );
+
+          // Stop flushing if connection lost
+          if (!_isConnected) break;
+        }
+      }
+
+      // Clean up events that have exceeded max retries
+      final removed = await _pendingEventTable!.removeFailedEvents();
+      if (removed > 0) {
+        debugPrint('Removed $removed events that exceeded max retries');
+      }
+    } finally {
+      _isFlushingQueue = false;
+    }
+  }
+
+  /// Get the count of pending events in the queue
+  Future<int> getPendingEventCount() async {
+    await _ensurePendingQueueInitialized();
+    if (_pendingEventTable == null) return 0;
+    return await _pendingEventTable!.getPendingCount();
+  }
+
+  /// Clear all pending events
+  Future<void> clearPendingEvents() async {
+    await _ensurePendingQueueInitialized();
+    if (_pendingEventTable == null) return;
+    await _pendingEventTable!.clear();
   }
 
   /// Encrypt event with MLS and wrap in kind 1059 envelope
@@ -972,4 +1245,13 @@ class NostrService {
 
   /// Get active subscription count
   int get activeSubscriptions => _subscriptions.length;
+
+  /// Check if currently attempting to reconnect
+  bool get isReconnecting => _isReconnecting;
+
+  /// Get current reconnection attempt count
+  int get reconnectAttempts => _reconnectAttempts;
+
+  /// Check if auto-reconnect is enabled
+  bool get autoReconnectEnabled => _autoReconnect;
 }

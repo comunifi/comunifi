@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:provider/provider.dart';
+import 'package:comunifi/main.dart' show routeObserver;
 import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
@@ -27,7 +28,7 @@ class FeedScreen extends StatefulWidget {
   State<FeedScreen> createState() => _FeedScreenState();
 }
 
-class _FeedScreenState extends State<FeedScreen> {
+class _FeedScreenState extends State<FeedScreen> with RouteAware {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
   bool _isPublishing = false;
@@ -35,6 +36,7 @@ class _FeedScreenState extends State<FeedScreen> {
   bool _isLeftSidebarOpen = false;
   bool _isRightSidebarOpen = false;
   static final Map<String, VoidCallback> _commentCountReloaders = {};
+  static final Map<String, VoidCallback> _reactionDataReloaders = {};
 
   @override
   void initState() {
@@ -68,6 +70,39 @@ class _FeedScreenState extends State<FeedScreen> {
       // Load user profile for display in navigation bar
       _loadUserProfile();
     });
+  }
+
+  @override
+  void didPopNext() {
+    // Called when a route has been popped off and this route is now visible
+    // Reload all data for visible items after a small delay
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (!mounted) return;
+      _reloadAllCommentCounts();
+      _reloadAllReactionData();
+    });
+  }
+
+  void _reloadAllCommentCounts() {
+    final reloaders = List<VoidCallback>.from(_commentCountReloaders.values);
+    for (final reloader in reloaders) {
+      try {
+        reloader();
+      } catch (e) {
+        debugPrint('Error reloading comment count: $e');
+      }
+    }
+  }
+
+  void _reloadAllReactionData() {
+    final reloaders = List<VoidCallback>.from(_reactionDataReloaders.values);
+    for (final reloader in reloaders) {
+      try {
+        reloader();
+      } catch (e) {
+        debugPrint('Error reloading reaction data: $e');
+      }
+    }
   }
 
   Future<void> _loadUserProfile() async {
@@ -137,6 +172,7 @@ class _FeedScreenState extends State<FeedScreen> {
 
   @override
   void dispose() {
+    routeObserver.unsubscribe(this);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _messageController.dispose();
@@ -220,22 +256,11 @@ class _FeedScreenState extends State<FeedScreen> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Reload all comment counts when navigating back to feed
-    // This is called when the route becomes active again
-    // Add a small delay to ensure any cached comments are fully written
-    Future.delayed(const Duration(milliseconds: 200), () {
-      if (!mounted) return;
-      // Create a copy of the values to avoid issues if map changes during iteration
-      final reloaders = List<VoidCallback>.from(_commentCountReloaders.values);
-      for (final reloader in reloaders) {
-        try {
-          reloader();
-        } catch (e) {
-          // Ignore errors from disposed widgets
-          debugPrint('Error reloading comment count: $e');
-        }
-      }
-    });
+    // Subscribe to route observer to detect when we come back from another screen
+    final route = ModalRoute.of(context);
+    if (route != null) {
+      routeObserver.subscribe(this, route);
+    }
   }
 
   @override
@@ -738,17 +763,20 @@ class _EventItemContentState extends State<_EventItemContent> {
   @override
   void initState() {
     super.initState();
-    // Register reloader so FeedScreen can trigger reloads
+    // Register reloaders so FeedScreen can trigger reloads when navigating back
     _FeedScreenState._commentCountReloaders[widget.event.id] =
         _loadCommentCount;
+    _FeedScreenState._reactionDataReloaders[widget.event.id] =
+        _loadReactionData;
     _loadCommentCount();
     _loadReactionData();
   }
 
   @override
   void dispose() {
-    // Unregister reloader
+    // Unregister reloaders
     _FeedScreenState._commentCountReloaders.remove(widget.event.id);
+    _FeedScreenState._reactionDataReloaders.remove(widget.event.id);
     super.dispose();
   }
 
@@ -783,28 +811,44 @@ class _EventItemContentState extends State<_EventItemContent> {
   Future<void> _toggleReaction() async {
     if (_isReacting || !mounted) return;
 
+    // Store previous state for rollback on error
+    final wasReacted = _hasUserReacted;
+    final previousCount = _reactionCount;
+
     setState(() {
       _isReacting = true;
+      // Optimistic UI update - immediately toggle the heart
+      _hasUserReacted = !wasReacted;
+      _reactionCount = wasReacted
+          ? (_reactionCount > 0 ? _reactionCount - 1 : 0)
+          : _reactionCount + 1;
     });
 
     try {
       final feedState = context.read<FeedState>();
 
-      // If user has already reacted, publish an unlike reaction
+      // If user had already reacted, publish an unlike reaction
       // Some Nostr clients use "-" content to indicate unliking
       await feedState.publishReaction(
         widget.event.id,
         widget.event.pubkey,
-        isUnlike: _hasUserReacted,
+        isUnlike: wasReacted,
       );
 
       // Add a small delay to ensure cache is written before reloading
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 150));
 
-      // Reload reaction data after publishing
+      // Reload reaction data to get accurate count from cache
       await _loadReactionData();
     } catch (e) {
       debugPrint('Failed to toggle reaction: $e');
+      // Rollback optimistic update on error
+      if (mounted) {
+        setState(() {
+          _hasUserReacted = wasReacted;
+          _reactionCount = previousCount;
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -823,11 +867,12 @@ class _EventItemContentState extends State<_EventItemContent> {
 
     // Reload comment count when feed finishes loading (after refresh or initial load)
     // Only reload once per loading cycle to avoid duplicate loads
-    if (_wasLoading && !isLoading && !_isLoadingCount) {
+    // Don't reload while user is actively reacting (would overwrite optimistic update)
+    if (_wasLoading && !isLoading && !_isLoadingCount && !_isReacting) {
       _wasLoading = false; // Set immediately to prevent duplicate reloads
       // Add a small delay to ensure cache is updated
       Future.delayed(const Duration(milliseconds: 100), () {
-        if (mounted) {
+        if (mounted && !_isReacting) {
           _loadCommentCount();
           _loadReactionData();
         }

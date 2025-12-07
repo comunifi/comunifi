@@ -298,27 +298,43 @@ class _PostItemContentState extends State<_PostItemContent> {
   Future<void> _toggleReaction() async {
     if (_isReacting || !mounted) return;
 
+    // Store previous state for rollback on error
+    final wasReacted = _hasUserReacted;
+    final previousCount = _reactionCount;
+
     setState(() {
       _isReacting = true;
+      // Optimistic UI update - immediately toggle the heart
+      _hasUserReacted = !wasReacted;
+      _reactionCount = wasReacted
+          ? (_reactionCount > 0 ? _reactionCount - 1 : 0)
+          : _reactionCount + 1;
     });
 
     try {
       final postDetailState = context.read<PostDetailState>();
 
-      // If user has already reacted, publish an unlike reaction
+      // If user had already reacted, publish an unlike reaction
       // Some Nostr clients use "-" content to indicate unliking
       await postDetailState.publishReaction(
         widget.event.id,
         widget.event.pubkey,
-        isUnlike: _hasUserReacted,
+        isUnlike: wasReacted,
       );
 
       // Add a small delay to ensure cache is written before reloading
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 150));
 
       await _loadReactionData();
     } catch (e) {
       debugPrint('Failed to toggle reaction: $e');
+      // Rollback optimistic update on error
+      if (mounted) {
+        setState(() {
+          _hasUserReacted = wasReacted;
+          _reactionCount = previousCount;
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -512,27 +528,43 @@ class _CommentItemContentState extends State<_CommentItemContent> {
   Future<void> _toggleReaction() async {
     if (_isReacting || !mounted) return;
 
+    // Store previous state for rollback on error
+    final wasReacted = _hasUserReacted;
+    final previousCount = _reactionCount;
+
     setState(() {
       _isReacting = true;
+      // Optimistic UI update - immediately toggle the heart
+      _hasUserReacted = !wasReacted;
+      _reactionCount = wasReacted
+          ? (_reactionCount > 0 ? _reactionCount - 1 : 0)
+          : _reactionCount + 1;
     });
 
     try {
       final postDetailState = context.read<PostDetailState>();
 
-      // If user has already reacted, publish an unlike reaction
+      // If user had already reacted, publish an unlike reaction
       // Some Nostr clients use "-" content to indicate unliking
       await postDetailState.publishReaction(
         widget.event.id,
         widget.event.pubkey,
-        isUnlike: _hasUserReacted,
+        isUnlike: wasReacted,
       );
 
       // Add a small delay to ensure cache is written before reloading
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 150));
 
       await _loadReactionData();
     } catch (e) {
       debugPrint('Failed to toggle reaction: $e');
+      // Rollback optimistic update on error
+      if (mounted) {
+        setState(() {
+          _hasUserReacted = wasReacted;
+          _reactionCount = previousCount;
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {

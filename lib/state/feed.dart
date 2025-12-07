@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
@@ -14,6 +15,9 @@ import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
+
+/// Shared secure storage key for Nostr private key
+const String _nostrPrivateKeyStorageKey = 'comunifi_nostr_private_key';
 
 class FeedState with ChangeNotifier {
   // instantiate services here
@@ -122,67 +126,93 @@ class FeedState with ChangeNotifier {
   }
 
   Future<void> _ensureNostrKey() async {
-    if (_keysGroup == null) {
-      debugPrint('No keys group available, skipping Nostr key setup');
-      return;
-    }
+    const storage = FlutterSecureStorage();
 
+    // First, check if we have a key in shared secure storage
     try {
-      // Try to load existing Nostr key from storage
-      final groupIdHex = _keysGroup!.id.bytes
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join();
-
-      // Check if we have a stored Nostr key ciphertext
-      final storedCiphertext = await _loadStoredNostrKeyCiphertext(groupIdHex);
-
-      if (storedCiphertext != null) {
-        // Decrypt and verify we have a valid key
-        try {
-          final decrypted = await _keysGroup!.decryptApplicationMessage(
-            storedCiphertext,
-          );
-          final keyData = jsonDecode(String.fromCharCodes(decrypted));
-          debugPrint('Loaded existing Nostr key: ${keyData['public']}');
-          return; // Key already exists
-        } catch (e) {
-          debugPrint('Failed to decrypt stored key, generating new one: $e');
-          // Continue to generate new key
-        }
+      final existingKey = await storage.read(key: _nostrPrivateKeyStorageKey);
+      if (existingKey != null && existingKey.isNotEmpty) {
+        final keyPair = NostrKeyPairs(private: existingKey);
+        debugPrint(
+          'Loaded existing Nostr key from secure storage: ${keyPair.public}',
+        );
+        return;
       }
-
-      // Generate new Nostr key pair
-      // Generate a random 32-byte private key (secp256k1 private key size for Nostr)
-      final random = Random.secure();
-      final privateKeyBytes = Uint8List(32);
-      for (int i = 0; i < 32; i++) {
-        privateKeyBytes[i] = random.nextInt(256);
-      }
-
-      // Convert to hex string (Nostr private keys are hex-encoded)
-      final privateKeyHex = privateKeyBytes
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join();
-
-      // Derive public key from private key using dart_nostr
-      final keyPair = NostrKeyPairs(private: privateKeyHex);
-
-      // Store both private and public keys
-      final keyData = {'private': keyPair.private, 'public': keyPair.public};
-      final keyJson = jsonEncode(keyData);
-      final keyBytes = Uint8List.fromList(keyJson.codeUnits);
-
-      // Encrypt and store in MLS group
-      final ciphertext = await _keysGroup!.encryptApplicationMessage(keyBytes);
-
-      // Store the ciphertext in the database for later retrieval
-      await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
-
-      debugPrint('Generated and stored new Nostr key: ${keyPair.public}');
     } catch (e) {
-      debugPrint('Failed to ensure Nostr key: $e');
-      // Continue without Nostr key - feed can still work for reading
+      debugPrint('Error reading from secure storage: $e');
     }
+
+    // Try MLS-encrypted storage as fallback (for backward compatibility)
+    if (_keysGroup != null) {
+      try {
+        final groupIdHex = _keysGroup!.id.bytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+
+        final storedCiphertext = await _loadStoredNostrKeyCiphertext(
+          groupIdHex,
+        );
+
+        if (storedCiphertext != null) {
+          try {
+            final decrypted = await _keysGroup!.decryptApplicationMessage(
+              storedCiphertext,
+            );
+            final keyData = jsonDecode(String.fromCharCodes(decrypted));
+            final privateKey = keyData['private'] as String?;
+            if (privateKey != null && privateKey.isNotEmpty) {
+              // Migrate to shared secure storage
+              await storage.write(
+                key: _nostrPrivateKeyStorageKey,
+                value: privateKey,
+              );
+              debugPrint('Migrated Nostr key to secure storage');
+              return;
+            }
+          } catch (e) {
+            debugPrint('Failed to decrypt stored key: $e');
+          }
+        }
+      } catch (e) {
+        debugPrint('Error loading from MLS storage: $e');
+      }
+    }
+
+    // Generate new Nostr key pair
+    final random = Random.secure();
+    final privateKeyBytes = Uint8List(32);
+    for (int i = 0; i < 32; i++) {
+      privateKeyBytes[i] = random.nextInt(256);
+    }
+
+    final privateKeyHex = privateKeyBytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+
+    final keyPair = NostrKeyPairs(private: privateKeyHex);
+
+    // Store in shared secure storage
+    await storage.write(key: _nostrPrivateKeyStorageKey, value: privateKeyHex);
+
+    // Also store in MLS-encrypted storage for backward compatibility
+    if (_keysGroup != null) {
+      try {
+        final groupIdHex = _keysGroup!.id.bytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+        final keyData = {'private': keyPair.private, 'public': keyPair.public};
+        final keyJson = jsonEncode(keyData);
+        final keyBytes = Uint8List.fromList(keyJson.codeUnits);
+        final ciphertext = await _keysGroup!.encryptApplicationMessage(
+          keyBytes,
+        );
+        await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
+      } catch (e) {
+        debugPrint('Failed to store in MLS storage: $e');
+      }
+    }
+
+    debugPrint('Generated and stored new Nostr key: ${keyPair.public}');
   }
 
   Future<MlsCiphertext?> _loadStoredNostrKeyCiphertext(
@@ -566,58 +596,69 @@ class FeedState with ChangeNotifier {
     }
   }
 
-  /// Get the stored Nostr private key
+  /// Get the stored Nostr private key from shared secure storage
   Future<String?> _getNostrPrivateKey() async {
-    if (_keysGroup == null || _dbService?.database == null) {
-      return null;
-    }
+    const storage = FlutterSecureStorage();
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join();
-
-      final storedCiphertext = await _loadStoredNostrKeyCiphertext(groupIdHex);
-      if (storedCiphertext == null) {
-        return null;
+      final privateKey = await storage.read(key: _nostrPrivateKeyStorageKey);
+      if (privateKey != null && privateKey.isNotEmpty) {
+        return privateKey;
       }
-
-      // Decrypt the key
-      final decrypted = await _keysGroup!.decryptApplicationMessage(
-        storedCiphertext,
-      );
-      final keyData = jsonDecode(String.fromCharCodes(decrypted));
-      return keyData['private'] as String?;
     } catch (e) {
-      debugPrint('Failed to get Nostr private key: $e');
-      return null;
+      debugPrint('Failed to read from secure storage: $e');
     }
+
+    // Fallback to MLS-encrypted storage (for backward compatibility)
+    if (_keysGroup != null && _dbService?.database != null) {
+      try {
+        final groupIdHex = _keysGroup!.id.bytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+
+        final storedCiphertext = await _loadStoredNostrKeyCiphertext(
+          groupIdHex,
+        );
+        if (storedCiphertext != null) {
+          final decrypted = await _keysGroup!.decryptApplicationMessage(
+            storedCiphertext,
+          );
+          final keyData = jsonDecode(String.fromCharCodes(decrypted));
+          final privateKey = keyData['private'] as String?;
+
+          // Migrate to secure storage
+          if (privateKey != null && privateKey.isNotEmpty) {
+            await storage.write(
+              key: _nostrPrivateKeyStorageKey,
+              value: privateKey,
+            );
+            return privateKey;
+          }
+        }
+      } catch (e) {
+        debugPrint('Failed to get from MLS storage: $e');
+      }
+    }
+
+    return null;
   }
 
   /// Get the stored Nostr public key
+  /// Derives from private key to ensure correctness
   Future<String?> getNostrPublicKey() async {
-    if (_keysGroup == null || _dbService?.database == null) {
+    // Get the private key and derive the public key from it
+    // This ensures we always have the correct public key even if stored data is corrupted
+    final privateKey = await _getNostrPrivateKey();
+    if (privateKey == null) {
       return null;
     }
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join();
-
-      final storedCiphertext = await _loadStoredNostrKeyCiphertext(groupIdHex);
-      if (storedCiphertext == null) {
-        return null;
-      }
-
-      // Decrypt the key
-      final decrypted = await _keysGroup!.decryptApplicationMessage(
-        storedCiphertext,
-      );
-      final keyData = jsonDecode(String.fromCharCodes(decrypted));
-      return keyData['public'] as String?;
+      // Derive public key from private key using dart_nostr
+      final keyPair = NostrKeyPairs(private: privateKey);
+      return keyPair.public;
     } catch (e) {
-      debugPrint('Failed to get Nostr public key: $e');
+      debugPrint('Failed to derive Nostr public key: $e');
       return null;
     }
   }
@@ -719,7 +760,8 @@ class FeedState with ChangeNotifier {
   }
 
   /// Get reaction count for an event (kind 7 events with 'e' tag referencing the event)
-  /// Only counts positive reactions (content "+")
+  /// Counts unique users whose most recent reaction is "+"
+  /// This properly handles like/unlike toggling by considering only the latest reaction per user
   Future<int> getReactionCount(String eventId) async {
     if (_nostrService == null) return 0;
 
@@ -730,8 +772,21 @@ class FeedState with ChangeNotifier {
         tagKey: 'e',
         tagValue: eventId,
       );
-      // Only count positive reactions (content "+")
-      return reactions.where((reaction) => reaction.content == '+').length;
+
+      // Group reactions by user pubkey, keeping only the most recent one
+      final Map<String, NostrEventModel> latestReactionByUser = {};
+      for (final reaction in reactions) {
+        final existing = latestReactionByUser[reaction.pubkey];
+        if (existing == null ||
+            reaction.createdAt.isAfter(existing.createdAt)) {
+          latestReactionByUser[reaction.pubkey] = reaction;
+        }
+      }
+
+      // Count users whose most recent reaction is "+"
+      return latestReactionByUser.values
+          .where((reaction) => reaction.content == '+')
+          .length;
     } catch (e) {
       debugPrint('Error getting reaction count: $e');
       return 0;
@@ -739,7 +794,8 @@ class FeedState with ChangeNotifier {
   }
 
   /// Check if the current user has reacted to an event
-  /// Only checks for positive reactions (content "+")
+  /// Returns true only if the user's most recent reaction is "+"
+  /// This properly handles like/unlike toggling
   Future<bool> hasUserReacted(String eventId) async {
     if (_nostrService == null) return false;
 
@@ -747,17 +803,28 @@ class FeedState with ChangeNotifier {
       final userPubkey = await getNostrPublicKey();
       if (userPubkey == null) return false;
 
-      // Query cached reactions for this event by this user
+      // Query cached reactions for this event
       final reactions = await _nostrService!.queryCachedEvents(
         kind: 7,
         tagKey: 'e',
         tagValue: eventId,
       );
 
-      // Check if user has a positive reaction (content "+")
-      return reactions.any(
-        (reaction) => reaction.pubkey == userPubkey && reaction.content == '+',
-      );
+      // Filter to only this user's reactions
+      final userReactions = reactions
+          .where((r) => r.pubkey == userPubkey)
+          .toList();
+
+      if (userReactions.isEmpty) return false;
+
+      // Find the most recent reaction from this user
+      userReactions.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      final latestReaction = userReactions.first;
+
+      debugPrint('hasUserReacted: Latest content="${latestReaction.content}"');
+
+      // Return true only if the most recent reaction is "+"
+      return latestReaction.content == '+';
     } catch (e) {
       debugPrint('Error checking if user reacted: $e');
       return false;

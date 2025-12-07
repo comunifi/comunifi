@@ -3,6 +3,10 @@ import 'package:comunifi/state/state.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
 
+/// Global route observer for detecting when screens become visible
+final RouteObserver<ModalRoute<void>> routeObserver =
+    RouteObserver<ModalRoute<void>>();
+
 void main() {
   runApp(provideAppState(const Comunifi()));
 }
@@ -18,7 +22,7 @@ class _ComunifiState extends State<Comunifi> {
   final _rootNavigatorKey = GlobalKey<NavigatorState>();
   final _appShellNavigatorKey = GlobalKey<NavigatorState>();
   final _placeShellNavigatorKey = GlobalKey<NavigatorState>();
-  final observers = <NavigatorObserver>[];
+  final observers = <NavigatorObserver>[routeObserver];
   late GoRouter router;
 
   final theme = CupertinoThemeData(

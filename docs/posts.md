@@ -295,6 +295,261 @@ final pastComments = await _nostrService!.requestPastEvents(
 );
 ```
 
+## Reactions (Likes)
+
+Reactions allow users to "like" posts and comments. Implemented using Nostr **kind 7** events following NIP-25.
+
+### How Reactions Work
+
+1. **User taps heart button** on a post or comment
+2. **State creates a kind 7 event** with `+` (like) or `-` (unlike) content
+3. **Event is published to relay** and cached locally
+4. **Reaction count updates** by querying cached kind 7 events
+
+### Reaction Event Structure
+
+```dart
+// Like reaction event
+NostrEventModel(
+  kind: 7,                    // Reaction event type
+  content: '+',               // '+' for like, '-' for unlike
+  tags: [
+    ['e', '<event_id>'],      // Event being reacted to
+    ['p', '<author_pubkey>'], // Author of the event being reacted to
+    ['client', 'comunifi'],   // Client identifier
+  ],
+)
+```
+
+### Key Components
+
+#### HeartButton Widget
+
+Location: `lib/widgets/heart_button.dart`
+
+A stateless presentation widget that displays the heart icon and count:
+
+```dart
+HeartButton(
+  eventId: event.id,
+  reactionCount: count,          // Number of likes
+  isLoadingCount: isLoading,     // Shows spinner while loading
+  isReacted: hasUserReacted,     // Filled vs outline heart
+  onPressed: _toggleReaction,    // Toggle callback
+)
+```
+
+Visual states:
+- **Not liked**: Outline heart icon (blue)
+- **Liked**: Filled heart icon (red)
+- **Loading**: Activity indicator instead of count
+
+#### Reaction State (in screens)
+
+Each screen that displays reactions manages local state for:
+
+```dart
+int _reactionCount = 0;           // Total positive reactions
+bool _isLoadingReactionCount = true;
+bool _hasUserReacted = false;     // Current user's reaction status
+bool _isReacting = false;         // Prevent double-tap
+```
+
+### State Methods
+
+Both `FeedState` and `PostDetailState` provide identical reaction methods:
+
+```dart
+// Publish a reaction (like or unlike)
+await state.publishReaction(
+  eventId,           // ID of post/comment being reacted to
+  eventAuthorPubkey, // Author of the post/comment
+  isUnlike: false,   // true to unlike (publishes '-' content)
+);
+
+// Get total reaction count (only counts '+' reactions)
+final count = await state.getReactionCount(eventId);
+
+// Check if current user has reacted
+final hasReacted = await state.hasUserReacted(eventId);
+```
+
+### Data Flow
+
+#### Loading Reaction Data
+
+```
+1. Screen widget initialState()
+   └── _loadReactionData()
+       ├── getReactionCount(eventId)
+       │   └── Query cached kind 7 events with 'e' tag = eventId
+       │   └── Count only events with content '+'
+       └── hasUserReacted(eventId)
+           └── Query cached kind 7 events
+           └── Check if current user's pubkey has content '+'
+```
+
+#### Publishing a Reaction
+
+```
+1. User taps HeartButton
+   └── _toggleReaction()
+       ├── Check _isReacting (prevent double-tap)
+       ├── Set _isReacting = true
+       └── publishReaction(eventId, pubkey, isUnlike: _hasUserReacted)
+
+2. State.publishReaction()
+   ├── Get private key from secure storage
+   ├── Create kind 7 event
+   │   ├── content: '+' or '-' based on isUnlike
+   │   └── tags: [['e', eventId], ['p', pubkey]]
+   ├── Sign event with dart_nostr
+   ├── Publish to relay
+   └── Cache event locally (for immediate count update)
+
+3. After publish completes
+   ├── Wait 100ms (ensure cache write)
+   └── _loadReactionData() (refresh count and status)
+```
+
+### Counting Logic
+
+Reactions are counted by looking at each user's **most recent** reaction:
+
+```dart
+// Get count - group by user, only count latest '+' reactions
+final reactions = await _nostrService!.queryCachedEvents(
+  kind: 7,
+  tagKey: 'e',
+  tagValue: eventId,
+);
+
+// Group reactions by user pubkey, keeping only the most recent one
+final Map<String, NostrEventModel> latestReactionByUser = {};
+for (final reaction in reactions) {
+  final existing = latestReactionByUser[reaction.pubkey];
+  if (existing == null || reaction.createdAt.isAfter(existing.createdAt)) {
+    latestReactionByUser[reaction.pubkey] = reaction;
+  }
+}
+
+// Count users whose most recent reaction is "+"
+return latestReactionByUser.values
+    .where((reaction) => reaction.content == '+')
+    .length;
+
+// Check user status - look at user's most recent reaction
+final userReactions = reactions.where((r) => r.pubkey == userPubkey).toList();
+userReactions.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+return userReactions.first.content == '+';
+```
+
+**Key behavior:**
+- Each user can only contribute 1 to the count (deduplicated by pubkey)
+- Only the most recent reaction per user is considered
+- Like (`+`) followed by unlike (`-`) results in 0 count for that user
+- Unlike (`-`) followed by like (`+`) results in 1 count for that user
+
+### Caching
+
+Reactions are cached for two purposes:
+
+1. **Immediate feedback**: Published reactions are cached immediately so counts update without waiting for relay echo
+2. **Offline counts**: Cached reactions allow displaying counts without relay queries
+
+```dart
+// After publishing, cache for immediate count update
+await _nostrService!.cacheEvent(eventModel);
+```
+
+### Usage in Screens
+
+Reactions can be applied to both posts and comments. The same pattern is used in:
+
+- `FeedScreen` - reactions on feed posts
+- `PostDetailScreen` - reactions on the main post and its comments
+
+Example implementation with **optimistic UI updates**:
+
+```dart
+class _PostCardState extends State<PostCard> {
+  int _reactionCount = 0;
+  bool _hasUserReacted = false;
+  bool _isReacting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadReactionData();
+  }
+
+  Future<void> _toggleReaction() async {
+    if (_isReacting) return;
+    
+    // Store previous state for rollback on error
+    final wasReacted = _hasUserReacted;
+    final previousCount = _reactionCount;
+    
+    setState(() {
+      _isReacting = true;
+      // Optimistic UI update - immediately toggle the heart
+      _hasUserReacted = !wasReacted;
+      _reactionCount = wasReacted
+          ? (_reactionCount > 0 ? _reactionCount - 1 : 0)
+          : _reactionCount + 1;
+    });
+    
+    try {
+      final state = context.read<FeedState>();
+      await state.publishReaction(
+        widget.event.id,
+        widget.event.pubkey,
+        isUnlike: wasReacted,  // Use stored state, not current
+      );
+      await Future.delayed(Duration(milliseconds: 150));
+      await _loadReactionData();  // Verify with actual data
+    } catch (e) {
+      // Rollback optimistic update on error
+      setState(() {
+        _hasUserReacted = wasReacted;
+        _reactionCount = previousCount;
+      });
+    } finally {
+      setState(() => _isReacting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return HeartButton(
+      eventId: widget.event.id,
+      reactionCount: _reactionCount,
+      isLoadingCount: _isLoadingReactionCount,
+      isReacted: _hasUserReacted,
+      onPressed: _toggleReaction,
+    );
+  }
+}
+```
+
+**Key points:**
+- **Optimistic update**: UI updates immediately on tap for responsiveness
+- **Rollback on error**: Reverts to previous state if publish fails
+- **Use stored state**: `isUnlike: wasReacted` uses the state at tap time, not current state
+- **Verify after publish**: `_loadReactionData()` confirms actual count from cache
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `lib/widgets/heart_button.dart` | HeartButton presentation widget |
+| `lib/state/feed.dart` | publishReaction, getReactionCount, hasUserReacted |
+| `lib/state/post_detail.dart` | Same reaction methods for post detail view |
+| `lib/screens/feed/feed_screen.dart` | Reaction UI in feed |
+| `lib/screens/post/post_detail_screen.dart` | Reaction UI in post detail |
+
+---
+
 ## Quote Posts
 
 Quote posts allow users to repost another post with their own comment, similar to Twitter's quote tweet. They are implemented using the Nostr NIP-18 convention.
@@ -464,6 +719,7 @@ Widget build(BuildContext context) {
 | `lib/services/nostr/nostr.dart` | Relay connection and event handling |
 | `lib/state/feed.dart` | FeedState for main feed |
 | `lib/state/post_detail.dart` | PostDetailState for post details |
+| `lib/widgets/heart_button.dart` | HeartButton for likes/reactions |
 | `lib/widgets/quote_button.dart` | Quote post button widget |
 | `lib/widgets/quoted_post_preview.dart` | Quoted post preview widget |
 | `lib/screens/feed/quote_post_modal.dart` | Quote post compose modal |
