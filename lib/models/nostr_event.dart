@@ -266,8 +266,10 @@ class NostrEventModel {
   }
 }
 
+/// Synchronous version that only adds client ID tag (no signature)
+/// Use addClientTagsWithSignature from client_signature.dart for signed tags
 List<List<String>> addClientIdTag(List<List<String>> tags) {
-  if (tags.any((tag) => tag[0] == 'client' && tag[1] == 'comunifi')) {
+  if (tags.any((tag) => tag.isNotEmpty && tag[0] == 'client' && tag.length > 1 && tag[1] == 'comunifi')) {
     return tags;
   }
 

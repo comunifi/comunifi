@@ -3,11 +3,13 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart';
+import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
@@ -35,7 +37,7 @@ class PostDetailState with ChangeNotifier {
 
       // Load environment variables
       try {
-        await dotenv.load(fileName: '.env');
+        await dotenv.load(fileName: kDebugMode ? '.env.debug' : '.env');
       } catch (e) {
         debugPrint('Could not load .env file: $e');
       }
@@ -173,7 +175,7 @@ class PostDetailState with ChangeNotifier {
   ) async {
     try {
       if (_dbService?.database == null) return null;
-      
+
       // Ensure table exists before querying
       await _dbService!.database!.execute('''
         CREATE TABLE IF NOT EXISTS nostr_key_storage (
@@ -184,7 +186,7 @@ class PostDetailState with ChangeNotifier {
           ciphertext BLOB NOT NULL
         )
       ''');
-      
+
       final maps = await _dbService!.database!.query(
         'nostr_key_storage',
         where: 'group_id = ?',
@@ -335,19 +337,17 @@ class PostDetailState with ChangeNotifier {
       );
 
       // Filter to only include comments that reference this post
-      _comments = pastComments
-          .where((event) {
-            // Check if event has 'e' tag with this post ID
-            for (final tag in event.tags) {
-              if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
-                if (tag[1] == postId) {
-                  return true;
-                }
-              }
+      _comments = pastComments.where((event) {
+        // Check if event has 'e' tag with this post ID
+        for (final tag in event.tags) {
+          if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+            if (tag[1] == postId) {
+              return true;
             }
-            return false;
-          })
-          .toList();
+          }
+        }
+        return false;
+      }).toList();
 
       // Sort by creation date (oldest first for comments)
       _comments.sort((a, b) => a.createdAt.compareTo(b.createdAt));
@@ -371,10 +371,7 @@ class PostDetailState with ChangeNotifier {
       // Note: We can't use tags filter directly because listenToEvents auto-detects
       // and might treat postId as a group ID. So we filter manually.
       _eventSubscription = _nostrService!
-          .listenToEvents(
-            kind: 1,
-            limit: null,
-          )
+          .listenToEvents(kind: 1, limit: null)
           .listen(
             (event) {
               // Check if this is a comment on this post by checking 'e' tag
@@ -436,17 +433,17 @@ class PostDetailState with ChangeNotifier {
 
       // Create tags with 'e' tag referencing the post
       // Format: ['e', postId, relayUrl, 'reply']
-      final tags = [
+      final createdAt = DateTime.now();
+      final tags = await addClientTagsWithSignature([
         ['e', postId, '', 'reply'],
-        ...addClientIdTag([]),
-      ];
+      ], createdAt: createdAt);
 
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 1, // Text note (comment)
         content: content,
         keyPairs: keyPair,
         tags: tags,
-        createdAt: DateTime.now(),
+        createdAt: createdAt,
       );
 
       final eventModel = NostrEventModel(
@@ -554,16 +551,22 @@ class PostDetailState with ChangeNotifier {
 
       final keyPair = NostrKeyPairs(private: privateKey);
 
+      // Create reaction content
+      final reactionContent = isUnlike ? '-' : '+';
+      final reactionCreatedAt = DateTime.now();
+
+      // Create client tags with signature
+      final reactionTags = await addClientTagsWithSignature([
+        ['e', eventId], // Event being reacted to
+        ['p', eventAuthorPubkey], // Author of the event being reacted to
+      ], createdAt: reactionCreatedAt);
+
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 7, // Reaction
-        content: isUnlike ? '-' : '+', // "-" for unlike, "+" for like
+        content: reactionContent,
         keyPairs: keyPair,
-        tags: [
-          ['e', eventId], // Event being reacted to
-          ['p', eventAuthorPubkey], // Author of the event being reacted to
-          ...addClientIdTag([]),
-        ],
-        createdAt: DateTime.now(),
+        tags: reactionTags,
+        createdAt: reactionCreatedAt,
       );
 
       final eventModel = NostrEventModel(
@@ -632,8 +635,7 @@ class PostDetailState with ChangeNotifier {
 
       // Check if user has a positive reaction (content "+")
       return reactions.any(
-        (reaction) =>
-            reaction.pubkey == userPubkey && reaction.content == '+',
+        (reaction) => reaction.pubkey == userPubkey && reaction.content == '+',
       );
     } catch (e) {
       debugPrint('Error checking if user reacted: $e');
@@ -641,4 +643,3 @@ class PostDetailState with ChangeNotifier {
     }
   }
 }
-

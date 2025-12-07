@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
@@ -24,8 +25,8 @@ import 'package:comunifi/models/nostr_event.dart'
         kindEncryptedEnvelope,
         kindGroupAnnouncement,
         kindMlsWelcome,
-        NostrEventModel,
-        addClientIdTag;
+        NostrEventModel;
+import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/messages/messages.dart'
     show AddProposal, Welcome;
 import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
@@ -113,7 +114,7 @@ class GroupState with ChangeNotifier {
 
       // Load environment variables
       try {
-        await dotenv.load(fileName: '.env');
+        await dotenv.load(fileName: kDebugMode ? '.env.debug' : '.env');
       } catch (e) {
         debugPrint('Could not load .env file: $e');
       }
@@ -330,10 +331,10 @@ class GroupState with ChangeNotifier {
   bool _isScheduled = false;
   void safeNotifyListeners() {
     if (!_mounted) return;
-    
+
     // If we're already scheduled to notify, don't schedule again
     if (_isScheduled) return;
-    
+
     // Check if we're in a build phase by trying to schedule for next frame
     // This prevents calling notifyListeners() during build
     _isScheduled = true;
@@ -603,15 +604,17 @@ class GroupState with ChangeNotifier {
           final content = jsonEncode(contentJson);
 
           // Create kind 40 event (group announcement)
+          final announcementCreatedAt = DateTime.now();
+          final announcementTags = await addClientTagsWithSignature([
+            ['g', groupIdHex], // MLS group ID tag
+          ], createdAt: announcementCreatedAt);
+
           final announcementEvent = NostrEvent.fromPartialData(
             kind: kindGroupAnnouncement,
             content: content,
             keyPairs: keyPair,
-            tags: [
-              ['g', groupIdHex], // MLS group ID tag
-              ...addClientIdTag([]),
-            ],
-            createdAt: DateTime.now(),
+            tags: announcementTags,
+            createdAt: announcementCreatedAt,
           );
 
           final announcementModel = NostrEventModel(
@@ -857,15 +860,17 @@ class GroupState with ChangeNotifier {
 
       // Create a normal Nostr event (kind 1 = text note)
       // Add group ID as 'g' tag so it can be filtered after decryption
+      final messageCreatedAt = DateTime.now();
+      final messageTags = await addClientTagsWithSignature([
+        ['g', groupIdHex], // Add group ID tag
+      ], createdAt: messageCreatedAt);
+
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 1, // Text note
         content: content,
         keyPairs: keyPair,
-        tags: [
-          ['g', groupIdHex], // Add group ID tag
-          ...addClientIdTag([]),
-        ],
-        createdAt: DateTime.now(),
+        tags: messageTags,
+        createdAt: messageCreatedAt,
       );
 
       final eventModel = NostrEventModel(
@@ -1175,16 +1180,18 @@ class GroupState with ChangeNotifier {
       final groupIdHex = _groupIdToHex(_activeGroup!.id);
 
       // Create kind 1060 event (MLS Welcome message)
+      final welcomeCreatedAt = DateTime.now();
+      final welcomeTags = await addClientTagsWithSignature([
+        ['p', inviteeNostrPubkey], // Recipient
+        ['g', groupIdHex], // Group ID
+      ], createdAt: welcomeCreatedAt);
+
       final welcomeEvent = NostrEvent.fromPartialData(
         kind: kindMlsWelcome,
         content: welcomeJson,
         keyPairs: keyPair,
-        tags: [
-          ['p', inviteeNostrPubkey], // Recipient
-          ['g', groupIdHex], // Group ID
-          ...addClientIdTag([]),
-        ],
-        createdAt: DateTime.now(),
+        tags: welcomeTags,
+        createdAt: welcomeCreatedAt,
       );
 
       final welcomeEventModel = NostrEventModel(

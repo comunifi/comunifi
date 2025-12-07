@@ -3,11 +3,13 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart';
+import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/db/app_db.dart';
@@ -32,7 +34,7 @@ class ProfileState with ChangeNotifier {
 
       // Load environment variables
       try {
-        await dotenv.load(fileName: '.env');
+        await dotenv.load(fileName: kDebugMode ? '.env.debug' : '.env');
       } catch (e) {
         debugPrint('Could not load .env file: $e');
       }
@@ -194,15 +196,11 @@ class ProfileState with ChangeNotifier {
       final username = _generateRandomUsername();
 
       // Store it in the database
-      await _dbService!.database!.insert(
-        'local_usernames',
-        {
-          'pubkey': pubkey,
-          'username': username,
-          'created_at': DateTime.now().millisecondsSinceEpoch,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      await _dbService!.database!.insert('local_usernames', {
+        'pubkey': pubkey,
+        'username': username,
+        'created_at': DateTime.now().millisecondsSinceEpoch,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
 
       debugPrint('Generated and stored local username for $pubkey: $username');
       return username;
@@ -240,15 +238,11 @@ class ProfileState with ChangeNotifier {
     try {
       if (_dbService?.database == null) return;
 
-      await _dbService!.database!.insert(
-        'local_usernames',
-        {
-          'pubkey': pubkey,
-          'username': username,
-          'created_at': DateTime.now().millisecondsSinceEpoch,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      await _dbService!.database!.insert('local_usernames', {
+        'pubkey': pubkey,
+        'username': username,
+        'created_at': DateTime.now().millisecondsSinceEpoch,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
 
       debugPrint('Updated local username for $pubkey: $username');
     } catch (e) {
@@ -296,13 +290,14 @@ class ProfileState with ChangeNotifier {
       safeNotifyListeners();
 
       final profile = await _profileService!.getProfile(pubkey);
-      
+
       if (profile != null) {
         // Check if profile has a real name (not just pubkey prefix)
         final realUsername = profile.getUsername();
-        final hasRealName = (profile.name != null && profile.name!.isNotEmpty) ||
+        final hasRealName =
+            (profile.name != null && profile.name!.isNotEmpty) ||
             (profile.displayName != null && profile.displayName!.isNotEmpty);
-        
+
         if (hasRealName && realUsername != pubkey.substring(0, 8)) {
           // Real profile with actual name found, update local username
           await _updateLocalUsername(pubkey, realUsername);
@@ -341,8 +336,10 @@ class ProfileState with ChangeNotifier {
       safeNotifyListeners();
 
       // Get profiles we don't have cached
-      final uncachedPubkeys = pubkeys.where((pk) => !_profiles.containsKey(pk)).toList();
-      
+      final uncachedPubkeys = pubkeys
+          .where((pk) => !_profiles.containsKey(pk))
+          .toList();
+
       if (uncachedPubkeys.isNotEmpty) {
         final profiles = await _profileService!.getProfiles(uncachedPubkeys);
         _profiles.addAll(profiles);
@@ -520,7 +517,9 @@ class ProfileState with ChangeNotifier {
       await ensureUserProfile();
     } catch (e) {
       // Silently fail - profile will be created by onboarding screen with GroupState's keys
-      debugPrint('ProfileState could not auto-create profile (will use GroupState keys): $e');
+      debugPrint(
+        'ProfileState could not auto-create profile (will use GroupState keys): $e',
+      );
     }
   }
 
@@ -539,7 +538,9 @@ class ProfileState with ChangeNotifier {
         // Don't log error if no keys provided - this is expected when ProfileState
         // doesn't have its own keys and will use GroupState's keys instead
         if (pubkey == null) {
-          debugPrint('ProfileState: No pubkey available, cannot auto-create profile (will use GroupState keys)');
+          debugPrint(
+            'ProfileState: No pubkey available, cannot auto-create profile (will use GroupState keys)',
+          );
         } else {
           debugPrint('No pubkey available, cannot ensure profile');
         }
@@ -547,11 +548,16 @@ class ProfileState with ChangeNotifier {
       }
 
       // Check if we already have a profile
-      debugPrint('Checking for existing profile for pubkey: ${finalPubkey.substring(0, 8)}...');
+      debugPrint(
+        'Checking for existing profile for pubkey: ${finalPubkey.substring(0, 8)}...',
+      );
       final existingProfile = await _profileService!.getProfile(finalPubkey);
       if (existingProfile != null &&
-          (existingProfile.name != null || existingProfile.displayName != null)) {
-        debugPrint('User already has a profile: ${existingProfile.getUsername()}');
+          (existingProfile.name != null ||
+              existingProfile.displayName != null)) {
+        debugPrint(
+          'User already has a profile: ${existingProfile.getUsername()}',
+        );
         _profiles[finalPubkey] = existingProfile;
         safeNotifyListeners();
         return;
@@ -579,17 +585,17 @@ class ProfileState with ChangeNotifier {
 
       // Create and sign the profile event
       // Add username as a tag for searchability (normalized to lowercase)
-      final tags = [
+      final createdAt = DateTime.now();
+      final tags = await addClientTagsWithSignature([
         ['u', username.toLowerCase()], // Username tag for searchability
-        ...addClientIdTag([]),
-      ];
-      
+      ], createdAt: createdAt);
+
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 0, // Kind 0 is profile metadata
         content: profileJson,
         keyPairs: keyPair,
         tags: tags,
-        createdAt: DateTime.now(),
+        createdAt: createdAt,
       );
 
       // Convert to our model format
@@ -657,14 +663,20 @@ class ProfileState with ChangeNotifier {
 
   /// Check if a username is available (not taken by another user)
   /// Returns true if username is available, false if taken
-  Future<bool> isUsernameAvailable(String username, String currentUserPubkey) async {
+  Future<bool> isUsernameAvailable(
+    String username,
+    String currentUserPubkey,
+  ) async {
     if (_profileService == null) {
       debugPrint('Profile service not initialized');
       return false;
     }
 
     try {
-      return await _profileService!.isUsernameAvailable(username, currentUserPubkey);
+      return await _profileService!.isUsernameAvailable(
+        username,
+        currentUserPubkey,
+      );
     } catch (e) {
       debugPrint('Error checking username availability: $e');
       return false;
@@ -681,7 +693,9 @@ class ProfileState with ChangeNotifier {
     String? privateKey,
   }) async {
     if (!_isConnected || _nostrService == null || _profileService == null) {
-      throw Exception('Not connected to relay or profile service not initialized');
+      throw Exception(
+        'Not connected to relay or profile service not initialized',
+      );
     }
 
     try {
@@ -712,7 +726,7 @@ class ProfileState with ChangeNotifier {
         'name': username,
         'display_name': username,
       };
-      
+
       if (existingAbout != null) {
         profileData['about'] = existingAbout;
       }
@@ -733,17 +747,17 @@ class ProfileState with ChangeNotifier {
 
       // Create and sign the profile event
       // Add username as a tag for searchability (normalized to lowercase)
-      final tags = [
+      final updateCreatedAt = DateTime.now();
+      final tags = await addClientTagsWithSignature([
         ['u', username.toLowerCase()], // Username tag for searchability
-        ...addClientIdTag([]),
-      ];
-      
+      ], createdAt: updateCreatedAt);
+
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 0, // Kind 0 is profile metadata
         content: profileJson,
         keyPairs: keyPair,
         tags: tags,
-        createdAt: DateTime.now(),
+        createdAt: updateCreatedAt,
       );
 
       // Convert to our model format
@@ -763,7 +777,9 @@ class ProfileState with ChangeNotifier {
       // Immediately cache the event in the database so it persists after app restart
       await _nostrService!.cacheEvent(eventModel);
 
-      debugPrint('Published and cached updated profile event with username: $username');
+      debugPrint(
+        'Published and cached updated profile event with username: $username',
+      );
 
       // Update our cached profile
       final newProfile = ProfileData.fromEvent(eventModel);
@@ -775,4 +791,3 @@ class ProfileState with ChangeNotifier {
     }
   }
 }
-

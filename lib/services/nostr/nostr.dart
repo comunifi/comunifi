@@ -5,7 +5,8 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:comunifi/models/nostr_event.dart'
-    show NostrEventModel, kindEncryptedEnvelope, addClientIdTag;
+    show NostrEventModel, kindEncryptedEnvelope;
+import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
@@ -594,12 +595,15 @@ class NostrService {
       throw Exception('Recipient pubkey required for encrypted envelope');
     }
 
-    // Create tags for the envelope
-    final tags = [
-      ['p', recipient],
-      ['g', mlsGroupId],
-      ...addClientIdTag([]),
-    ];
+    // Create tags for the envelope with client signature
+    final envelopeCreatedAt = DateTime.now();
+    final tags = await addClientTagsWithSignature(
+      [
+        ['p', recipient],
+        ['g', mlsGroupId],
+      ],
+      createdAt: envelopeCreatedAt,
+    );
 
     // Create and sign the envelope using dart_nostr (this computes ID and signs)
     final nostrEnvelope = NostrEvent.fromPartialData(
@@ -607,7 +611,7 @@ class NostrService {
       content: encryptedContent,
       keyPairs: keyPairs,
       tags: tags,
-      createdAt: DateTime.now(),
+      createdAt: envelopeCreatedAt,
     );
 
     // Convert to our model format

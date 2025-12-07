@@ -3,11 +3,13 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart';
+import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
@@ -35,7 +37,7 @@ class FeedState with ChangeNotifier {
 
       // Load environment variables
       try {
-        await dotenv.load(fileName: '.env');
+        await dotenv.load(fileName: kDebugMode ? '.env.debug' : '.env');
       } catch (e) {
         // .env file might not exist, try to continue with environment variables
         debugPrint('Could not load .env file: $e');
@@ -513,13 +515,17 @@ class FeedState with ChangeNotifier {
       // Derive key pair from private key using dart_nostr
       final keyPair = NostrKeyPairs(private: privateKey);
 
+      // Create client tags with signature
+      final createdAt = DateTime.now();
+      final tags = await addClientTagsWithSignature([], createdAt: createdAt);
+
       // Create and sign a NostrEvent using dart_nostr
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 1, // Text note
         content: content,
         keyPairs: keyPair,
-        tags: addClientIdTag([]),
-        createdAt: DateTime.now(),
+        tags: tags,
+        createdAt: createdAt,
       );
 
       // Convert to our model format for publishing
@@ -643,18 +649,24 @@ class FeedState with ChangeNotifier {
       // Derive key pair from private key using dart_nostr
       final keyPair = NostrKeyPairs(private: privateKey);
 
+      // Create reaction content
+      final reactionContent = isUnlike ? '-' : '+';
+      final reactionCreatedAt = DateTime.now();
+
+      // Create client tags with signature
+      final reactionTags = await addClientTagsWithSignature([
+        ['e', eventId], // Event being reacted to
+        ['p', eventAuthorPubkey], // Author of the event being reacted to
+      ], createdAt: reactionCreatedAt);
+
       // Create and sign a reaction event (kind 7)
       // Use "-" for unlike, "+" for like (some Nostr clients use this convention)
       final nostrEvent = NostrEvent.fromPartialData(
         kind: 7, // Reaction
-        content: isUnlike ? '-' : '+', // "-" for unlike, "+" for like
+        content: reactionContent,
         keyPairs: keyPair,
-        tags: [
-          ['e', eventId], // Event being reacted to
-          ['p', eventAuthorPubkey], // Author of the event being reacted to
-          ...addClientIdTag([]),
-        ],
-        createdAt: DateTime.now(),
+        tags: reactionTags,
+        createdAt: reactionCreatedAt,
       );
 
       // Convert to our model format for publishing
