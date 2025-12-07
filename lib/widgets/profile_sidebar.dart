@@ -6,8 +6,13 @@ import 'package:comunifi/state/profile.dart';
 
 class ProfileSidebar extends StatefulWidget {
   final VoidCallback onClose;
+  final bool showCloseButton;
 
-  const ProfileSidebar({super.key, required this.onClose});
+  const ProfileSidebar({
+    super.key,
+    required this.onClose,
+    this.showCloseButton = true,
+  });
 
   @override
   State<ProfileSidebar> createState() => _ProfileSidebarState();
@@ -234,13 +239,15 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-                const Spacer(),
-                CupertinoButton(
-                  padding: EdgeInsets.zero,
-                  minSize: 0,
-                  onPressed: widget.onClose,
-                  child: const Icon(CupertinoIcons.xmark),
-                ),
+                if (widget.showCloseButton) ...[
+                  const Spacer(),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minSize: 0,
+                    onPressed: widget.onClose,
+                    child: const Icon(CupertinoIcons.xmark),
+                  ),
+                ],
               ],
             ),
           ),

@@ -15,8 +15,13 @@ class _GroupItem {
 
 class GroupsSidebar extends StatefulWidget {
   final VoidCallback onClose;
+  final bool showCloseButton;
 
-  const GroupsSidebar({super.key, required this.onClose});
+  const GroupsSidebar({
+    super.key,
+    required this.onClose,
+    this.showCloseButton = true,
+  });
 
   @override
   State<GroupsSidebar> createState() => _GroupsSidebarState();
@@ -202,13 +207,15 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const Spacer(),
-                    CupertinoButton(
-                      padding: EdgeInsets.zero,
-                      minSize: 0,
-                      onPressed: widget.onClose,
-                      child: const Icon(CupertinoIcons.xmark),
-                    ),
+                    if (widget.showCloseButton) ...[
+                      const Spacer(),
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        minSize: 0,
+                        onPressed: widget.onClose,
+                        child: const Icon(CupertinoIcons.xmark),
+                      ),
+                    ],
                   ],
                 ),
               ),
