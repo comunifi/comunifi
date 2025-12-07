@@ -1011,14 +1011,31 @@ class _EventItemContentWidget extends StatelessWidget {
               ),
             ],
           ),
-          if (groupName != null) ...[
+          if (groupName != null && groupIdHex != null) ...[
             const SizedBox(height: 4),
-            Text(
-              groupName,
-              style: const TextStyle(
-                color: CupertinoColors.systemBlue,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
+            GestureDetector(
+              onTap: () {
+                // Find the MlsGroup by groupIdHex and select it
+                final matchingGroup = groupState.groups
+                    .cast<MlsGroup?>()
+                    .firstWhere((g) {
+                      if (g == null) return false;
+                      final gIdHex = g.id.bytes
+                          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                          .join();
+                      return gIdHex == groupIdHex;
+                    }, orElse: () => null);
+                if (matchingGroup != null) {
+                  groupState.setActiveGroup(matchingGroup);
+                }
+              },
+              child: Text(
+                groupName,
+                style: const TextStyle(
+                  color: CupertinoColors.systemBlue,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ],
