@@ -24,10 +24,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       final profileState = context.read<ProfileState>();
 
       // Set callback so GroupState can trigger profile creation
-      groupState.setEnsureProfileCallback((pubkey, privateKey) async {
+      groupState.setEnsureProfileCallback((pubkey, privateKey, hpkePublicKeyHex) async {
         await profileState.ensureUserProfile(
           pubkey: pubkey,
           privateKey: privateKey,
+          hpkePublicKeyHex: hpkePublicKeyHex,
         );
       });
     });

@@ -526,7 +526,12 @@ class ProfileState with ChangeNotifier {
   /// Ensure the user has a profile with a username
   /// If no profile exists locally or on relay, creates one with a random username
   /// This method can be called with keys from GroupState if ProfileState doesn't have its own keys
-  Future<void> ensureUserProfile({String? pubkey, String? privateKey}) async {
+  /// [hpkePublicKeyHex] - Optional HPKE public key (hex-encoded) to include in profile for MLS invitations
+  Future<void> ensureUserProfile({
+    String? pubkey,
+    String? privateKey,
+    String? hpkePublicKeyHex,
+  }) async {
     if (!_isConnected || _nostrService == null || _profileService == null) {
       return;
     }
@@ -555,11 +560,32 @@ class ProfileState with ChangeNotifier {
       if (existingProfile != null &&
           (existingProfile.name != null ||
               existingProfile.displayName != null)) {
-        debugPrint(
-          'User already has a profile: ${existingProfile.getUsername()}',
-        );
-        _profiles[finalPubkey] = existingProfile;
-        safeNotifyListeners();
+        // Check if we need to update the profile with HPKE key
+        final needsHpkeUpdate =
+            hpkePublicKeyHex != null &&
+            hpkePublicKeyHex.isNotEmpty &&
+            existingProfile.mlsHpkePublicKey != hpkePublicKeyHex;
+
+        if (!needsHpkeUpdate) {
+          debugPrint(
+            'User already has a profile: ${existingProfile.getUsername()}',
+          );
+          _profiles[finalPubkey] = existingProfile;
+          safeNotifyListeners();
+          return;
+        }
+
+        // Need to update profile with HPKE key
+        debugPrint('Updating existing profile with HPKE public key');
+        final finalPrivateKey = privateKey ?? await _getNostrPrivateKey();
+        if (finalPrivateKey != null) {
+          await _updateProfileWithHpkeKey(
+            finalPubkey,
+            finalPrivateKey,
+            existingProfile,
+            hpkePublicKeyHex,
+          );
+        }
         return;
       }
 
@@ -576,12 +602,16 @@ class ProfileState with ChangeNotifier {
 
       final keyPair = NostrKeyPairs(private: finalPrivateKey);
 
-      // Create profile JSON
-      final profileJson = jsonEncode({
+      // Create profile JSON with HPKE public key for MLS invitations
+      final profileData = <String, dynamic>{
         'name': username,
         'display_name': username,
         'about': 'Comunifi user',
-      });
+      };
+      if (hpkePublicKeyHex != null && hpkePublicKeyHex.isNotEmpty) {
+        profileData['mls_hpke_public_key'] = hpkePublicKeyHex;
+      }
+      final profileJson = jsonEncode(profileData);
 
       // Create and sign the profile event
       // Add username as a tag for searchability (normalized to lowercase)
@@ -623,6 +653,80 @@ class ProfileState with ChangeNotifier {
       safeNotifyListeners();
     } catch (e) {
       debugPrint('Failed to ensure user profile: $e');
+    }
+  }
+
+  /// Update an existing profile with HPKE public key
+  Future<void> _updateProfileWithHpkeKey(
+    String pubkey,
+    String privateKey,
+    ProfileData existingProfile,
+    String hpkePublicKeyHex,
+  ) async {
+    try {
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Build profile data preserving existing fields and adding HPKE key
+      final profileData = <String, dynamic>{
+        'name': existingProfile.name,
+        'display_name': existingProfile.displayName,
+        'mls_hpke_public_key': hpkePublicKeyHex,
+      };
+
+      if (existingProfile.about != null) {
+        profileData['about'] = existingProfile.about;
+      }
+      if (existingProfile.picture != null) {
+        profileData['picture'] = existingProfile.picture;
+      }
+      if (existingProfile.banner != null) {
+        profileData['banner'] = existingProfile.banner;
+      }
+      if (existingProfile.website != null) {
+        profileData['website'] = existingProfile.website;
+      }
+      if (existingProfile.nip05 != null) {
+        profileData['nip05'] = existingProfile.nip05;
+      }
+
+      final profileJson = jsonEncode(profileData);
+
+      // Create and sign the profile event
+      final createdAt = DateTime.now();
+      final username =
+          existingProfile.name ?? existingProfile.displayName ?? '';
+      final tags = await addClientTagsWithSignature([
+        if (username.isNotEmpty) ['u', username.toLowerCase()],
+      ], createdAt: createdAt);
+
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 0,
+        content: profileJson,
+        keyPairs: keyPair,
+        tags: tags,
+        createdAt: createdAt,
+      );
+
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      await _nostrService!.publishEvent(eventModel.toJson());
+      await _nostrService!.cacheEvent(eventModel);
+
+      debugPrint('Updated profile with HPKE public key');
+
+      final updatedProfile = ProfileData.fromEvent(eventModel);
+      _profiles[pubkey] = updatedProfile;
+      safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Failed to update profile with HPKE key: $e');
     }
   }
 

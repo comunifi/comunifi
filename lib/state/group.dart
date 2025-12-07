@@ -66,6 +66,10 @@ class GroupState with ChangeNotifier {
   MlsGroup? _keysGroup;
   bool _wasNewNostrKeyGenerated = false;
 
+  // Cached HPKE key pair derived from Nostr private key
+  // This is used for MLS group invitations
+  mls_crypto.KeyPair? _hpkeKeyPair;
+
   // Map of group ID (hex) to MLS group for quick lookup
   final Map<String, MlsGroup> _mlsGroups = {};
 
@@ -73,7 +77,12 @@ class GroupState with ChangeNotifier {
   final Map<String, String> _groupNameCache = {};
 
   // Callback to ensure user profile (set by widgets that have access to ProfileState)
-  Future<void> Function(String pubkey, String privateKey)?
+  // Parameters: pubkey, privateKey, hpkePublicKeyHex
+  Future<void> Function(
+    String pubkey,
+    String privateKey,
+    String? hpkePublicKeyHex,
+  )?
   _ensureProfileCallback;
 
   GroupState() {
@@ -82,7 +91,12 @@ class GroupState with ChangeNotifier {
 
   /// Set callback to ensure user profile (called by widgets with access to ProfileState)
   void setEnsureProfileCallback(
-    Future<void> Function(String pubkey, String privateKey) callback,
+    Future<void> Function(
+      String pubkey,
+      String privateKey,
+      String? hpkePublicKeyHex,
+    )
+    callback,
   ) {
     _ensureProfileCallback = callback;
     // If we already have keys, call it immediately
@@ -97,8 +111,10 @@ class GroupState with ChangeNotifier {
       final pubkey = await getNostrPublicKey();
       final privateKey = await getNostrPrivateKey();
       if (pubkey != null && privateKey != null) {
-        debugPrint('GroupState: Ensuring user profile with keys');
-        await _ensureProfileCallback!(pubkey, privateKey);
+        // Get HPKE public key to include in profile
+        final hpkePublicKeyHex = await getHpkePublicKeyHex();
+        debugPrint('GroupState: Ensuring user profile with keys and HPKE key');
+        await _ensureProfileCallback!(pubkey, privateKey, hpkePublicKeyHex);
       }
     } catch (e) {
       debugPrint('GroupState: Failed to ensure profile: $e');
@@ -153,7 +169,7 @@ class GroupState with ChangeNotifier {
           await _ensureKeyIsSyncedToRelay();
 
           _loadSavedGroups();
-          _startListeningForGroupEvents();
+          await _startListeningForGroupEvents();
           // Sync group announcements to local DB
           _syncGroupAnnouncementsToDB();
           // Create personal group if new key was generated
@@ -1015,13 +1031,24 @@ class GroupState with ChangeNotifier {
   /// Start listening for new group events
   /// Note: Groups are now MLS-based, so we just refresh the list periodically
   /// Also listens for Welcome messages (kind 1060) and group announcements (kind 40)
-  void _startListeningForGroupEvents() {
+  Future<void> _startListeningForGroupEvents() async {
     if (_nostrService == null || !_isConnected) return;
 
     try {
-      // Listen for Welcome messages (kind 1060)
+      // Get our pubkey to filter Welcome messages addressed to us
+      final ourPubkey = await getNostrPublicKey();
+      if (ourPubkey == null) {
+        debugPrint('Cannot listen for Welcome messages: no pubkey available');
+        return;
+      }
+
+      // Listen for Welcome messages (kind 1060) addressed to us
       _nostrService!
-          .listenToEvents(kind: kindMlsWelcome, limit: null)
+          .listenToEvents(
+            kind: kindMlsWelcome,
+            pTags: [ourPubkey], // Filter by recipient pubkey
+            limit: null,
+          )
           .listen(
             (event) {
               // Handle Welcome invitation
@@ -1225,6 +1252,72 @@ class GroupState with ChangeNotifier {
       debugPrint('Failed to get Nostr public key: $e');
       return null;
     }
+  }
+
+  /// Derive HPKE key pair from Nostr private key
+  /// This ensures consistent keys for MLS group invitations
+  Future<mls_crypto.KeyPair?> _getOrDeriveHpkeKeyPair() async {
+    // Return cached key pair if available
+    if (_hpkeKeyPair != null) {
+      return _hpkeKeyPair;
+    }
+
+    final nostrPrivateKey = await getNostrPrivateKey();
+    if (nostrPrivateKey == null) {
+      debugPrint('Cannot derive HPKE keys: no Nostr private key');
+      return null;
+    }
+
+    try {
+      // Convert hex private key to bytes
+      final privateKeyBytes = Uint8List.fromList(
+        List.generate(
+          nostrPrivateKey.length ~/ 2,
+          (i) =>
+              int.parse(nostrPrivateKey.substring(i * 2, i * 2 + 2), radix: 16),
+        ),
+      );
+
+      // Use HKDF to derive a seed for HPKE keys from the Nostr private key
+      // This ensures the same Nostr key always produces the same HPKE keys
+      final kdf = DefaultKdf();
+      final seed = await kdf.extractAndExpand(
+        salt: Uint8List.fromList('comunifi-mls-hpke'.codeUnits),
+        ikm: privateKeyBytes,
+        info: Uint8List.fromList('hpke-key-derivation'.codeUnits),
+        length: 32,
+      );
+
+      // Generate HPKE key pair from the derived seed
+      final hpke = DefaultHpke();
+      _hpkeKeyPair = await hpke.generateKeyPairFromSeed(seed);
+
+      // Log the derived public key for debugging
+      final pubKeyHex = _hpkeKeyPair!.publicKey.bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+      debugPrint('Derived HPKE public key: ${pubKeyHex.substring(0, 16)}...');
+      return _hpkeKeyPair;
+    } catch (e) {
+      debugPrint('Failed to derive HPKE key pair: $e');
+      return null;
+    }
+  }
+
+  /// Get the HPKE public key as hex string (for profiles)
+  Future<String?> getHpkePublicKeyHex() async {
+    final keyPair = await _getOrDeriveHpkeKeyPair();
+    if (keyPair == null) return null;
+
+    return keyPair.publicKey.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+  }
+
+  /// Get the HPKE private key for decrypting Welcome messages
+  Future<mls_crypto.PrivateKey?> getHpkePrivateKey() async {
+    final keyPair = await _getOrDeriveHpkeKeyPair();
+    return keyPair?.privateKey;
   }
 
   Future<void> retryConnection() async {
@@ -1516,10 +1609,25 @@ class GroupState with ChangeNotifier {
       // We'll need to get it from context or pass it in
       // For now, we'll create a ProfileService directly
       final profileService = ProfileService(_nostrService!);
-      final profile = await profileService.searchByUsername(username);
+
+      // First search to get the pubkey
+      var profile = await profileService.searchByUsername(username);
 
       if (profile == null) {
         throw Exception('User not found: $username');
+      }
+
+      // If no HPKE key in cached profile, force refresh from relay
+      // The user might have just updated their profile
+      if (profile.mlsHpkePublicKey == null ||
+          profile.mlsHpkePublicKey!.isEmpty) {
+        debugPrint('No HPKE key in cached profile, refreshing from relay...');
+        final freshProfile = await profileService.getProfileFresh(
+          profile.pubkey,
+        );
+        if (freshProfile != null) {
+          profile = freshProfile;
+        }
       }
 
       final inviteeNostrPubkey = profile.pubkey;
@@ -1531,18 +1639,43 @@ class GroupState with ChangeNotifier {
         throw Exception('You cannot invite yourself to the group');
       }
 
-      // Generate temporary MLS keys for the invitee
-      // TODO: In production, the invitee should provide their own keys
+      // Get invitee's HPKE public key from their profile
+      final inviteeHpkePublicKeyHex = profile.mlsHpkePublicKey;
+      if (inviteeHpkePublicKeyHex == null || inviteeHpkePublicKeyHex.isEmpty) {
+        throw Exception(
+          'User $username has not published their MLS keys. '
+          'They need to update their profile first.',
+        );
+      }
+
+      debugPrint(
+        'Inviting with HPKE public key from profile: ${inviteeHpkePublicKeyHex.substring(0, 16)}...',
+      );
+
+      // Convert hex to bytes for the HPKE public key
+      final hpkePublicKeyBytes = Uint8List.fromList(
+        List.generate(
+          inviteeHpkePublicKeyHex.length ~/ 2,
+          (i) => int.parse(
+            inviteeHpkePublicKeyHex.substring(i * 2, i * 2 + 2),
+            radix: 16,
+          ),
+        ),
+      );
+
+      // Generate identity key (still needed for MLS)
       final cryptoProvider = DefaultMlsCryptoProvider();
       final identityKeyPair = await cryptoProvider.signatureScheme
           .generateKeyPair();
-      final hpkeKeyPair = await cryptoProvider.hpke.generateKeyPair();
 
-      // Invite the member with the generated keys
+      // Create public key from the invitee's published HPKE public key
+      final inviteeHpkePublicKey = DefaultPublicKey(hpkePublicKeyBytes);
+
+      // Invite the member with their actual HPKE public key
       await inviteMember(
         inviteeNostrPubkey: inviteeNostrPubkey,
         inviteeIdentityKey: identityKeyPair.publicKey,
-        inviteeHpkePublicKey: hpkeKeyPair.publicKey,
+        inviteeHpkePublicKey: inviteeHpkePublicKey,
         inviteeUserId: username,
       );
 
@@ -1613,20 +1746,23 @@ class GroupState with ChangeNotifier {
       // Deserialize Welcome message
       final welcome = Welcome.fromJson(welcomeEvent.content);
 
-      // Get our HPKE private key
-      // The invitee must use the same HPKE private key that corresponds to the
-      // public key they shared when being invited. This should be stored securely.
-      // TODO: Implement key storage/retrieval mechanism
+      // Get our HPKE private key derived from our Nostr key
+      // This ensures we use the same key that corresponds to our published HPKE public key
       final cryptoProvider = DefaultMlsCryptoProvider();
-      final hpkePrivateKeyToUse =
-          hpkePrivateKey ??
-          (await cryptoProvider.hpke.generateKeyPair()).privateKey;
+      final derivedHpkePrivateKey = await getHpkePrivateKey();
+      final hpkePrivateKeyToUse = hpkePrivateKey ?? derivedHpkePrivateKey;
 
-      if (hpkePrivateKey == null) {
-        debugPrint(
-          'Warning: Generating new HPKE key pair. This may not match the public key used for invitation.',
+      if (hpkePrivateKeyToUse == null) {
+        throw Exception(
+          'No HPKE private key available. Cannot decrypt Welcome message.',
         );
       }
+
+      // Log our HPKE public key for debugging (to verify it matches the invite)
+      final hpkePublicKeyHex = await getHpkePublicKeyHex();
+      debugPrint(
+        'Receiving Welcome with our HPKE public key: ${hpkePublicKeyHex?.substring(0, 16)}...',
+      );
 
       // Join the group
       final group = await MlsGroup.joinFromWelcome(

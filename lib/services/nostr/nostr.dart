@@ -630,10 +630,13 @@ class NostrService {
 
   /// Listen to events of a specific kind
   /// Events are automatically cached as they arrive
+  /// [pTags] - Optional list of pubkeys to filter by recipient (#p tag)
+  ///           Use this to receive events addressed to specific users (e.g., Welcome messages)
   Stream<NostrEventModel> listenToEvents({
     required int kind,
     List<String>? authors,
     List<String>? tags,
+    List<String>? pTags,
     DateTime? since,
     DateTime? until,
     int? limit,
@@ -672,6 +675,11 @@ class NostrService {
         // Regular tags, use 't' tag
         filter['#t'] = tags;
       }
+    }
+
+    // Filter by recipient pubkey (#p tag)
+    if (pTags != null && pTags.isNotEmpty) {
+      filter['#p'] = pTags;
     }
 
     if (since != null) {

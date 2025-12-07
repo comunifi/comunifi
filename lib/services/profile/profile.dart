@@ -13,6 +13,8 @@ class ProfileData {
   final String? banner;
   final String? website;
   final String? nip05;
+  /// MLS HPKE public key (hex-encoded) for encrypted group invitations
+  final String? mlsHpkePublicKey;
   final Map<String, dynamic> rawData;
 
   ProfileData({
@@ -24,6 +26,7 @@ class ProfileData {
     this.banner,
     this.website,
     this.nip05,
+    this.mlsHpkePublicKey,
     required this.rawData,
   });
 
@@ -66,6 +69,7 @@ class ProfileData {
         banner: data['banner'] as String?,
         website: data['website'] as String?,
         nip05: data['nip05'] as String?,
+        mlsHpkePublicKey: data['mls_hpke_public_key'] as String?,
         rawData: data,
       );
     } catch (e) {
@@ -120,6 +124,36 @@ class ProfileService {
       return null;
     } catch (e) {
       debugPrint('Error fetching profile for $pubkey: $e');
+      return null;
+    }
+  }
+
+  /// Get profile for a public key, always fetching fresh from relay
+  /// Use this when you need the most up-to-date profile (e.g., checking for HPKE keys)
+  Future<ProfileData?> getProfileFresh(String pubkey) async {
+    try {
+      if (!_nostrService.isConnected) {
+        debugPrint('Not connected to relay, cannot fetch fresh profile');
+        return null;
+      }
+
+      final remoteEvents = await _nostrService.requestPastEvents(
+        kind: 0,
+        authors: [pubkey],
+        limit: 1,
+        useCache: false,
+      );
+
+      if (remoteEvents.isNotEmpty) {
+        remoteEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        final profile = ProfileData.fromEvent(remoteEvents.first);
+        debugPrint('Fetched fresh profile for ${pubkey.substring(0, 8)}...');
+        return profile;
+      }
+
+      return null;
+    } catch (e) {
+      debugPrint('Error fetching fresh profile for $pubkey: $e');
       return null;
     }
   }

@@ -299,6 +299,24 @@ class DefaultHpke implements Hpke {
     );
   }
 
+  /// Generate a key pair deterministically from a 32-byte seed
+  /// This allows deriving consistent keys from a user's Nostr private key
+  Future<KeyPair> generateKeyPairFromSeed(Uint8List seed) async {
+    if (seed.length != 32) {
+      throw ArgumentError('Seed must be exactly 32 bytes');
+    }
+
+    final algorithm = crypto.X25519();
+    final keyPair = await algorithm.newKeyPairFromSeed(seed);
+    final publicKeyData = await keyPair.extractPublicKey();
+    final privateKeyData = await keyPair.extract();
+
+    return KeyPair(
+      DefaultPublicKey(Uint8List.fromList(publicKeyData.bytes)),
+      DefaultPrivateKey(Uint8List.fromList(privateKeyData.bytes)),
+    );
+  }
+
   @override
   Future<HpkeEncapResult> setupBaseSender({
     required PublicKey recipientPublicKey,
