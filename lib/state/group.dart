@@ -33,6 +33,7 @@ import 'package:comunifi/services/mls/messages/messages.dart'
 import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
+import 'package:comunifi/services/link_preview/link_preview.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -1126,8 +1127,15 @@ class GroupState with ChangeNotifier {
     }
   }
 
+  // Link preview service for URL extraction
+  final LinkPreviewService _linkPreviewService = LinkPreviewService();
+
+  /// Get the link preview service for widgets to use
+  LinkPreviewService get linkPreviewService => _linkPreviewService;
+
   /// Post a message to the active group
   /// Message will be encrypted with MLS and sent as kind 1059 envelope
+  /// Automatically extracts URLs from content and adds 'r' tags (Nostr convention)
   Future<void> postMessage(String content) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
@@ -1150,11 +1158,16 @@ class GroupState with ChangeNotifier {
       // Get group ID as hex
       final groupIdHex = _groupIdToHex(_activeGroup!.id);
 
+      // Extract URLs and generate 'r' tags (Nostr convention for URL references)
+      final urlTags = _linkPreviewService.generateUrlTags(content);
+
       // Create a normal Nostr event (kind 1 = text note)
       // Add group ID as 'g' tag so it can be filtered after decryption
+      // Also add 'r' tags for any URLs in the content
       final messageCreatedAt = DateTime.now();
       final messageTags = await addClientTagsWithSignature([
         ['g', groupIdHex], // Add group ID tag
+        ...urlTags, // Add URL reference tags
       ], createdAt: messageCreatedAt);
 
       final nostrEvent = NostrEvent.fromPartialData(
@@ -1194,6 +1207,9 @@ class GroupState with ChangeNotifier {
       debugPrint(
         'Posted encrypted message to group ${_activeGroup!.name}: ${eventModel.id}',
       );
+      if (urlTags.isNotEmpty) {
+        debugPrint('Added ${urlTags.length} URL reference tag(s)');
+      }
     } catch (e) {
       debugPrint('Failed to post message: $e');
       rethrow;

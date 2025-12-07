@@ -10,6 +10,7 @@ import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart';
 import 'package:comunifi/services/nostr/client_signature.dart';
+import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
@@ -415,7 +416,14 @@ class PostDetailState with ChangeNotifier {
     await _initialize();
   }
 
+  // Link preview service for URL extraction
+  final LinkPreviewService _linkPreviewService = LinkPreviewService();
+
+  /// Get the link preview service for widgets to use
+  LinkPreviewService get linkPreviewService => _linkPreviewService;
+
   /// Publish a comment (kind 1 event with 'e' tag referencing the post)
+  /// Automatically extracts URLs from content and adds 'r' tags (Nostr convention)
   Future<void> publishComment(String content) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
@@ -431,11 +439,15 @@ class PostDetailState with ChangeNotifier {
 
       final keyPair = NostrKeyPairs(private: privateKey);
 
-      // Create tags with 'e' tag referencing the post
+      // Extract URLs and generate 'r' tags (Nostr convention for URL references)
+      final urlTags = _linkPreviewService.generateUrlTags(content);
+
+      // Create tags with 'e' tag referencing the post and 'r' tags for URLs
       // Format: ['e', postId, relayUrl, 'reply']
       final createdAt = DateTime.now();
       final tags = await addClientTagsWithSignature([
         ['e', postId, '', 'reply'],
+        ...urlTags, // Add URL reference tags
       ], createdAt: createdAt);
 
       final nostrEvent = NostrEvent.fromPartialData(
@@ -468,6 +480,9 @@ class PostDetailState with ChangeNotifier {
       }
 
       debugPrint('Published comment to relay: ${eventModel.id}');
+      if (urlTags.isNotEmpty) {
+        debugPrint('Added ${urlTags.length} URL reference tag(s)');
+      }
     } catch (e) {
       debugPrint('Failed to publish comment: $e');
       rethrow;

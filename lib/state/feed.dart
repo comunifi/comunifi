@@ -13,6 +13,7 @@ import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
+import 'package:comunifi/services/link_preview/link_preview.dart';
 
 class FeedState with ChangeNotifier {
   // instantiate services here
@@ -497,7 +498,14 @@ class FeedState with ChangeNotifier {
     await _initialize();
   }
 
+  // Link preview service for URL extraction
+  final LinkPreviewService _linkPreviewService = LinkPreviewService();
+
+  /// Get the link preview service for widgets to use
+  LinkPreviewService get linkPreviewService => _linkPreviewService;
+
   /// Publish a simple text message (kind 1) to the Nostr relay
+  /// Automatically extracts URLs from content and adds 'r' tags (Nostr convention)
   Future<void> publishMessage(String content) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
@@ -515,9 +523,15 @@ class FeedState with ChangeNotifier {
       // Derive key pair from private key using dart_nostr
       final keyPair = NostrKeyPairs(private: privateKey);
 
-      // Create client tags with signature
+      // Extract URLs and generate 'r' tags (Nostr convention for URL references)
+      final urlTags = _linkPreviewService.generateUrlTags(content);
+
+      // Create client tags with signature, including URL tags
       final createdAt = DateTime.now();
-      final tags = await addClientTagsWithSignature([], createdAt: createdAt);
+      final tags = await addClientTagsWithSignature(
+        urlTags,
+        createdAt: createdAt,
+      );
 
       // Create and sign a NostrEvent using dart_nostr
       final nostrEvent = NostrEvent.fromPartialData(
@@ -543,6 +557,9 @@ class FeedState with ChangeNotifier {
       _nostrService!.publishEvent(eventModel.toJson());
 
       debugPrint('Published message to relay: ${eventModel.id}');
+      if (urlTags.isNotEmpty) {
+        debugPrint('Added ${urlTags.length} URL reference tag(s)');
+      }
     } catch (e) {
       debugPrint('Failed to publish message: $e');
       rethrow;

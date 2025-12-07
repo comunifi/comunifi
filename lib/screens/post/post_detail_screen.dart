@@ -1,10 +1,14 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/post_detail.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/widgets/heart_button.dart';
+import 'package:comunifi/widgets/link_preview.dart';
+import 'package:comunifi/services/link_preview/link_preview.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class PostDetailScreen extends StatefulWidget {
   final String postId;
@@ -368,7 +372,17 @@ class _PostItemContentState extends State<_PostItemContent> {
             ],
           ),
           const SizedBox(height: 8),
-          Text(widget.event.content, style: const TextStyle(fontSize: 15)),
+          _RichContentText(content: widget.event.content),
+          // Link previews
+          Builder(
+            builder: (context) {
+              final postDetailState = context.read<PostDetailState>();
+              return ContentLinkPreviews(
+                content: widget.event.content,
+                linkPreviewService: postDetailState.linkPreviewService,
+              );
+            },
+          ),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
@@ -547,7 +561,17 @@ class _CommentItemContentState extends State<_CommentItemContent> {
             ],
           ),
           const SizedBox(height: 8),
-          Text(widget.event.content, style: const TextStyle(fontSize: 15)),
+          _RichContentText(content: widget.event.content),
+          // Link previews for comments
+          Builder(
+            builder: (context) {
+              final postDetailState = context.read<PostDetailState>();
+              return ContentLinkPreviews(
+                content: widget.event.content,
+                linkPreviewService: postDetailState.linkPreviewService,
+              );
+            },
+          ),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
@@ -564,6 +588,95 @@ class _CommentItemContentState extends State<_CommentItemContent> {
         ],
       ),
     );
+  }
+}
+
+/// Widget that renders text content with clickable URLs
+class _RichContentText extends StatelessWidget {
+  final String content;
+
+  const _RichContentText({required this.content});
+
+  @override
+  Widget build(BuildContext context) {
+    final spans = _buildTextSpans(context);
+    return RichText(
+      text: TextSpan(
+        style: DefaultTextStyle.of(context).style.copyWith(fontSize: 15),
+        children: spans,
+      ),
+    );
+  }
+
+  List<InlineSpan> _buildTextSpans(BuildContext context) {
+    final spans = <InlineSpan>[];
+    final urlRegex = LinkPreviewService.urlRegex;
+    final matches = urlRegex.allMatches(content);
+
+    int lastEnd = 0;
+
+    for (final match in matches) {
+      // Add text before the URL
+      if (match.start > lastEnd) {
+        spans.add(TextSpan(
+          text: content.substring(lastEnd, match.start),
+        ));
+      }
+
+      // Add the URL as a clickable span
+      var url = match.group(0) ?? '';
+      if (url.startsWith('www.')) {
+        url = 'https://$url';
+      }
+      // Clean trailing punctuation
+      final cleanUrl = _cleanUrl(url);
+      final originalUrl = match.group(0) ?? '';
+      
+      spans.add(TextSpan(
+        text: originalUrl,
+        style: TextStyle(
+          color: CupertinoColors.systemBlue.resolveFrom(context),
+          decoration: TextDecoration.underline,
+        ),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () => _launchUrl(cleanUrl),
+      ));
+
+      lastEnd = match.end;
+    }
+
+    // Add remaining text after last URL
+    if (lastEnd < content.length) {
+      spans.add(TextSpan(
+        text: content.substring(lastEnd),
+      ));
+    }
+
+    // If no URLs found, just return the plain text
+    if (spans.isEmpty) {
+      spans.add(TextSpan(text: content));
+    }
+
+    return spans;
+  }
+
+  String _cleanUrl(String url) {
+    final trailingChars = ['.', ',', '!', '?', ')', ']', '}', ';', ':', '"', "'"];
+    while (url.isNotEmpty && trailingChars.contains(url[url.length - 1])) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url;
+  }
+
+  Future<void> _launchUrl(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri != null) {
+      try {
+        await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
+      } catch (e) {
+        debugPrint('Could not launch URL: $e');
+      }
+    }
   }
 }
 
