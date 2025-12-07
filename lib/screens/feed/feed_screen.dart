@@ -4,6 +4,7 @@ import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart';
+import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/invite_user_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
@@ -108,6 +109,23 @@ class _FeedScreenState extends State<FeedScreen> {
     } catch (e) {
       debugPrint('FeedScreen: Error ensuring user profile: $e');
     }
+  }
+
+  /// Get the display name for a group, preferring the name from relay announcements
+  String _getGroupDisplayName(GroupState groupState, MlsGroup? group) {
+    if (group == null) return 'Feed';
+
+    // First try to get the name from relay announcements (group name cache)
+    final groupIdHex = group.id.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    final announcementName = groupState.getGroupName(groupIdHex);
+    if (announcementName != null) {
+      return announcementName;
+    }
+
+    // Fallback to the MlsGroup name
+    return group.name;
   }
 
   @override
@@ -250,7 +268,7 @@ class _FeedScreenState extends State<FeedScreen> {
               Expanded(
                 child: CupertinoPageScaffold(
                   navigationBar: CupertinoNavigationBar(
-                    middle: Text(activeGroup?.name ?? 'Feed'),
+                    middle: Text(_getGroupDisplayName(groupState, activeGroup)),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -320,7 +338,7 @@ class _FeedScreenState extends State<FeedScreen> {
                   },
                   child: const Icon(CupertinoIcons.bars),
                 ),
-                middle: Text(activeGroup?.name ?? 'Feed'),
+                middle: Text(_getGroupDisplayName(groupState, activeGroup)),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [

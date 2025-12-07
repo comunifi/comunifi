@@ -1777,17 +1777,62 @@ class GroupState with ChangeNotifier {
       final groupIdHex = _groupIdToHex(group.id);
       _mlsGroups[groupIdHex] = group;
 
-      // Add to groups list
-      if (!_groups.any(
-        (g) => g.id.bytes.toString() == group.id.bytes.toString(),
-      )) {
-        _groups.insert(0, group);
+      // Try to get the proper group name from relay announcement
+      String? properGroupName = getGroupName(groupIdHex);
+      if (properGroupName == null) {
+        // Fetch group announcement from relay to get the name
+        try {
+          final announcements = await _nostrService!.requestPastEvents(
+            kind: kindGroupAnnouncement,
+            tags: [groupIdHex],
+            tagKey: 'g',
+            limit: 1,
+            useCache: false,
+          );
+          if (announcements.isNotEmpty) {
+            final announcement = _parseGroupAnnouncement(announcements.first);
+            if (announcement?.name != null) {
+              properGroupName = announcement!.name;
+              _groupNameCache[groupIdHex] = properGroupName!;
+            }
+          }
+        } catch (e) {
+          debugPrint('Failed to fetch group announcement for name: $e');
+        }
+      }
+
+      // Update group name if we found the proper name
+      if (properGroupName != null && properGroupName != group.name) {
+        await _mlsStorage!.saveGroupName(group.id, properGroupName);
+        // Reload the group with the correct name
+        final updatedGroup = await _mlsService!.loadGroup(group.id);
+        if (updatedGroup != null) {
+          _mlsGroups[groupIdHex] = updatedGroup;
+          // Replace in groups list
+          final index = _groups.indexWhere(
+            (g) => g.id.bytes.toString() == group.id.bytes.toString(),
+          );
+          if (index >= 0) {
+            _groups[index] = updatedGroup;
+          } else {
+            _groups.insert(0, updatedGroup);
+          }
+        }
+      } else {
+        // Add to groups list if not already there
+        if (!_groups.any(
+          (g) => g.id.bytes.toString() == group.id.bytes.toString(),
+        )) {
+          _groups.insert(0, group);
+        }
       }
 
       // Update UI
       safeNotifyListeners();
 
-      debugPrint('Successfully joined group ${group.name} (${groupIdHex})');
+      debugPrint(
+        'Successfully joined group ${properGroupName ?? group.name} ($groupIdHex)',
+      );
     } catch (e) {
       debugPrint('Failed to handle Welcome invitation: $e');
       rethrow;

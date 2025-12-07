@@ -502,9 +502,10 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                                     groupId != null &&
                                     activeGroupId == groupId;
 
+                                // Prefer announcement name (from relay) over MlsGroup name
                                 final groupName =
-                                    mlsGroup?.name ??
                                     announcement?.name ??
+                                    mlsGroup?.name ??
                                     'Unnamed Group';
                                 final groupAbout = announcement?.about;
                                 final groupIdHex = mlsGroup != null
