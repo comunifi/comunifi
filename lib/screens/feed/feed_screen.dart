@@ -235,6 +235,7 @@ class _FeedScreenState extends State<FeedScreen> {
                     // On wide screens, sidebars are persistent, so this is a no-op
                     // But we keep it for consistency with the sidebar widget
                   },
+                  showCloseButton: false,
                 ),
               ),
               // Main feed content
@@ -290,6 +291,7 @@ class _FeedScreenState extends State<FeedScreen> {
                     // On wide screens, sidebars are persistent, so this is a no-op
                     // But we keep it for consistency with the sidebar widget
                   },
+                  showCloseButton: false,
                 ),
               ),
             ],
