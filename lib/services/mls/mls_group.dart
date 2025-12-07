@@ -245,10 +245,17 @@ class MlsGroup {
         recipientPublicKey: add.hpkeInitKey,
         info: Uint8List.fromList(utf8.encode('mls-welcome')),
       );
-      final encryptedGroupSecrets = await encapResult.context.seal(
+      final sealedGroupSecrets = await encapResult.context.seal(
         plaintext: groupSecrets,
         aad: Uint8List(0),
       );
+      
+      // Prepend the HPKE enc (ephemeral public key, 32 bytes) to the sealed secrets
+      // This is required for the recipient to decrypt using setupBaseRecipient
+      final enc = encapResult.enc;
+      final encryptedGroupSecrets = Uint8List(enc.length + sealedGroupSecrets.length);
+      encryptedGroupSecrets.setRange(0, enc.length, enc);
+      encryptedGroupSecrets.setRange(enc.length, encryptedGroupSecrets.length, sealedGroupSecrets);
       
       // Encrypt group info (simplified - in production would use proper encryption)
       // For now, we'll encrypt it with the same HPKE context
@@ -540,18 +547,22 @@ class MlsGroup {
   }) async {
     final groupId = GroupId(welcome.groupId.bytes);
 
+    // Extract the HPKE enc (first 32 bytes) and ciphertext from encryptedGroupSecrets
+    // The sender prepends the 32-byte ephemeral public key to the sealed secrets
+    const encLength = 32; // X25519 public key is 32 bytes
+    final enc = welcome.encryptedGroupSecrets.sublist(0, encLength);
+    final sealedGroupSecrets = welcome.encryptedGroupSecrets.sublist(encLength);
+    
     // Decrypt group secrets using HPKE
     final hpkeContext = await cryptoProvider.hpke.setupBaseRecipient(
-      enc: welcome.encryptedGroupSecrets, // In production, extract 'enc' from encryptedGroupSecrets
+      enc: enc,
       recipientPrivateKey: hpkePrivateKey,
       info: Uint8List.fromList(utf8.encode('mls-welcome')),
     );
     
-    // For now, we'll decrypt the encryptedGroupSecrets directly
-    // In production, encryptedGroupSecrets would contain the 'enc' value separately
-    // Simplified: assume encryptedGroupSecrets is the full encrypted blob
+    // Decrypt the sealed group secrets
     final decryptedSecrets = await hpkeContext.open(
-      ciphertext: welcome.encryptedGroupSecrets,
+      ciphertext: sealedGroupSecrets,
       aad: Uint8List(0),
     );
     
