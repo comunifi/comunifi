@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
@@ -193,13 +195,17 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
         final allGroups = _buildGroupList(groupState);
         final isGlobalFeed = groupState.activeGroup == null;
 
+        // Extra top padding for macOS to account for hidden title bar
+        final isMacOS = !kIsWeb && Platform.isMacOS;
+        final topPadding = isMacOS ? 36.0 : 8.0;
+
         return SafeArea(
           child: Container(
             width: 68,
             color: CupertinoColors.systemBackground,
             child: Column(
               children: [
-                const SizedBox(height: 8),
+                SizedBox(height: topPadding),
                 // Create group button
                 Center(
                   child: GestureDetector(
