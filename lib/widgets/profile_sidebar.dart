@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
@@ -29,6 +31,12 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
   String? _userNostrPubkey;
   String? _userUsername;
   bool _skipNextUsernameLoad = false;
+
+  // Profile photo state
+  String? _currentProfilePictureUrl;
+  bool _isUploadingPhoto = false;
+  String? _uploadPhotoError;
+  final ImagePicker _imagePicker = ImagePicker();
 
   @override
   void initState() {
@@ -68,13 +76,70 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
       });
     }
 
-    // Load username
+    // Load username and profile picture
     if (pubkey != null && !_skipNextUsernameLoad) {
       final profile = await profileState.getProfile(pubkey);
       if (mounted) {
         setState(() {
           _userUsername = profile?.getUsername();
           _usernameController.text = profile?.getUsername() ?? '';
+          _currentProfilePictureUrl = profile?.picture;
+        });
+      }
+    }
+  }
+
+  Future<void> _pickAndUploadPhoto() async {
+    try {
+      // Pick image from gallery
+      final XFile? pickedFile = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 800,
+        maxHeight: 800,
+        imageQuality: 85,
+      );
+
+      if (pickedFile == null) {
+        return; // User cancelled
+      }
+
+      setState(() {
+        _isUploadingPhoto = true;
+        _uploadPhotoError = null;
+      });
+
+      // Read file bytes
+      final Uint8List fileBytes = await pickedFile.readAsBytes();
+      final String mimeType = pickedFile.mimeType ?? 'image/jpeg';
+
+      // Upload to user's own group
+      final groupState = context.read<GroupState>();
+      final imageUrl = await groupState.uploadMediaToOwnGroup(
+        fileBytes,
+        mimeType,
+      );
+
+      // Update profile with new picture URL
+      final profileState = context.read<ProfileState>();
+      final privateKey = await groupState.getNostrPrivateKey();
+
+      await profileState.updateProfilePicture(
+        pictureUrl: imageUrl,
+        pubkey: _userNostrPubkey,
+        privateKey: privateKey,
+      );
+
+      if (mounted) {
+        setState(() {
+          _currentProfilePictureUrl = imageUrl;
+          _isUploadingPhoto = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isUploadingPhoto = false;
+          _uploadPhotoError = e.toString();
         });
       }
     }
@@ -255,6 +320,141 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
             child: ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                // Profile photo section
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemGrey6,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      const Text(
+                        'Profile Photo',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      // Profile picture avatar
+                      GestureDetector(
+                        onTap: _isUploadingPhoto ? null : _pickAndUploadPhoto,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Container(
+                              width: 100,
+                              height: 100,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: CupertinoColors.systemGrey4,
+                                image: _currentProfilePictureUrl != null
+                                    ? DecorationImage(
+                                        image: NetworkImage(
+                                          _currentProfilePictureUrl!,
+                                        ),
+                                        fit: BoxFit.cover,
+                                      )
+                                    : null,
+                              ),
+                              child: _currentProfilePictureUrl == null
+                                  ? const Icon(
+                                      CupertinoIcons.person_fill,
+                                      size: 50,
+                                      color: CupertinoColors.systemGrey,
+                                    )
+                                  : null,
+                            ),
+                            if (_isUploadingPhoto)
+                              Container(
+                                width: 100,
+                                height: 100,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: CupertinoColors.black.withOpacity(0.5),
+                                ),
+                                child: const CupertinoActivityIndicator(
+                                  color: CupertinoColors.white,
+                                ),
+                              ),
+                            if (!_isUploadingPhoto)
+                              Positioned(
+                                bottom: 0,
+                                right: 0,
+                                child: Container(
+                                  width: 32,
+                                  height: 32,
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: CupertinoColors.activeBlue,
+                                  ),
+                                  child: const Icon(
+                                    CupertinoIcons.camera_fill,
+                                    size: 16,
+                                    color: CupertinoColors.white,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _isUploadingPhoto ? 'Uploading...' : 'Tap to change',
+                        style: const TextStyle(
+                          color: CupertinoColors.secondaryLabel,
+                          fontSize: 13,
+                        ),
+                      ),
+                      if (_uploadPhotoError != null) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemRed.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                CupertinoIcons.exclamationmark_triangle,
+                                color: CupertinoColors.systemRed,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _uploadPhotoError!,
+                                  style: const TextStyle(
+                                    color: CupertinoColors.systemRed,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ),
+                              CupertinoButton(
+                                padding: EdgeInsets.zero,
+                                minSize: 0,
+                                onPressed: () {
+                                  setState(() {
+                                    _uploadPhotoError = null;
+                                  });
+                                },
+                                child: const Icon(
+                                  CupertinoIcons.xmark_circle_fill,
+                                  color: CupertinoColors.systemRed,
+                                  size: 18,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
                 // Username editing section
                 Container(
                   padding: const EdgeInsets.all(16),

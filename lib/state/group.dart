@@ -67,7 +67,6 @@ class GroupState with ChangeNotifier {
   AppDBService? _eventDbService; // Separate DB for Nostr events
   NostrEventTable? _eventTable;
   MlsGroup? _keysGroup;
-  bool _wasNewNostrKeyGenerated = false;
 
   // Cached HPKE key pair derived from Nostr private key
   // This is used for MLS group invitations
@@ -171,11 +170,12 @@ class GroupState with ChangeNotifier {
           // Ensure locally cached key is synced to relay
           await _ensureKeyIsSyncedToRelay();
 
-          _loadSavedGroups();
+          // Load saved groups first (must complete before checking for personal group)
+          await _loadSavedGroups();
           await _startListeningForGroupEvents();
           // Sync group announcements to local DB
           _syncGroupAnnouncementsToDB();
-          // Create personal group if new key was generated
+          // Ensure user has their own personal group
           _ensurePersonalGroup();
           // Try to ensure user profile if callback is set
           _tryEnsureProfile();
@@ -312,7 +312,6 @@ class GroupState with ChangeNotifier {
       await _generateAndPublishNostrKey(groupIdHex);
 
       _needsNostrKeyRecovery = false;
-      _wasNewNostrKeyGenerated = true;
     } catch (e) {
       debugPrint('Failed to recover or generate Nostr key: $e');
     }
@@ -831,6 +830,10 @@ class GroupState with ChangeNotifier {
   List<GroupAnnouncement> _discoveredGroups = [];
   bool _isLoadingGroups = false;
 
+  // All group messages across all groups (persists across group switches)
+  // Used for showing group messages in the main unified feed
+  final List<NostrEventModel> _allDecryptedMessages = [];
+
   // Hashtag filtering
   String? _hashtagFilter;
 
@@ -865,8 +868,13 @@ class GroupState with ChangeNotifier {
     }).toList();
   }
 
-  /// Get all group messages (unfiltered)
+  /// Get all group messages (unfiltered) for active group
   List<NostrEventModel> get allGroupMessages => _groupMessages;
+
+  /// Get all decrypted messages across ALL groups (for unified main feed)
+  /// These persist across group switches
+  List<NostrEventModel> get allDecryptedMessages =>
+      List.unmodifiable(_allDecryptedMessages);
 
   /// Set hashtag filter
   void setHashtagFilter(String? hashtag) {
@@ -1148,6 +1156,15 @@ class GroupState with ChangeNotifier {
 
       _groupMessages = allEvents.values.toList();
 
+      // Also add to unified messages list (for main feed view)
+      for (final event in _groupMessages) {
+        if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
+          _allDecryptedMessages.add(event);
+        }
+      }
+      // Sort unified list by date (newest first)
+      _allDecryptedMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
       debugPrint(
         'Total ${_groupMessages.length} messages for group $groupIdHex',
       );
@@ -1251,6 +1268,10 @@ class GroupState with ChangeNotifier {
               );
               if (hasGroupTag && !_groupMessages.any((e) => e.id == event.id)) {
                 _groupMessages.insert(0, event);
+                // Also add to unified messages list (for main feed view)
+                if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
+                  _allDecryptedMessages.insert(0, event);
+                }
                 safeNotifyListeners();
               }
             },
@@ -1356,6 +1377,10 @@ class GroupState with ChangeNotifier {
 
       // Add to local messages immediately (the decrypted version)
       _groupMessages.insert(0, eventModel);
+      // Also add to unified messages list (for main feed view)
+      if (!_allDecryptedMessages.any((e) => e.id == eventModel.id)) {
+        _allDecryptedMessages.insert(0, eventModel);
+      }
       safeNotifyListeners();
 
       debugPrint(
@@ -1390,6 +1415,74 @@ class GroupState with ChangeNotifier {
 
     final keyPair = NostrKeyPairs(private: privateKey);
     final groupIdHex = _groupIdToHex(_activeGroup!.id);
+
+    final result = await _mediaUploadService.upload(
+      fileBytes: fileBytes,
+      mimeType: mimeType,
+      groupId: groupIdHex,
+      keyPairs: keyPair,
+    );
+
+    return result.url;
+  }
+
+  /// Upload media to the user's own (personal) group
+  ///
+  /// Uses the Blossom protocol with the user's personal group ID.
+  /// This is useful for uploading profile photos and other personal media.
+  Future<String> uploadMediaToOwnGroup(
+    Uint8List fileBytes,
+    String mimeType,
+  ) async {
+    final privateKey = await getNostrPrivateKey();
+    if (privateKey == null || privateKey.isEmpty) {
+      throw Exception(
+        'No Nostr key found. Please ensure keys are initialized.',
+      );
+    }
+
+    final pubkey = await getNostrPublicKey();
+    if (pubkey == null) {
+      throw Exception('No pubkey available');
+    }
+
+    // Find the user's personal group (one they created)
+    MlsGroup? personalGroup;
+    for (final group in _groups) {
+      final groupIdHex = _groupIdToHex(group.id);
+      // Check if this group was created by the user
+      final announcement = _discoveredGroups.firstWhere(
+        (a) => a.mlsGroupId == groupIdHex && a.pubkey == pubkey,
+        orElse: () => GroupAnnouncement(
+          eventId: '',
+          pubkey: '',
+          createdAt: DateTime.now(),
+        ),
+      );
+      if (announcement.pubkey == pubkey) {
+        personalGroup = group;
+        break;
+      }
+    }
+
+    // Fallback: use the first group named "Personal" or any group the user is in
+    if (personalGroup == null && _groups.isNotEmpty) {
+      personalGroup = _groups.firstWhere(
+        (g) => g.name.toLowerCase() == 'personal',
+        orElse: () => _groups.first,
+      );
+    }
+
+    if (personalGroup == null) {
+      throw Exception('No personal group found. Please create a group first.');
+    }
+
+    final keyPair = NostrKeyPairs(private: privateKey);
+    final groupIdHex = _groupIdToHex(personalGroup.id);
+
+    debugPrint(
+      'Uploading to personal group: ${personalGroup.name} ($groupIdHex)',
+    );
 
     final result = await _mediaUploadService.upload(
       fileBytes: fileBytes,
@@ -2081,13 +2174,15 @@ class GroupState with ChangeNotifier {
   }
 
   /// Ensure a personal MLS group exists for the user's Nostr key
-  /// This is called after connecting to the relay when a new key was generated
+  /// This is called after connecting to the relay to ensure every user
+  /// has their own personal group that they are a member of.
+  ///
+  /// The method:
+  /// 1. Checks if the user already has a local MLS group they created
+  /// 2. If not found locally, checks the relay for groups created by this user
+  /// 3. If a relay group exists but user isn't in it locally, attempts to join it
+  /// 4. If no personal group exists anywhere, creates a new one
   Future<void> _ensurePersonalGroup() async {
-    // Only create personal group if a new key was generated
-    if (!_wasNewNostrKeyGenerated) {
-      return;
-    }
-
     if (!_isConnected || _nostrService == null || _mlsService == null) {
       return;
     }
@@ -2096,47 +2191,89 @@ class GroupState with ChangeNotifier {
       // Get user's pubkey
       final pubkey = await getNostrPublicKey();
       if (pubkey == null) {
-        debugPrint('No pubkey available, skipping personal group creation');
+        debugPrint('No pubkey available, skipping personal group check');
         return;
       }
 
-      // Check if a personal group already exists by looking for group announcements
-      // with our pubkey
+      debugPrint(
+        'Ensuring personal group for pubkey: ${pubkey.substring(0, 8)}...',
+      );
+
+      // Step 1: Check if we have any local MLS groups
+      // The user is a member of all groups in _groups since they're loaded from local MLS storage
+      if (_groups.isNotEmpty) {
+        // Check if any local group was created by us (check relay announcements)
+        for (final group in _groups) {
+          final groupIdHex = _groupIdToHex(group.id);
+          // Look up the group announcement to see who created it
+          final announcement = _discoveredGroups.firstWhere(
+            (a) => a.mlsGroupId == groupIdHex,
+            orElse: () => GroupAnnouncement(
+              eventId: '',
+              pubkey: '',
+              createdAt: DateTime.now(),
+            ),
+          );
+          if (announcement.pubkey == pubkey) {
+            debugPrint(
+              'User already has their own group: ${group.name} ($groupIdHex)',
+            );
+            return;
+          }
+        }
+
+        // Also check if any local group is named "Personal" (for backwards compatibility)
+        final hasPersonalNamedGroup = _groups.any((group) {
+          final name = group.name.toLowerCase();
+          return name == 'personal' || name == 'my group';
+        });
+        if (hasPersonalNamedGroup) {
+          debugPrint('User has a local group named Personal');
+          return;
+        }
+      }
+
+      // Step 2: Check relay for groups created by this user
       final existingGroups = await fetchGroupsFromRelay(
         limit: 1000,
         useCache: false,
       );
-      final hasPersonalGroup = existingGroups.any(
-        (announcement) => announcement.pubkey == pubkey,
-      );
 
-      if (hasPersonalGroup) {
-        debugPrint('Personal group already exists for pubkey: $pubkey');
-        _wasNewNostrKeyGenerated = false; // Reset flag
-        return;
+      final userOwnedGroups = existingGroups
+          .where((announcement) => announcement.pubkey == pubkey)
+          .toList();
+
+      if (userOwnedGroups.isNotEmpty) {
+        // User has created a group on the relay but doesn't have it locally
+        // This can happen if they're on a new device or cleared local storage
+        final ownedGroup = userOwnedGroups.first;
+        debugPrint(
+          'Found user-owned group on relay: ${ownedGroup.name ?? "unnamed"} (${ownedGroup.mlsGroupId})',
+        );
+
+        // Check if we already have this group locally
+        final alreadyHaveLocally = _groups.any((g) {
+          final idHex = _groupIdToHex(g.id);
+          return idHex == ownedGroup.mlsGroupId;
+        });
+
+        if (alreadyHaveLocally) {
+          debugPrint('User already has their owned group locally');
+          return;
+        }
+
+        // User created a group but doesn't have it locally
+        // Since they are the creator, they should recreate it with the same ID
+        // However, MLS groups can't be "rejoined" without a Welcome message
+        // So we'll create a new personal group instead
+        debugPrint(
+          'User owns a group on relay but cannot rejoin without Welcome. Creating new personal group.',
+        );
       }
 
-      // Check if we have a local group that might be the personal group
-      // (in case it was created but not yet published)
-      final hasLocalPersonalGroup = _groups.any((group) {
-        // Check if group name suggests it's personal
-        final name = group.name.toLowerCase();
-        return name == 'personal' ||
-            name == 'my group' ||
-            name == pubkey.substring(0, 8);
-      });
-
-      if (hasLocalPersonalGroup) {
-        debugPrint('Local personal group already exists');
-        _wasNewNostrKeyGenerated = false; // Reset flag
-        return;
-      }
-
-      // Create personal group
+      // Step 3: No personal group exists - create one
       debugPrint('Creating personal MLS group for pubkey: $pubkey');
       await createGroup('Personal', about: 'My personal group');
-
-      _wasNewNostrKeyGenerated = false; // Reset flag
       debugPrint('Personal group created successfully');
     } catch (e) {
       debugPrint('Failed to ensure personal group: $e');

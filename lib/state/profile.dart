@@ -787,6 +787,119 @@ class ProfileState with ChangeNotifier {
     }
   }
 
+  /// Update the user's profile picture
+  /// [pictureUrl] - The URL of the new profile picture
+  /// [pubkey] - The user's pubkey (optional, will try to get from storage)
+  /// [privateKey] - The user's private key (optional, will try to get from storage)
+  Future<void> updateProfilePicture({
+    required String pictureUrl,
+    String? pubkey,
+    String? privateKey,
+  }) async {
+    if (!_isConnected || _nostrService == null || _profileService == null) {
+      throw Exception(
+        'Not connected to relay or profile service not initialized',
+      );
+    }
+
+    try {
+      // Use provided keys or try to get from our own storage
+      final finalPubkey = pubkey ?? await getNostrPublicKey();
+      if (finalPubkey == null) {
+        throw Exception('No pubkey available');
+      }
+
+      // Use provided private key or try to get from our own storage
+      final finalPrivateKey = privateKey ?? await _getNostrPrivateKey();
+      if (finalPrivateKey == null) {
+        throw Exception('No private key available');
+      }
+
+      // Get existing profile to preserve other fields
+      final existingProfile = await _profileService!.getProfile(finalPubkey);
+      final existingName = existingProfile?.name;
+      final existingDisplayName = existingProfile?.displayName;
+      final existingAbout = existingProfile?.about;
+      final existingBanner = existingProfile?.banner;
+      final existingWebsite = existingProfile?.website;
+      final existingNip05 = existingProfile?.nip05;
+      final existingMlsHpkePublicKey = existingProfile?.mlsHpkePublicKey;
+
+      final keyPair = NostrKeyPairs(private: finalPrivateKey);
+
+      // Create profile JSON with new picture, preserving other fields
+      final profileData = <String, dynamic>{'picture': pictureUrl};
+
+      if (existingName != null) {
+        profileData['name'] = existingName;
+      }
+      if (existingDisplayName != null) {
+        profileData['display_name'] = existingDisplayName;
+      }
+      if (existingAbout != null) {
+        profileData['about'] = existingAbout;
+      }
+      if (existingBanner != null) {
+        profileData['banner'] = existingBanner;
+      }
+      if (existingWebsite != null) {
+        profileData['website'] = existingWebsite;
+      }
+      if (existingNip05 != null) {
+        profileData['nip05'] = existingNip05;
+      }
+      if (existingMlsHpkePublicKey != null) {
+        profileData['mls_hpke_public_key'] = existingMlsHpkePublicKey;
+      }
+
+      final profileJson = jsonEncode(profileData);
+
+      // Create and sign the profile event
+      final updateCreatedAt = DateTime.now();
+      final username = existingName ?? existingDisplayName ?? '';
+      final tags = await addClientTagsWithSignature([
+        if (username.isNotEmpty) ['u', username.toLowerCase()],
+      ], createdAt: updateCreatedAt);
+
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 0, // Kind 0 is profile metadata
+        content: profileJson,
+        keyPairs: keyPair,
+        tags: tags,
+        createdAt: updateCreatedAt,
+      );
+
+      // Convert to our model format
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      // Publish to the relay
+      await _nostrService!.publishEvent(eventModel.toJson());
+
+      // Immediately cache the event in the database so it persists after app restart
+      await _nostrService!.cacheEvent(eventModel);
+
+      debugPrint(
+        'Published and cached updated profile event with picture: $pictureUrl',
+      );
+
+      // Update our cached profile
+      final newProfile = ProfileData.fromEvent(eventModel);
+      _profiles[finalPubkey] = newProfile;
+      safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Failed to update profile picture: $e');
+      rethrow;
+    }
+  }
+
   /// Update the user's profile with a new username
   /// [username] - The new username
   /// [pubkey] - The user's pubkey (optional, will try to get from storage)
