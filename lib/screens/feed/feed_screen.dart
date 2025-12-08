@@ -1171,6 +1171,15 @@ class _EventItemContentWidget extends StatelessWidget {
         ? groupState.getGroupName(groupIdHex)
         : null;
 
+    // Get group announcement for the picture
+    final groupAnnouncement = groupIdHex != null
+        ? groupState.discoveredGroups.cast<GroupAnnouncement?>().firstWhere(
+            (a) => a?.mlsGroupId == groupIdHex,
+            orElse: () => null,
+          )
+        : null;
+    final groupPicture = groupAnnouncement?.picture;
+
     // Calculate max width based on feed area (screen width minus sidebars on wide screens)
     final screenWidth = MediaQuery.of(context).size.width;
     final isWideScreen = screenWidth > wideScreenBreakpoint;
@@ -1178,43 +1187,37 @@ class _EventItemContentWidget extends StatelessWidget {
         ? screenWidth - (sidebarWidth * 2)
         : screenWidth;
 
+    final hasGroupFrame = groupName != null && groupIdHex != null;
+
     return Align(
       alignment: Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxContentWidth),
         child: Container(
-          padding: const EdgeInsets.all(16.0),
-          decoration: const BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
-            ),
-          ),
+          margin: hasGroupFrame
+              ? const EdgeInsets.symmetric(horizontal: 8, vertical: 4)
+              : EdgeInsets.zero,
+          decoration: hasGroupFrame
+              ? BoxDecoration(
+                  border: Border.all(
+                    color: CupertinoColors.systemIndigo.withOpacity(0.3),
+                    width: 1,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                )
+              : const BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: CupertinoColors.separator,
+                      width: 0.5,
+                    ),
+                  ),
+                ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  _AuthorAvatar(pubkey: event.pubkey),
-                  const SizedBox(width: 8),
-                  Text(
-                    displayName,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _formatDate(event.createdAt),
-                    style: const TextStyle(
-                      color: CupertinoColors.secondaryLabel,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-              if (groupName != null && groupIdHex != null) ...[
-                const SizedBox(height: 2),
+              // Group frame header (when showing group)
+              if (hasGroupFrame)
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () {
@@ -1232,55 +1235,133 @@ class _EventItemContentWidget extends StatelessWidget {
                       groupState.setActiveGroup(matchingGroup);
                     }
                   },
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6.0),
-                    child: Text(
-                      groupName,
-                      style: const TextStyle(
-                        color: CupertinoColors.systemBlue,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemIndigo.withOpacity(0.08),
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(11),
                       ),
+                    ),
+                    child: Row(
+                      children: [
+                        // Group photo
+                        Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: CupertinoColors.systemGrey4,
+                            image: groupPicture != null
+                                ? DecorationImage(
+                                    image: NetworkImage(groupPicture),
+                                    fit: BoxFit.cover,
+                                  )
+                                : null,
+                          ),
+                          child: groupPicture == null
+                              ? const Icon(
+                                  CupertinoIcons.person_2_fill,
+                                  size: 12,
+                                  color: CupertinoColors.systemGrey,
+                                )
+                              : null,
+                        ),
+                        const SizedBox(width: 8),
+                        // Group name
+                        Expanded(
+                          child: Text(
+                            groupName,
+                            style: TextStyle(
+                              color: CupertinoColors.systemIndigo.resolveFrom(
+                                context,
+                              ),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        // Arrow indicator
+                        Icon(
+                          CupertinoIcons.chevron_right,
+                          size: 14,
+                          color: CupertinoColors.systemIndigo.withOpacity(0.6),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-              ],
-              const SizedBox(height: 8),
-              _RichContentText(
-                content: event.content,
-                onHashtagTap: onHashtagTap,
-                onMentionTap: onMentionTap,
-              ),
-              // Display attached images (NIP-92 imeta)
-              if (event.hasImages) _EventImages(imageUrls: event.imageUrls),
-              // Link previews
-              ContentLinkPreviews(
-                content: event.content,
-                linkPreviewService: groupState.linkPreviewService,
-              ),
-              // Quoted post preview (if this is a quote post)
-              if (event.isQuotePost && event.quotedEventId != null)
-                QuotedPostPreview(quotedEventId: event.quotedEventId!),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  HeartButton(
-                    eventId: event.id,
-                    reactionCount: reactionCount,
-                    isLoadingCount: isLoadingReactionCount || isReacting,
-                    isReacted: hasUserReacted,
-                    onPressed: isReacting ? () {} : onReactionPressed,
-                  ),
-                  const SizedBox(width: 16),
-                  QuoteButton(event: event, onPressed: onQuotePressed),
-                  const SizedBox(width: 16),
-                  CommentBubble(
-                    eventId: event.id,
-                    commentCount: commentCount,
-                    isLoadingCount: isLoadingCount,
-                  ),
-                ],
+              // Main post content
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        _AuthorAvatar(pubkey: event.pubkey),
+                        const SizedBox(width: 8),
+                        Text(
+                          displayName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _formatDate(event.createdAt),
+                          style: const TextStyle(
+                            color: CupertinoColors.secondaryLabel,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    _RichContentText(
+                      content: event.content,
+                      onHashtagTap: onHashtagTap,
+                      onMentionTap: onMentionTap,
+                    ),
+                    // Display attached images (NIP-92 imeta)
+                    if (event.hasImages)
+                      _EventImages(imageUrls: event.imageUrls),
+                    // Link previews
+                    ContentLinkPreviews(
+                      content: event.content,
+                      linkPreviewService: groupState.linkPreviewService,
+                    ),
+                    // Quoted post preview (if this is a quote post)
+                    if (event.isQuotePost && event.quotedEventId != null)
+                      QuotedPostPreview(quotedEventId: event.quotedEventId!),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        HeartButton(
+                          eventId: event.id,
+                          reactionCount: reactionCount,
+                          isLoadingCount: isLoadingReactionCount || isReacting,
+                          isReacted: hasUserReacted,
+                          onPressed: isReacting ? () {} : onReactionPressed,
+                        ),
+                        const SizedBox(width: 16),
+                        QuoteButton(event: event, onPressed: onQuotePressed),
+                        const SizedBox(width: 16),
+                        CommentBubble(
+                          eventId: event.id,
+                          commentCount: commentCount,
+                          isLoadingCount: isLoadingCount,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
