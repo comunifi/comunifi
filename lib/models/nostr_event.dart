@@ -376,6 +376,70 @@ class NostrEventModel {
   /// Check if this event has images attached
   bool get hasImages => imageUrls.isNotEmpty;
 
+  /// Extract hashtags from 't' tags (NIP-12)
+  /// Returns a list of hashtags (lowercase, without the # symbol)
+  /// Per NIP-12, hashtags in 't' tags should be lowercase
+  List<String> get hashtags {
+    final result = <String>[];
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 't' && tag.length > 1) {
+        // Normalize to lowercase for consistent comparison
+        result.add(tag[1].toLowerCase());
+      }
+    }
+    return result;
+  }
+
+  /// Check if this event has any hashtags
+  bool get hasHashtags => hashtags.isNotEmpty;
+
+  /// Extract mentioned pubkeys from 'p' tags
+  /// Returns a list of pubkeys that were mentioned
+  List<String> get mentionedPubkeys {
+    final result = <String>[];
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'p' && tag.length > 1) {
+        result.add(tag[1]);
+      }
+    }
+    return result;
+  }
+
+  /// Check if this event has any mentions
+  bool get hasMentions => mentionedPubkeys.isNotEmpty;
+
+  /// Regex for extracting hashtags from content
+  /// Matches #hashtag (alphanumeric and underscore, at least 1 char)
+  static final RegExp hashtagRegex = RegExp(r'#(\w+)');
+
+  /// Regex for extracting mentions from content
+  /// Matches @username (alphanumeric, underscore, 1-30 chars)
+  /// Usernames must start with a letter and can contain letters, numbers, underscores
+  static final RegExp mentionRegex = RegExp(r'@([a-zA-Z][a-zA-Z0-9_]{0,29})');
+
+  /// Extract hashtags from content text (NIP-12)
+  /// Returns list of hashtags (lowercase, without #)
+  /// Per NIP-12, hashtags are always lowercase
+  static List<String> extractHashtagsFromContent(String content) {
+    final matches = hashtagRegex.allMatches(content);
+    return matches.map((m) => m.group(1)!.toLowerCase()).toSet().toList();
+  }
+
+  /// Extract mentioned usernames from content text
+  /// Returns list of usernames (without @)
+  static List<String> extractMentionsFromContent(String content) {
+    final matches = mentionRegex.allMatches(content);
+    return matches.map((m) => m.group(1)!).toSet().toList();
+  }
+
+  /// Generate 't' tags from hashtags in content (NIP-12)
+  /// Creates tags in format ['t', '<lowercase_hashtag>']
+  /// Per NIP-12: hashtags are stored lowercase without the # symbol
+  static List<List<String>> generateHashtagTags(String content) {
+    final hashtags = extractHashtagsFromContent(content);
+    return hashtags.map((tag) => ['t', tag]).toList();
+  }
+
   @override
   String toString() {
     return 'NostrEventModel(id: $id, pubkey: $pubkey, kind: $kind, content: $content, createdAt: $createdAt)';

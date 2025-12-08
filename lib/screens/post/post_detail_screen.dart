@@ -11,6 +11,7 @@ import 'package:comunifi/widgets/heart_button.dart';
 import 'package:comunifi/widgets/quote_button.dart';
 import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
+import 'package:comunifi/widgets/dismissible_image_viewer.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -864,47 +865,7 @@ class _EventImages extends StatelessWidget {
   }
 
   void _showFullImage(BuildContext context, String url) {
-    showCupertinoDialog(
-      context: context,
-      builder: (context) => CupertinoPageScaffold(
-        backgroundColor: CupertinoColors.black,
-        navigationBar: CupertinoNavigationBar(
-          backgroundColor: CupertinoColors.black.withValues(alpha: 0.8),
-          leading: CupertinoButton(
-            padding: EdgeInsets.zero,
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Icon(
-              CupertinoIcons.xmark,
-              color: CupertinoColors.white,
-            ),
-          ),
-          middle: const Text(
-            'Image',
-            style: TextStyle(color: CupertinoColors.white),
-          ),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 4.0,
-              child: Image.network(
-                url,
-                fit: BoxFit.contain,
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
-                  return const Center(
-                    child: CupertinoActivityIndicator(
-                      color: CupertinoColors.white,
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+    DismissibleImageViewer.show(context, url);
   }
 }
 

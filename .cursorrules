@@ -55,3 +55,7 @@ db
 - abstract class for a db table lib/services/db/db.dart
 - we instantiate the db and include the tables inside lib/services/db/app/db.dart
 - we import and use table individually
+
+nostr
+- follow NIPs as closely as possible: https://github.com/nostr-protocol/nips/blob/master/README.md
+- make sure we do things the nostr way

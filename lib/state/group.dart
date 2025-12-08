@@ -831,14 +831,54 @@ class GroupState with ChangeNotifier {
   List<GroupAnnouncement> _discoveredGroups = [];
   bool _isLoadingGroups = false;
 
+  // Hashtag filtering
+  String? _hashtagFilter;
+
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
   List<MlsGroup> get groups => _groups;
   MlsGroup? get activeGroup => _activeGroup;
-  List<NostrEventModel> get groupMessages => _groupMessages;
   List<GroupAnnouncement> get discoveredGroups => _discoveredGroups;
   bool get isLoadingGroups => _isLoadingGroups;
+
+  /// Current hashtag filter (null = no filter)
+  String? get hashtagFilter => _hashtagFilter;
+
+  /// Get group messages, optionally filtered by hashtag
+  List<NostrEventModel> get groupMessages {
+    if (_hashtagFilter == null) {
+      return _groupMessages;
+    }
+    // Filter messages that have the hashtag (check both tags and content)
+    final filterLower = _hashtagFilter!.toLowerCase();
+    return _groupMessages.where((event) {
+      // Check 't' tags first
+      if (event.hashtags.contains(filterLower)) {
+        return true;
+      }
+      // Also check content for #hashtag pattern
+      final contentHashtags = NostrEventModel.extractHashtagsFromContent(
+        event.content,
+      );
+      return contentHashtags.contains(filterLower);
+    }).toList();
+  }
+
+  /// Get all group messages (unfiltered)
+  List<NostrEventModel> get allGroupMessages => _groupMessages;
+
+  /// Set hashtag filter
+  void setHashtagFilter(String? hashtag) {
+    _hashtagFilter = hashtag?.toLowerCase();
+    safeNotifyListeners();
+  }
+
+  /// Clear hashtag filter
+  void clearHashtagFilter() {
+    _hashtagFilter = null;
+    safeNotifyListeners();
+  }
 
   /// Resolve MLS group by hex ID (for NostrService)
   Future<MlsGroup?> _resolveMlsGroup(String groupIdHex) async {
@@ -1029,6 +1069,7 @@ class GroupState with ChangeNotifier {
   Future<void> setActiveGroup(MlsGroup? group) async {
     _activeGroup = group;
     _groupMessages = [];
+    _hashtagFilter = null; // Clear hashtag filter when switching groups
 
     if (group != null) {
       // Load messages for this group

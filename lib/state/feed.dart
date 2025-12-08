@@ -305,12 +305,52 @@ class FeedState with ChangeNotifier {
   DateTime? _oldestEventTime;
   static const int _pageSize = 20;
 
+  // Hashtag filtering
+  String? _hashtagFilter;
+
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   bool get isLoadingMore => _isLoadingMore;
   String? get errorMessage => _errorMessage;
-  List<NostrEventModel> get events => _events;
   bool get hasMoreEvents => _oldestEventTime != null;
+
+  /// Current hashtag filter (null = no filter)
+  String? get hashtagFilter => _hashtagFilter;
+
+  /// Get events, optionally filtered by hashtag
+  List<NostrEventModel> get events {
+    if (_hashtagFilter == null) {
+      return _events;
+    }
+    // Filter events that have the hashtag (check both tags and content)
+    final filterLower = _hashtagFilter!.toLowerCase();
+    return _events.where((event) {
+      // Check 't' tags first
+      if (event.hashtags.contains(filterLower)) {
+        return true;
+      }
+      // Also check content for #hashtag pattern
+      final contentHashtags = NostrEventModel.extractHashtagsFromContent(
+        event.content,
+      );
+      return contentHashtags.contains(filterLower);
+    }).toList();
+  }
+
+  /// Get all events (unfiltered) - useful for checking total count
+  List<NostrEventModel> get allEvents => _events;
+
+  /// Set hashtag filter
+  void setHashtagFilter(String? hashtag) {
+    _hashtagFilter = hashtag?.toLowerCase();
+    safeNotifyListeners();
+  }
+
+  /// Clear hashtag filter
+  void clearHashtagFilter() {
+    _hashtagFilter = null;
+    safeNotifyListeners();
+  }
 
   // state methods here
   Future<void> _loadInitialEvents() async {
@@ -536,7 +576,14 @@ class FeedState with ChangeNotifier {
 
   /// Publish a simple text message (kind 1) to the Nostr relay
   /// Automatically extracts URLs from content and adds 'r' tags (Nostr convention)
-  Future<void> publishMessage(String content) async {
+  /// Automatically extracts hashtags and adds 't' tags (NIP-12)
+  ///
+  /// [resolvedMentions] - Map of username -> pubkey for mentions that were resolved
+  /// Pass this if you've already resolved @username mentions to pubkeys
+  Future<void> publishMessage(
+    String content, {
+    Map<String, String>? resolvedMentions,
+  }) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
     }
@@ -556,10 +603,24 @@ class FeedState with ChangeNotifier {
       // Extract URLs and generate 'r' tags (Nostr convention for URL references)
       final urlTags = _linkPreviewService.generateUrlTags(content);
 
-      // Create client tags with signature, including URL tags
+      // Extract hashtags and generate 't' tags (NIP-12)
+      final hashtagTags = NostrEventModel.generateHashtagTags(content);
+
+      // Generate 'p' tags from resolved mentions
+      final mentionTags = <List<String>>[];
+      if (resolvedMentions != null && resolvedMentions.isNotEmpty) {
+        for (final entry in resolvedMentions.entries) {
+          mentionTags.add(['p', entry.value]); // pubkey
+        }
+      }
+
+      // Combine all tags: URL tags, hashtag tags, mention tags
+      final allTags = [...urlTags, ...hashtagTags, ...mentionTags];
+
+      // Create client tags with signature, including all extracted tags
       final createdAt = DateTime.now();
       final tags = await addClientTagsWithSignature(
-        urlTags,
+        allTags,
         createdAt: createdAt,
       );
 
@@ -590,10 +651,40 @@ class FeedState with ChangeNotifier {
       if (urlTags.isNotEmpty) {
         debugPrint('Added ${urlTags.length} URL reference tag(s)');
       }
+      if (hashtagTags.isNotEmpty) {
+        debugPrint(
+          'Added ${hashtagTags.length} hashtag tag(s): ${hashtagTags.map((t) => t[1]).join(', ')}',
+        );
+      }
+      if (mentionTags.isNotEmpty) {
+        debugPrint(
+          'Added ${mentionTags.length} mention tag(s): ${resolvedMentions?.keys.join(', ')}',
+        );
+      }
     } catch (e) {
       debugPrint('Failed to publish message: $e');
       rethrow;
     }
+  }
+
+  /// Resolve usernames to pubkeys for mentions
+  /// Returns a map of username -> pubkey for found users
+  /// Uses ProfileState.searchByUsername for resolution
+  static Future<Map<String, String>> resolveMentions(
+    String content,
+    Future<String?> Function(String username) searchByUsername,
+  ) async {
+    final usernames = NostrEventModel.extractMentionsFromContent(content);
+    final resolved = <String, String>{};
+
+    for (final username in usernames) {
+      final pubkey = await searchByUsername(username);
+      if (pubkey != null) {
+        resolved[username] = pubkey;
+      }
+    }
+
+    return resolved;
   }
 
   /// Get the stored Nostr private key from shared secure storage
@@ -868,10 +959,14 @@ class FeedState with ChangeNotifier {
   /// Publish a quote post (kind 1 with 'q' tag referencing another post)
   /// This creates a new post that quotes/references another post
   /// The quoted post will be displayed as a preview below the new content
+  /// Automatically extracts hashtags from content
+  ///
+  /// [resolvedMentions] - Map of username -> pubkey for mentions that were resolved
   Future<void> publishQuotePost(
     String content,
-    NostrEventModel quotedEvent,
-  ) async {
+    NostrEventModel quotedEvent, {
+    Map<String, String>? resolvedMentions,
+  }) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
     }
@@ -891,12 +986,25 @@ class FeedState with ChangeNotifier {
       // Extract URLs and generate 'r' tags (Nostr convention for URL references)
       final urlTags = _linkPreviewService.generateUrlTags(content);
 
+      // Extract hashtags and generate 't' tags (NIP-12)
+      final hashtagTags = NostrEventModel.generateHashtagTags(content);
+
+      // Generate 'p' tags from resolved mentions
+      final mentionTags = <List<String>>[];
+      if (resolvedMentions != null && resolvedMentions.isNotEmpty) {
+        for (final entry in resolvedMentions.entries) {
+          mentionTags.add(['p', entry.value]); // pubkey
+        }
+      }
+
       // Create quote post tags with 'q' tag (NIP-18)
       // Format: ['q', '<event_id>', '<relay_url>', '<pubkey>']
       final createdAt = DateTime.now();
       final tags = await addClientTagsWithSignature([
         ['q', quotedEvent.id, '', quotedEvent.pubkey],
         ...urlTags,
+        ...hashtagTags,
+        ...mentionTags,
       ], createdAt: createdAt);
 
       // Create and sign a NostrEvent using dart_nostr

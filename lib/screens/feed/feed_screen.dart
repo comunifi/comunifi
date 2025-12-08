@@ -21,6 +21,7 @@ import 'package:comunifi/widgets/heart_button.dart';
 import 'package:comunifi/widgets/quote_button.dart';
 import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
+import 'package:comunifi/widgets/dismissible_image_viewer.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -267,6 +268,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
 
     // Otherwise, use regular feed (no image support for now)
     final feedState = context.read<FeedState>();
+    final profileState = context.read<ProfileState>();
     if (!feedState.isConnected) {
       setState(() {
         _publishError = 'Not connected to relay';
@@ -280,7 +282,18 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     });
 
     try {
-      await feedState.publishMessage(content);
+      // Resolve @username mentions to pubkeys
+      final resolvedMentions = await FeedState.resolveMentions(content, (
+        username,
+      ) async {
+        final profile = await profileState.searchByUsername(username);
+        return profile?.pubkey;
+      });
+
+      await feedState.publishMessage(
+        content,
+        resolvedMentions: resolvedMentions,
+      );
       _messageController.clear();
       _clearSelectedImage();
       setState(() {
@@ -537,10 +550,20 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
             behavior: HitTestBehavior.translucent,
             child: Column(
               children: [
+                // Hashtag filter indicator for groups
+                if (groupState.hashtagFilter != null)
+                  _HashtagFilterIndicator(
+                    hashtag: groupState.hashtagFilter!,
+                    onClear: () => groupState.clearHashtagFilter(),
+                  ),
                 Expanded(
                   child: groupState.groupMessages.isEmpty
-                      ? const Center(
-                          child: Text('No messages in this group yet'),
+                      ? Center(
+                          child: Text(
+                            groupState.hashtagFilter != null
+                                ? 'No messages with #${groupState.hashtagFilter}'
+                                : 'No messages in this group yet',
+                          ),
                         )
                       : CustomScrollView(
                           controller: _scrollController,
@@ -621,9 +644,21 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
           behavior: HitTestBehavior.translucent,
           child: Column(
             children: [
+              // Hashtag filter indicator
+              if (feedState.hashtagFilter != null)
+                _HashtagFilterIndicator(
+                  hashtag: feedState.hashtagFilter!,
+                  onClear: () => feedState.clearHashtagFilter(),
+                ),
               Expanded(
                 child: feedState.events.isEmpty
-                    ? const Center(child: Text('No events yet'))
+                    ? Center(
+                        child: Text(
+                          feedState.hashtagFilter != null
+                              ? 'No posts with #${feedState.hashtagFilter}'
+                              : 'No events yet',
+                        ),
+                      )
                     : CustomScrollView(
                         controller: _scrollController,
                         physics: const AlwaysScrollableScrollPhysics(),
@@ -694,21 +729,6 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                           ),
                         ],
                       ),
-              ),
-              _ComposeMessageWidget(
-                controller: _messageController,
-                isPublishing: _isPublishing,
-                error: _publishError,
-                onPublish: _publishMessage,
-                onErrorDismiss: () {
-                  setState(() {
-                    _publishError = null;
-                  });
-                },
-                onPickImage: _pickImage,
-                selectedImageBytes: _selectedImageBytes,
-                onClearImage: _clearSelectedImage,
-                showImagePicker: false, // No image upload for regular feed
               ),
             ],
           ),
@@ -887,6 +907,13 @@ class _EventItemContentState extends State<_EventItemContent> {
     final wasReacted = _hasUserReacted;
     final previousCount = _reactionCount;
 
+    // Provide haptic feedback: heavy for like, light for unlike
+    if (wasReacted) {
+      HapticFeedback.lightImpact();
+    } else {
+      HapticFeedback.heavyImpact();
+    }
+
     setState(() {
       _isReacting = true;
       // Optimistic UI update - immediately toggle the heart
@@ -964,6 +991,8 @@ class _EventItemContentState extends State<_EventItemContent> {
       isReacting: _isReacting,
       onReactionPressed: _toggleReaction,
       onQuotePressed: () => _openQuoteModal(context),
+      onHashtagTap: (hashtag) => _filterByHashtag(context, hashtag),
+      onMentionTap: (pubkey) => _showMentionProfile(context, pubkey),
     );
   }
 
@@ -981,6 +1010,25 @@ class _EventItemContentState extends State<_EventItemContent> {
       ),
     );
   }
+
+  void _filterByHashtag(BuildContext context, String hashtag) {
+    final groupState = context.read<GroupState>();
+    // If in a group, filter group messages; otherwise filter feed
+    if (groupState.activeGroup != null) {
+      groupState.setHashtagFilter(hashtag);
+    } else {
+      final feedState = context.read<FeedState>();
+      feedState.setHashtagFilter(hashtag);
+    }
+  }
+
+  void _showMentionProfile(BuildContext context, String username) {
+    // Show a modal with profile info - will resolve username to profile
+    showCupertinoModalPopup(
+      context: context,
+      builder: (modalContext) => _MentionProfileModal(username: username),
+    );
+  }
 }
 
 class _EventItemContentWidget extends StatelessWidget {
@@ -994,6 +1042,8 @@ class _EventItemContentWidget extends StatelessWidget {
   final bool isReacting;
   final VoidCallback onReactionPressed;
   final VoidCallback onQuotePressed;
+  final void Function(String hashtag)? onHashtagTap;
+  final void Function(String pubkey)? onMentionTap;
 
   /// Wide screen breakpoint (same as sidebar layout)
   static const double wideScreenBreakpoint = 1000;
@@ -1012,6 +1062,8 @@ class _EventItemContentWidget extends StatelessWidget {
     required this.isReacting,
     required this.onReactionPressed,
     required this.onQuotePressed,
+    this.onHashtagTap,
+    this.onMentionTap,
   });
 
   String _formatDate(DateTime date) {
@@ -1101,8 +1153,9 @@ class _EventItemContentWidget extends StatelessWidget {
                 ],
               ),
               if (groupName != null && groupIdHex != null) ...[
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 GestureDetector(
+                  behavior: HitTestBehavior.opaque,
                   onTap: () {
                     // Find the MlsGroup by groupIdHex and select it
                     final matchingGroup = groupState.groups
@@ -1118,18 +1171,25 @@ class _EventItemContentWidget extends StatelessWidget {
                       groupState.setActiveGroup(matchingGroup);
                     }
                   },
-                  child: Text(
-                    groupName,
-                    style: const TextStyle(
-                      color: CupertinoColors.systemBlue,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6.0),
+                    child: Text(
+                      groupName,
+                      style: const TextStyle(
+                        color: CupertinoColors.systemBlue,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                   ),
                 ),
               ],
               const SizedBox(height: 8),
-              _RichContentText(content: event.content),
+              _RichContentText(
+                content: event.content,
+                onHashtagTap: onHashtagTap,
+                onMentionTap: onMentionTap,
+              ),
               // Display attached images (NIP-92 imeta)
               if (event.hasImages) _EventImages(imageUrls: event.imageUrls),
               // Link previews
@@ -1169,11 +1229,17 @@ class _EventItemContentWidget extends StatelessWidget {
   }
 }
 
-/// Widget that renders text content with clickable URLs
+/// Widget that renders text content with clickable URLs, hashtags, and mentions
 class _RichContentText extends StatelessWidget {
   final String content;
+  final void Function(String hashtag)? onHashtagTap;
+  final void Function(String pubkey)? onMentionTap;
 
-  const _RichContentText({required this.content});
+  const _RichContentText({
+    required this.content,
+    this.onHashtagTap,
+    this.onMentionTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1188,47 +1254,190 @@ class _RichContentText extends StatelessWidget {
 
   List<InlineSpan> _buildTextSpans(BuildContext context) {
     final spans = <InlineSpan>[];
+
+    // Combined regex for URLs, hashtags, and mentions
     final urlRegex = LinkPreviewService.urlRegex;
-    final matches = urlRegex.allMatches(content);
+    final hashtagRegex = NostrEventModel.hashtagRegex;
+    final mentionRegex = NostrEventModel.mentionRegex;
 
-    int lastEnd = 0;
+    // Find all matches and sort by position
+    final allMatches = <_ContentMatch>[];
 
-    for (final match in matches) {
-      // Add text before the URL
-      if (match.start > lastEnd) {
-        spans.add(TextSpan(text: content.substring(lastEnd, match.start)));
-      }
+    for (final match in urlRegex.allMatches(content)) {
+      allMatches.add(
+        _ContentMatch(match.start, match.end, 'url', match.group(0)!),
+      );
+    }
 
-      // Add the URL as a clickable span
-      var url = match.group(0) ?? '';
-      if (url.startsWith('www.')) {
-        url = 'https://$url';
-      }
-      // Clean trailing punctuation
-      final cleanUrl = _cleanUrl(url);
-      final originalUrl = match.group(0) ?? '';
-
-      spans.add(
-        TextSpan(
-          text: originalUrl,
-          style: TextStyle(
-            color: CupertinoColors.systemBlue.resolveFrom(context),
-            decoration: TextDecoration.underline,
-          ),
-          recognizer: TapGestureRecognizer()
-            ..onTap = () => _launchUrl(cleanUrl),
+    for (final match in hashtagRegex.allMatches(content)) {
+      allMatches.add(
+        _ContentMatch(
+          match.start,
+          match.end,
+          'hashtag',
+          match.group(0)!,
+          match.group(1),
         ),
       );
-
-      lastEnd = match.end;
     }
 
-    // Add remaining text after last URL
-    if (lastEnd < content.length) {
-      spans.add(TextSpan(text: content.substring(lastEnd)));
+    for (final match in mentionRegex.allMatches(content)) {
+      allMatches.add(
+        _ContentMatch(
+          match.start,
+          match.end,
+          'mention',
+          match.group(0)!,
+          match.group(1),
+        ),
+      );
     }
 
-    // If no URLs found, just return the plain text
+    // Sort by start position
+    allMatches.sort((a, b) => a.start.compareTo(b.start));
+
+    // Remove overlapping matches (prefer URLs over hashtags/mentions)
+    final filteredMatches = <_ContentMatch>[];
+    int lastEnd = 0;
+    for (final match in allMatches) {
+      if (match.start >= lastEnd) {
+        filteredMatches.add(match);
+        lastEnd = match.end;
+      }
+    }
+
+    int currentPos = 0;
+    for (final match in filteredMatches) {
+      // Add text before the match
+      if (match.start > currentPos) {
+        spans.add(TextSpan(text: content.substring(currentPos, match.start)));
+      }
+
+      switch (match.type) {
+        case 'url':
+          var url = match.text;
+          if (url.startsWith('www.')) {
+            url = 'https://$url';
+          }
+          final cleanUrl = _cleanUrl(url);
+          spans.add(
+            TextSpan(
+              text: match.text,
+              style: TextStyle(
+                color: CupertinoColors.systemBlue.resolveFrom(context),
+                decoration: TextDecoration.underline,
+              ),
+              recognizer: TapGestureRecognizer()
+                ..onTap = () => _launchUrl(cleanUrl),
+            ),
+          );
+          break;
+        case 'hashtag':
+          final hashtag = match.captured!;
+          spans.add(
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: GestureDetector(
+                onTap: () {
+                  if (onHashtagTap != null) {
+                    onHashtagTap!(hashtag);
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemIndigo.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    hashtag,
+                    style: TextStyle(
+                      color: CupertinoColors.systemIndigo.resolveFrom(context),
+                      fontWeight: FontWeight.w500,
+                      fontSize: 14,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          break;
+        case 'mention':
+          final username = match.captured!;
+          spans.add(
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: GestureDetector(
+                onTap: () {
+                  if (onMentionTap != null) {
+                    onMentionTap!(username);
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.only(
+                    left: 3,
+                    right: 8,
+                    top: 3,
+                    bottom: 3,
+                  ),
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemTeal.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      // Small gray circle avatar placeholder
+                      Container(
+                        width: 16,
+                        height: 16,
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemGrey4,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          CupertinoIcons.person_fill,
+                          size: 10,
+                          color: CupertinoColors.systemGrey,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        username,
+                        style: TextStyle(
+                          color: CupertinoColors.systemTeal.resolveFrom(
+                            context,
+                          ),
+                          fontWeight: FontWeight.w500,
+                          fontSize: 14,
+                          height: 1.0,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+          break;
+      }
+
+      currentPos = match.end;
+    }
+
+    // Add remaining text after last match
+    if (currentPos < content.length) {
+      spans.add(TextSpan(text: content.substring(currentPos)));
+    }
+
+    // If no matches found, just return the plain text
     if (spans.isEmpty) {
       spans.add(TextSpan(text: content));
     }
@@ -1265,6 +1474,272 @@ class _RichContentText extends StatelessWidget {
         debugPrint('Could not launch URL: $e');
       }
     }
+  }
+}
+
+/// Helper class to track content matches (URLs, hashtags, mentions)
+class _ContentMatch {
+  final int start;
+  final int end;
+  final String type;
+  final String text;
+  final String? captured;
+
+  _ContentMatch(this.start, this.end, this.type, this.text, [this.captured]);
+}
+
+/// Indicator showing the current hashtag filter with clear button
+class _HashtagFilterIndicator extends StatelessWidget {
+  final String hashtag;
+  final VoidCallback onClear;
+
+  const _HashtagFilterIndicator({required this.hashtag, required this.onClear});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: CupertinoColors.systemIndigo.withOpacity(0.1),
+        border: const Border(
+          bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            CupertinoIcons.number,
+            size: 16,
+            color: CupertinoColors.systemIndigo.resolveFrom(context),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Filtering by #$hashtag',
+              style: TextStyle(
+                color: CupertinoColors.systemIndigo.resolveFrom(context),
+                fontWeight: FontWeight.w500,
+                fontSize: 14,
+              ),
+            ),
+          ),
+          CupertinoButton(
+            padding: EdgeInsets.zero,
+            minSize: 28,
+            onPressed: onClear,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemIndigo.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    CupertinoIcons.xmark,
+                    size: 12,
+                    color: CupertinoColors.systemIndigo.resolveFrom(context),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Clear',
+                    style: TextStyle(
+                      color: CupertinoColors.systemIndigo.resolveFrom(context),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Modal to show profile info for a mentioned user (by username)
+class _MentionProfileModal extends StatefulWidget {
+  final String username;
+
+  const _MentionProfileModal({required this.username});
+
+  @override
+  State<_MentionProfileModal> createState() => _MentionProfileModalState();
+}
+
+class _MentionProfileModalState extends State<_MentionProfileModal> {
+  ProfileData? _profile;
+  bool _isLoading = true;
+  bool _notFound = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    final profileState = context.read<ProfileState>();
+    final profile = await profileState.searchByUsername(widget.username);
+
+    if (mounted) {
+      setState(() {
+        _profile = profile;
+        _isLoading = false;
+        _notFound = profile == null;
+      });
+    }
+  }
+
+  String _truncatePubkey(String pubkey) {
+    if (pubkey.length <= 16) return pubkey;
+    return '${pubkey.substring(0, 8)}...${pubkey.substring(pubkey.length - 8)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 280,
+      decoration: const BoxDecoration(
+        color: CupertinoColors.systemBackground,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            // Handle bar
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: CupertinoColors.systemGrey3,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Profile content
+            if (_isLoading)
+              const Expanded(child: Center(child: CupertinoActivityIndicator()))
+            else if (_notFound)
+              Expanded(
+                child: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        CupertinoIcons.person_crop_circle_badge_xmark,
+                        size: 48,
+                        color: CupertinoColors.systemGrey,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        '@${widget.username}',
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'User not found',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: CupertinoColors.secondaryLabel,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  children: [
+                    // Profile icon placeholder
+                    Container(
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        color: CupertinoColors.systemTeal.withOpacity(0.2),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        CupertinoIcons.person_fill,
+                        size: 32,
+                        color: CupertinoColors.systemTeal,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    // Username
+                    Text(
+                      _profile?.getUsername() ?? widget.username,
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    // Pubkey
+                    Text(
+                      _truncatePubkey(_profile?.pubkey ?? ''),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: CupertinoColors.secondaryLabel,
+                      ),
+                    ),
+                    if (_profile?.about != null &&
+                        _profile!.about!.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        _profile!.about!,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: CupertinoColors.secondaryLabel,
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    // Copy username button
+                    if (_profile != null)
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 8,
+                        ),
+                        color: CupertinoColors.systemGrey5,
+                        borderRadius: BorderRadius.circular(20),
+                        onPressed: () {
+                          final username = _profile!.getUsername();
+                          Clipboard.setData(ClipboardData(text: '@$username'));
+                          Navigator.of(context).pop();
+                        },
+                        child: const Text(
+                          'Copy Username',
+                          style: TextStyle(
+                            color: CupertinoColors.label,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -1340,47 +1815,7 @@ class _EventImages extends StatelessWidget {
   }
 
   void _showFullImage(BuildContext context, String url) {
-    showCupertinoDialog(
-      context: context,
-      builder: (context) => CupertinoPageScaffold(
-        backgroundColor: CupertinoColors.black,
-        navigationBar: CupertinoNavigationBar(
-          backgroundColor: CupertinoColors.black.withOpacity(0.8),
-          leading: CupertinoButton(
-            padding: EdgeInsets.zero,
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Icon(
-              CupertinoIcons.xmark,
-              color: CupertinoColors.white,
-            ),
-          ),
-          middle: const Text(
-            'Image',
-            style: TextStyle(color: CupertinoColors.white),
-          ),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 4.0,
-              child: Image.network(
-                url,
-                fit: BoxFit.contain,
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
-                  return const Center(
-                    child: CupertinoActivityIndicator(
-                      color: CupertinoColors.white,
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+    DismissibleImageViewer.show(context, url);
   }
 }
 

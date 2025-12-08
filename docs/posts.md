@@ -55,7 +55,8 @@ Posts use Nostr tags for metadata and references:
 |-----|---------|---------|
 | `e` | Event reference (for replies) | `['e', '<event_id>', '', 'reply']` |
 | `q` | Quote post reference (NIP-18) | `['q', '<event_id>', '<relay_url>', '<pubkey>']` |
-| `p` | Pubkey reference | `['p', '<pubkey>']` |
+| `p` | Pubkey reference (mentions) | `['p', '<pubkey>']` |
+| `t` | Hashtag (NIP-12) | `['t', 'flutter']` |
 | `r` | URL reference | `['r', 'https://example.com']` |
 | `client` | Client identifier | `['client', 'comunifi']` |
 
@@ -687,6 +688,175 @@ Tapping an image opens a full-screen viewer with:
 
 ---
 
+## Hashtags
+
+Hashtags allow users to categorize posts and filter the feed by topic. Implemented using **Nostr NIP-12** convention.
+
+### NIP-12 Convention
+
+Per [NIP-12](https://github.com/nostr-protocol/nips/blob/master/12.md):
+- Hashtags are stored in `t` tags: `['t', '<hashtag>']`
+- Hashtags are **always lowercase** (case-insensitive matching)
+- The `#` symbol is NOT included in the tag value
+- Multiple hashtags = multiple `t` tags
+
+### How Hashtags Work
+
+1. **Adding hashtags**: Include `#hashtag` in your post content (e.g., `#Flutter #Nostr`)
+2. **Auto-extraction**: When publishing, hashtags are extracted, converted to lowercase, and added as `t` tags
+3. **Tap to filter**: Tapping a hashtag badge filters the feed to show only posts with that hashtag
+4. **Clear filter**: A filter indicator appears at the top of the feed with a clear button
+5. **Works in groups**: Hashtag filtering also works within group messages
+
+### Hashtag Event Structure
+
+```dart
+// Example post with hashtags
+// Content: "Building with #Flutter and #NOSTR!"
+NostrEventModel(
+  kind: 1,
+  content: "Building with #Flutter and #NOSTR!",
+  tags: [
+    ['t', 'flutter'],      // Lowercase per NIP-12
+    ['t', 'nostr'],        // Lowercase per NIP-12
+    ['client', 'comunifi'],
+  ],
+)
+```
+
+### Model Helpers
+
+```dart
+// Check if event has hashtags (from 't' tags)
+event.hasHashtags  // true if has 't' tag
+
+// Get all hashtags (lowercase, from 't' tags)
+event.hashtags  // Returns List<String> e.g., ['flutter', 'nostr']
+
+// Extract hashtags from content text (returns lowercase)
+NostrEventModel.extractHashtagsFromContent(content)  // Returns ['flutter', 'nostr']
+
+// Generate 't' tags from content (creates lowercase tags)
+NostrEventModel.generateHashtagTags(content)  // Returns [['t', 'flutter'], ['t', 'nostr']]
+```
+
+### Filtering Logic
+
+Filtering checks both:
+1. **`t` tags** - proper NIP-12 tagged posts (preferred)
+2. **Content text** - fallback for posts without `t` tags (legacy/external compatibility)
+
+### State Methods
+
+```dart
+// Set hashtag filter (filters feed)
+feedState.setHashtagFilter('flutter');
+
+// Get current filter
+feedState.hashtagFilter  // Returns 'flutter' or null
+
+// Clear filter
+feedState.clearHashtagFilter();
+
+// Get filtered events
+feedState.events  // Returns filtered list when filter is active
+
+// Get all events (unfiltered)
+feedState.allEvents
+```
+
+### UI Components
+
+- **Hashtag badge**: Displays as a rounded pill badge with indigo background (no `#` symbol)
+- **Filter indicator**: Shows current filter with clear button at top of feed
+- **Regex pattern**: `#(\w+)` - alphanumeric and underscore, at least 1 character
+
+---
+
+## Mentions
+
+Mentions allow users to tag other users in their posts using the `@` symbol followed by a username.
+
+### How Mentions Work
+
+1. **Adding mentions**: Include `@username` in your post content (e.g., `Hey @alice check this out!`)
+2. **Username format**: Alphanumeric and underscore, 1-30 characters, must start with a letter
+3. **Resolution**: When publishing, usernames are resolved to pubkeys using `ProfileState.searchByUsername()`
+4. **Tap to view**: Tapping a mention shows a modal that looks up the user's profile by username
+
+### Mention Event Structure
+
+```dart
+// Example post with mention (content shows @username, tag contains resolved pubkey)
+NostrEventModel(
+  kind: 1,
+  content: "Hey @alice check this out!",
+  tags: [
+    ['p', '<alice_pubkey_hex>'],  // Resolved pubkey
+    ['client', 'comunifi'],
+  ],
+)
+```
+
+### Model Helpers
+
+```dart
+// Check if event has mentions
+event.hasMentions  // true if has 'p' tag
+
+// Get all mentioned pubkeys from tags
+event.mentionedPubkeys  // Returns List<String> of pubkeys
+
+// Extract usernames from content text (without @)
+NostrEventModel.extractMentionsFromContent(content)  // Returns ['alice', 'bob']
+```
+
+### State Methods
+
+```dart
+// Resolve @usernames in content to pubkeys before publishing
+final resolvedMentions = await FeedState.resolveMentions(
+  content,
+  (username) async {
+    final profile = await profileState.searchByUsername(username);
+    return profile?.pubkey;
+  },
+);
+
+// Publish with resolved mentions
+await feedState.publishMessage(content, resolvedMentions: resolvedMentions);
+```
+
+### UI Components
+
+- **Mention badge**: Displays as a rounded pill badge with teal background, gray circle avatar placeholder, and username (no `@` symbol)
+- **Profile modal**: Searches by username, shows profile info, pubkey, bio, and "Copy Username" button
+- **Regex pattern**: `@([a-zA-Z][a-zA-Z0-9_]{0,29})`
+- **Not found handling**: Shows "User not found" if username doesn't exist
+
+### Resolution Flow
+
+```
+1. User types "@alice" in post
+   └── Regex matches "alice" as username
+
+2. Before publishing
+   └── FeedState.resolveMentions() is called
+       └── profileState.searchByUsername("alice")
+           └── Returns ProfileData with pubkey if found
+
+3. Publishing
+   └── publishMessage(content, resolvedMentions: {"alice": "<pubkey>"})
+       └── Creates ['p', '<pubkey>'] tag
+
+4. Displaying
+   └── Tapping @alice in a post
+       └── Opens _MentionProfileModal(username: "alice")
+           └── Calls searchByUsername("alice") to load profile
+```
+
+---
+
 ## Quote Posts
 
 Quote posts allow users to repost another post with their own comment, similar to Twitter's quote tweet. They are implemented using the Nostr NIP-18 convention.
@@ -849,15 +1019,16 @@ Widget build(BuildContext context) {
 
 | File | Purpose |
 |------|---------|
-| `lib/models/nostr_event.dart` | NostrEventModel definition |
+| `lib/models/nostr_event.dart` | NostrEventModel definition, hashtag/mention helpers |
 | `lib/services/db/db.dart` | Base DB service and table classes |
 | `lib/services/db/nostr_event.dart` | NostrEventTable with tag support |
 | `lib/services/db/app_db.dart` | App database service |
 | `lib/services/nostr/nostr.dart` | Relay connection and event handling |
-| `lib/state/feed.dart` | FeedState for main feed |
+| `lib/state/feed.dart` | FeedState for main feed, hashtag filtering |
 | `lib/state/post_detail.dart` | PostDetailState for post details |
 | `lib/widgets/heart_button.dart` | HeartButton for likes/reactions |
 | `lib/widgets/quote_button.dart` | Quote post button widget |
 | `lib/widgets/quoted_post_preview.dart` | Quoted post preview widget |
 | `lib/screens/feed/quote_post_modal.dart` | Quote post compose modal |
+| `lib/screens/feed/feed_screen.dart` | Feed UI, hashtag filter indicator, mention modal |
 
