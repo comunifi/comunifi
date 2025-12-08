@@ -112,102 +112,106 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                   );
                 }
 
-                return Column(
-                  children: [
-                    Expanded(
-                      child: CustomScrollView(
-                        controller: _scrollController,
-                        slivers: [
-                          CupertinoSliverRefreshControl(
-                            onRefresh: () async {
-                              await postDetailState.refreshComments();
-                            },
-                          ),
-                          // Post content
-                          SliverToBoxAdapter(
-                            child: _PostItem(
-                              event: postDetailState.post!,
+                return GestureDetector(
+                  onTap: () => FocusScope.of(context).unfocus(),
+                  behavior: HitTestBehavior.translucent,
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: CustomScrollView(
+                          controller: _scrollController,
+                          slivers: [
+                            CupertinoSliverRefreshControl(
+                              onRefresh: () async {
+                                await postDetailState.refreshComments();
+                              },
                             ),
-                          ),
-                          // Comments header
-                          SliverToBoxAdapter(
-                            child: Container(
-                              padding: const EdgeInsets.all(16.0),
-                              decoration: const BoxDecoration(
-                                border: Border(
-                                  top: BorderSide(
-                                    color: CupertinoColors.separator,
-                                    width: 0.5,
-                                  ),
-                                  bottom: BorderSide(
-                                    color: CupertinoColors.separator,
-                                    width: 0.5,
-                                  ),
-                                ),
-                              ),
-                              child: Text(
-                                'Comments (${postDetailState.comments.length})',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 16,
-                                ),
+                            // Post content
+                            SliverToBoxAdapter(
+                              child: _PostItem(
+                                event: postDetailState.post!,
                               ),
                             ),
-                          ),
-                          // Comments list
-                          if (postDetailState.isLoadingComments &&
-                              postDetailState.comments.isEmpty)
-                            const SliverToBoxAdapter(
-                              child: Padding(
-                                padding: EdgeInsets.all(16.0),
-                                child: Center(
-                                  child: CupertinoActivityIndicator(),
-                                ),
-                              ),
-                            )
-                          else if (postDetailState.comments.isEmpty)
-                            const SliverToBoxAdapter(
-                              child: Padding(
-                                padding: EdgeInsets.all(16.0),
-                                child: Center(
-                                  child: Text(
-                                    'No comments yet',
-                                    style: TextStyle(
-                                      color: CupertinoColors.secondaryLabel,
+                            // Comments header
+                            SliverToBoxAdapter(
+                              child: Container(
+                                padding: const EdgeInsets.all(16.0),
+                                decoration: const BoxDecoration(
+                                  border: Border(
+                                    top: BorderSide(
+                                      color: CupertinoColors.separator,
+                                      width: 0.5,
+                                    ),
+                                    bottom: BorderSide(
+                                      color: CupertinoColors.separator,
+                                      width: 0.5,
                                     ),
                                   ),
                                 ),
-                              ),
-                            )
-                          else
-                            SliverList(
-                              delegate: SliverChildBuilderDelegate(
-                                (context, index) {
-                                  if (index < postDetailState.comments.length) {
-                                    return _CommentItem(
-                                      event: postDetailState.comments[index],
-                                    );
-                                  }
-                                  return const SizedBox.shrink();
-                                },
-                                childCount: postDetailState.comments.length,
+                                child: Text(
+                                  'Comments (${postDetailState.comments.length})',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 16,
+                                  ),
+                                ),
                               ),
                             ),
-                        ],
+                            // Comments list
+                            if (postDetailState.isLoadingComments &&
+                                postDetailState.comments.isEmpty)
+                              const SliverToBoxAdapter(
+                                child: Padding(
+                                  padding: EdgeInsets.all(16.0),
+                                  child: Center(
+                                    child: CupertinoActivityIndicator(),
+                                  ),
+                                ),
+                              )
+                            else if (postDetailState.comments.isEmpty)
+                              const SliverToBoxAdapter(
+                                child: Padding(
+                                  padding: EdgeInsets.all(16.0),
+                                  child: Center(
+                                    child: Text(
+                                      'No comments yet',
+                                      style: TextStyle(
+                                        color: CupertinoColors.secondaryLabel,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              )
+                            else
+                              SliverList(
+                                delegate: SliverChildBuilderDelegate(
+                                  (context, index) {
+                                    if (index < postDetailState.comments.length) {
+                                      return _CommentItem(
+                                        event: postDetailState.comments[index],
+                                      );
+                                    }
+                                    return const SizedBox.shrink();
+                                  },
+                                  childCount: postDetailState.comments.length,
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
-                    ),
-                    _ComposeCommentWidget(
-                      controller: _commentController,
-                      isPublishing: _isPublishing,
-                      error: _publishError,
-                      onPublish: _publishComment,
-                      onErrorDismiss: () {
-                        setState(() {
-                          _publishError = null;
-                        });
-                      },
-                    ),
-                  ],
+                      _ComposeCommentWidget(
+                        controller: _commentController,
+                        isPublishing: _isPublishing,
+                        error: _publishError,
+                        onPublish: _publishComment,
+                        onErrorDismiss: () {
+                          setState(() {
+                            _publishError = null;
+                          });
+                        },
+                      ),
+                    ],
+                  ),
                 );
               },
             ),

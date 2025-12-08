@@ -25,8 +25,6 @@ import 'package:comunifi/models/nostr_event.dart'
         kindCreateGroup,
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
-        kindGroupAnnouncement, // Legacy, for backwards compatibility
-        kindJoinRequest,
         kindMlsWelcome,
         kindPutUser,
         NostrEventModel;
@@ -665,24 +663,24 @@ class GroupState with ChangeNotifier {
     }
 
     try {
-      debugPrint('Syncing group announcements to local DB...');
+      debugPrint('Syncing NIP-29 create-group events to local DB...');
 
-      // Fetch group announcements from relay (this will also cache them via NostrService)
+      // Fetch NIP-29 create-group events (kind 9007) from relay
       final events = await _nostrService!.requestPastEvents(
-        kind: kindGroupAnnouncement,
+        kind: kindCreateGroup,
         limit: 1000, // Fetch a large batch
         useCache: false, // Always fetch fresh from relay for sync
       );
 
-      // Store all announcements in our event table
+      // Store all events in our event table
       for (final event in events) {
         await _eventTable!.insert(event);
       }
 
-      // Build cache of group names from announcements
+      // Build cache of group names from create-group events
       _groupNameCache.clear();
       for (final event in events) {
-        final announcement = _parseGroupAnnouncement(event);
+        final announcement = _parseCreateGroupEvent(event);
         if (announcement != null &&
             announcement.mlsGroupId != null &&
             announcement.name != null) {
@@ -691,14 +689,14 @@ class GroupState with ChangeNotifier {
       }
 
       debugPrint(
-        'Synced ${events.length} group announcements to local DB (${_groupNameCache.length} with names)',
+        'Synced ${events.length} create-group events to local DB (${_groupNameCache.length} with names)',
       );
     } catch (e) {
-      debugPrint('Failed to sync group announcements to DB: $e');
+      debugPrint('Failed to sync create-group events to DB: $e');
       // Continue - we can still try to load from cache
     }
 
-    // Also load existing announcements from DB to populate cache
+    // Also load existing events from DB to populate cache
     await _loadGroupNamesFromDB();
   }
 
@@ -707,15 +705,15 @@ class GroupState with ChangeNotifier {
     if (_eventTable == null) return;
 
     try {
-      // Query all kind 40 events (group announcements) from DB
+      // Query all kind 9007 events (NIP-29 create-group) from DB
       final events = await _eventTable!.query(
-        kind: kindGroupAnnouncement,
-        limit: 10000, // Load all cached announcements
+        kind: kindCreateGroup,
+        limit: 10000, // Load all cached events
       );
 
       // Build cache from DB
       for (final event in events) {
-        final announcement = _parseGroupAnnouncement(event);
+        final announcement = _parseCreateGroupEvent(event);
         if (announcement != null &&
             announcement.mlsGroupId != null &&
             announcement.name != null) {
@@ -726,6 +724,69 @@ class GroupState with ChangeNotifier {
       debugPrint('Loaded ${_groupNameCache.length} group names from local DB');
     } catch (e) {
       debugPrint('Failed to load group names from DB: $e');
+    }
+  }
+
+  /// Sync group names from NIP-29 create-group events (kind 9007)
+  /// This fetches create-group events from the relay and updates the group name cache
+  /// and local storage for joined groups
+  Future<void> syncGroupNamesFromCreateEvents() async {
+    if (_nostrService == null || !_isConnected) {
+      return;
+    }
+
+    try {
+      debugPrint('Syncing group names from NIP-29 create-group events...');
+
+      // Fetch create-group events (kind 9007) from relay
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindCreateGroup,
+        limit: 1000,
+        useCache: false,
+      );
+
+      int updatedCount = 0;
+      for (final event in events) {
+        // Parse group ID from 'h' tag and name from 'name' tag
+        String? groupIdHex;
+        String? groupName;
+
+        for (final tag in event.tags) {
+          if (tag.isNotEmpty && tag.length > 1) {
+            if (tag[0] == 'h') {
+              groupIdHex = tag[1];
+            } else if (tag[0] == 'name') {
+              groupName = tag[1];
+            }
+          }
+        }
+
+        if (groupIdHex != null && groupName != null) {
+          // Update cache
+          _groupNameCache[groupIdHex] = groupName;
+
+          // If this is a joined group, update its name in storage
+          if (_mlsGroups.containsKey(groupIdHex) && _mlsStorage != null) {
+            final groupId = _mlsGroups[groupIdHex]!.id;
+            final existingName = await _mlsStorage!.loadGroupName(groupId);
+            if (existingName != groupName) {
+              await _mlsStorage!.saveGroupName(groupId, groupName);
+              updatedCount++;
+            }
+          }
+        }
+      }
+
+      debugPrint(
+        'Synced ${events.length} create-group events, updated $updatedCount joined groups',
+      );
+
+      // Reload groups to reflect name changes
+      if (updatedCount > 0) {
+        await _loadSavedGroups();
+      }
+    } catch (e) {
+      debugPrint('Failed to sync group names from create-group events: $e');
     }
   }
 
@@ -1065,7 +1126,7 @@ class GroupState with ChangeNotifier {
 
   /// Start listening for new group events
   /// Note: Groups are now MLS-based, so we just refresh the list periodically
-  /// Also listens for Welcome messages (kind 1060) and group announcements (kind 40)
+  /// Also listens for Welcome messages (kind 1060) and NIP-29 create-group events (kind 9007)
   Future<void> _startListeningForGroupEvents() async {
     if (_nostrService == null || !_isConnected) return;
 
@@ -1096,9 +1157,9 @@ class GroupState with ChangeNotifier {
             },
           );
 
-      // Listen for new group announcements (kind 40) to keep DB and cache updated
+      // Listen for new NIP-29 create-group events (kind 9007) to keep DB and cache updated
       _nostrService!
-          .listenToEvents(kind: kindGroupAnnouncement, limit: null)
+          .listenToEvents(kind: kindCreateGroup, limit: null)
           .listen(
             (event) async {
               // Store in our event table
@@ -1106,7 +1167,7 @@ class GroupState with ChangeNotifier {
                 try {
                   await _eventTable!.insert(event);
                   // Update cache
-                  final announcement = _parseGroupAnnouncement(event);
+                  final announcement = _parseCreateGroupEvent(event);
                   if (announcement != null &&
                       announcement.mlsGroupId != null &&
                       announcement.name != null) {
@@ -1114,12 +1175,12 @@ class GroupState with ChangeNotifier {
                         announcement.name!;
                   }
                 } catch (e) {
-                  debugPrint('Failed to store new group announcement: $e');
+                  debugPrint('Failed to store new create-group event: $e');
                 }
               }
             },
             onError: (error) {
-              debugPrint('Error listening to group announcements: $error');
+              debugPrint('Error listening to create-group events: $error');
             },
           );
     } catch (e) {
@@ -1428,7 +1489,7 @@ class GroupState with ChangeNotifier {
     await _initialize();
   }
 
-  /// Fetch group announcements from the relay with pagination
+  /// Fetch NIP-29 create-group events from the relay with pagination
   /// [limit] - Maximum number of groups to fetch (default: 50)
   /// [since] - Only fetch groups created after this timestamp (for pagination)
   /// [until] - Only fetch groups created before this timestamp (for pagination)
@@ -1448,10 +1509,10 @@ class GroupState with ChangeNotifier {
       _isLoadingGroups = true;
       safeNotifyListeners();
 
-      // Request kind 40 events (group announcements)
+      // Request NIP-29 create-group events (kind 9007)
       // Disable cache when paginating (until is set) or when explicitly disabled
       final events = await _nostrService!.requestPastEvents(
-        kind: kindGroupAnnouncement,
+        kind: kindCreateGroup,
         since: since,
         until: until,
         limit: limit,
@@ -1467,14 +1528,14 @@ class GroupState with ChangeNotifier {
           try {
             await _eventTable!.insert(event);
             // Update cache
-            final announcement = _parseGroupAnnouncement(event);
+            final announcement = _parseCreateGroupEvent(event);
             if (announcement != null &&
                 announcement.mlsGroupId != null &&
                 announcement.name != null) {
               _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
             }
           } catch (e) {
-            debugPrint('Failed to store group announcement: $e');
+            debugPrint('Failed to store create-group event: $e');
           }
         }
       }
@@ -1482,7 +1543,7 @@ class GroupState with ChangeNotifier {
       // Parse events into GroupAnnouncement objects
       final announcements = <GroupAnnouncement>[];
       for (final event in events) {
-        final announcement = _parseGroupAnnouncement(event);
+        final announcement = _parseCreateGroupEvent(event);
         if (announcement != null) {
           announcements.add(announcement);
         }
@@ -1526,43 +1587,43 @@ class GroupState with ChangeNotifier {
 
   /// Refresh discovered groups from relay
   /// Fetches the latest groups (always queries relay, no cache)
+  /// Also syncs group names from NIP-29 create-group events (kind 9007)
   Future<void> refreshDiscoveredGroups({int limit = 50}) async {
     // Always query relay for refresh (disable cache to get latest groups)
     final newGroups = await fetchGroupsFromRelay(limit: limit, useCache: false);
     _discoveredGroups = newGroups;
+
+    // Also sync group names from NIP-29 create-group events (kind 9007)
+    // This ensures we have the correct names for groups created with NIP-29
+    await syncGroupNamesFromCreateEvents();
+
     safeNotifyListeners();
   }
 
-  /// Parse a Nostr event (kind 40) into a GroupAnnouncement
-  GroupAnnouncement? _parseGroupAnnouncement(NostrEventModel event) {
-    if (event.kind != kindGroupAnnouncement) {
+  /// Parse a NIP-29 create-group event (kind 9007) into a GroupAnnouncement
+  GroupAnnouncement? _parseCreateGroupEvent(NostrEventModel event) {
+    if (event.kind != kindCreateGroup) {
       return null;
     }
 
-    // Extract MLS group ID from 'g' tag
+    // Extract group ID from 'h' tag and metadata from other tags (NIP-29 format)
     String? mlsGroupId;
-    for (final tag in event.tags) {
-      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
-        mlsGroupId = tag[1];
-        break;
-      }
-    }
-
-    // Parse content as JSON to extract name and about
     String? name;
     String? about;
-    try {
-      if (event.content.isNotEmpty) {
-        final contentJson = jsonDecode(event.content) as Map<String, dynamic>?;
-        if (contentJson != null) {
-          name = contentJson['name'] as String?;
-          about = contentJson['about'] as String?;
-        }
-      }
-    } catch (e) {
-      // If content is not JSON, treat it as the group name
-      if (event.content.isNotEmpty) {
-        name = event.content;
+
+    for (final tag in event.tags) {
+      if (tag.isEmpty || tag.length < 2) continue;
+
+      switch (tag[0]) {
+        case 'h':
+          mlsGroupId = tag[1];
+          break;
+        case 'name':
+          name = tag[1];
+          break;
+        case 'about':
+          about = tag[1];
+          break;
       }
     }
 
@@ -1668,6 +1729,37 @@ class GroupState with ChangeNotifier {
 
       debugPrint(
         'Sent Welcome message to $inviteeUserId for group ${_activeGroup!.name}',
+      );
+
+      // Publish NIP-29 put-user event (kind 9000) to officially add the invitee to the group
+      final putUserCreatedAt = DateTime.now();
+      final putUserTags = await addClientTagsWithSignature([
+        ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
+        ['p', inviteeNostrPubkey], // User to add
+      ], createdAt: putUserCreatedAt);
+
+      final putUserEvent = NostrEvent.fromPartialData(
+        kind: kindPutUser,
+        content: '',
+        keyPairs: keyPair,
+        tags: putUserTags,
+        createdAt: putUserCreatedAt,
+      );
+
+      final putUserModel = NostrEventModel(
+        id: putUserEvent.id,
+        pubkey: putUserEvent.pubkey,
+        kind: putUserEvent.kind,
+        content: putUserEvent.content,
+        tags: putUserEvent.tags,
+        sig: putUserEvent.sig,
+        createdAt: putUserEvent.createdAt,
+      );
+
+      await _nostrService!.publishEvent(putUserModel.toJson());
+
+      debugPrint(
+        'Published NIP-29 put-user (kind 9000) to add $inviteeUserId to group: ${putUserModel.id}',
       );
 
       // Update groups list to reflect new member
@@ -1879,24 +1971,28 @@ class GroupState with ChangeNotifier {
       // Try to get the proper group name from relay announcement
       String? properGroupName = getGroupName(groupIdHex);
       if (properGroupName == null) {
-        // Fetch group announcement from relay to get the name
+        // Fetch NIP-29 create-group event (kind 9007) from relay to get the name
         try {
-          final announcements = await _nostrService!.requestPastEvents(
-            kind: kindGroupAnnouncement,
+          final createGroupEvents = await _nostrService!.requestPastEvents(
+            kind: kindCreateGroup,
             tags: [groupIdHex],
-            tagKey: 'g',
+            tagKey: 'h', // NIP-29 uses 'h' tag for group ID
             limit: 1,
             useCache: false,
           );
-          if (announcements.isNotEmpty) {
-            final announcement = _parseGroupAnnouncement(announcements.first);
-            if (announcement?.name != null) {
-              properGroupName = announcement!.name;
-              _groupNameCache[groupIdHex] = properGroupName!;
+          if (createGroupEvents.isNotEmpty) {
+            // Parse name from 'name' tag in kind 9007 event
+            final event = createGroupEvents.first;
+            for (final tag in event.tags) {
+              if (tag.isNotEmpty && tag[0] == 'name' && tag.length > 1) {
+                properGroupName = tag[1];
+                _groupNameCache[groupIdHex] = properGroupName;
+                break;
+              }
             }
           }
         } catch (e) {
-          debugPrint('Failed to fetch group announcement for name: $e');
+          debugPrint('Failed to fetch create-group event for name: $e');
         }
       }
 
@@ -1929,48 +2025,10 @@ class GroupState with ChangeNotifier {
       // Update UI
       safeNotifyListeners();
 
-      // Publish "member joined" event (kind 1061)
-      try {
-        final privateKey = await getNostrPrivateKey();
-        if (privateKey != null && privateKey.isNotEmpty) {
-          final keyPair = NostrKeyPairs(private: privateKey);
-
-          // Create NIP-29 join-request event (kind 9021)
-          // https://github.com/nostr-protocol/nips/blob/master/29.md
-          final joinRequestCreatedAt = DateTime.now();
-          final joinRequestTags = await addClientTagsWithSignature([
-            ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
-          ], createdAt: joinRequestCreatedAt);
-
-          final joinRequestEvent = NostrEvent.fromPartialData(
-            kind: kindJoinRequest,
-            content: 'Joined via MLS Welcome', // Optional reason
-            keyPairs: keyPair,
-            tags: joinRequestTags,
-            createdAt: joinRequestCreatedAt,
-          );
-
-          final joinRequestModel = NostrEventModel(
-            id: joinRequestEvent.id,
-            pubkey: joinRequestEvent.pubkey,
-            kind: joinRequestEvent.kind,
-            content: joinRequestEvent.content,
-            tags: joinRequestEvent.tags,
-            sig: joinRequestEvent.sig,
-            createdAt: joinRequestEvent.createdAt,
-          );
-
-          // Publish to relay (public event)
-          await _nostrService!.publishEvent(joinRequestModel.toJson());
-
-          debugPrint(
-            'Published NIP-29 join-request (kind 9021) for group $groupIdHex: ${joinRequestModel.id}',
-          );
-        }
-      } catch (e) {
-        debugPrint('Failed to publish member joined event: $e');
-        // Don't fail the join if event publication fails
-      }
+      // Note: When a user is invited via MLS Welcome, the inviter publishes
+      // kind 9000 (put-user) to add them to the group per NIP-29.
+      // The invitee does NOT need to publish kind 9021 (join-request) since
+      // join-request is only for self-initiated requests to join open groups.
 
       debugPrint(
         'Successfully joined group ${properGroupName ?? group.name} ($groupIdHex)',

@@ -89,38 +89,43 @@ class _SlideInSidebarState extends State<SlideInSidebar>
       return const SizedBox.shrink();
     }
 
-    return Positioned.fill(
-      child: Stack(
-        children: [
-          // Backdrop
-          GestureDetector(
-            onTap: widget.onClose,
-            child: FadeTransition(
-              opacity: _fadeAnimation,
-              child: Container(
-                color: CupertinoColors.black.withOpacity(0.3),
-              ),
-            ),
-          ),
-          // Sidebar
-          SlideTransition(
-            position: _slideAnimation,
-            child: Align(
-              alignment: widget.position == SlideInSidebarPosition.left
-                  ? Alignment.centerLeft
-                  : Alignment.centerRight,
-              child: GestureDetector(
-                onTap: () {}, // Prevent tap from closing when tapping inside sidebar
+    // Use IgnorePointer when closing to allow touch events to pass through
+    // during the close animation
+    return IgnorePointer(
+      ignoring: !widget.isOpen,
+      child: Positioned.fill(
+        child: Stack(
+          children: [
+            // Backdrop
+            GestureDetector(
+              onTap: widget.onClose,
+              child: FadeTransition(
+                opacity: _fadeAnimation,
                 child: Container(
-                  width: widget.width,
-                  height: double.infinity,
-                  color: CupertinoColors.systemBackground,
-                  child: widget.child,
+                  color: CupertinoColors.black.withOpacity(0.3),
                 ),
               ),
             ),
-          ),
-        ],
+            // Sidebar
+            SlideTransition(
+              position: _slideAnimation,
+              child: Align(
+                alignment: widget.position == SlideInSidebarPosition.left
+                    ? Alignment.centerLeft
+                    : Alignment.centerRight,
+                child: GestureDetector(
+                  onTap: () {}, // Prevent tap from closing when tapping inside sidebar
+                  child: Container(
+                    width: widget.width,
+                    height: double.infinity,
+                    color: CupertinoColors.systemBackground,
+                    child: widget.child,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

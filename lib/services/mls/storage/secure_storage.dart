@@ -169,16 +169,32 @@ class MlsGroupTable extends DBTable {
   }
 
   /// Save public group state (without private keys/secrets)
+  /// Preserves the existing group_name if the row already exists
   Future<void> savePublicState(
     GroupId groupId,
     Uint8List publicStateBytes,
   ) async {
     final groupIdHex = _groupIdToHex(groupId);
-    await db.insert(
-      name,
-      MlsGroupRow(groupId: groupIdHex, publicState: publicStateBytes).toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+
+    // First, try to load existing group name to preserve it
+    final existingName = await loadGroupName(groupId);
+
+    if (existingName != null) {
+      // Row exists, update only the public_state column to preserve group_name
+      await db.update(
+        name,
+        {'public_state': publicStateBytes},
+        where: 'group_id = ?',
+        whereArgs: [groupIdHex],
+      );
+    } else {
+      // New row, insert without group_name (will be set separately via saveGroupName)
+      await db.insert(
+        name,
+        MlsGroupRow(groupId: groupIdHex, publicState: publicStateBytes).toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
   }
 
   /// Load public group state

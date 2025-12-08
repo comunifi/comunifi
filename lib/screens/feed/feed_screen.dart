@@ -544,6 +544,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                         )
                       : CustomScrollView(
                           controller: _scrollController,
+                          physics: const AlwaysScrollableScrollPhysics(),
                           slivers: [
                             CupertinoSliverRefreshControl(
                               onRefresh: () async {
@@ -625,6 +626,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     ? const Center(child: Text('No events yet'))
                     : CustomScrollView(
                         controller: _scrollController,
+                        physics: const AlwaysScrollableScrollPhysics(),
                         slivers: [
                           CupertinoSliverRefreshControl(
                             onRefresh: () async {

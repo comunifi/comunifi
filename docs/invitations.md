@@ -11,7 +11,8 @@ The invitation system allows group members to invite new members by:
 4. Adding them to the group (which advances the epoch)
 5. Creating a `Welcome` message encrypted with the invitee's HPKE public key
 6. Sending the Welcome message via Nostr (kind 1060)
-7. The invitee automatically receives the Welcome, decrypts it, and joins the group
+7. Publishing a NIP-29 put-user event (kind 9000) to officially add the user to the group
+8. The invitee automatically receives the Welcome, decrypts it, and joins the group
 
 ## UI Flow
 
@@ -83,7 +84,8 @@ Welcome messages are automatically handled when received from the relay. The `Gr
 5. Joins the group using `MlsGroup.joinFromWelcome`
 6. Adds the group to the groups list
 7. Updates the UI
-8. **Publishes a "member joined" event (kind 1061)** to notify other group members
+
+Note: The inviter publishes kind 9000 (put-user) when sending the invitation, so the invitee does not need to publish any event when joining via Welcome.
 
 ### Manual Handling (Advanced)
 
@@ -143,6 +145,9 @@ Once a member joins a group via Welcome message:
    // Internally calls:
    await groupState.inviteMemberByUsername('bob');
    ```
+   This publishes:
+   - Kind 1060 (MLS Welcome message) addressed to Bob
+   - Kind 9000 (NIP-29 put-user) to officially add Bob to the group
 
 5. **Bob receives Welcome automatically**:
    - Welcome message arrives via Nostr (kind 1060)
@@ -190,19 +195,19 @@ Welcome messages are sent as Nostr events with:
   - `['g', groupIdHex]`: MLS group ID (hex-encoded)
   - `['client', 'comunifi']`: Client identifier
 
-#### Member Joined Event (kind 1061)
+#### Put User Event (kind 9000) - NIP-29
 
-When a user successfully joins a group via Welcome message, they emit:
-- **Kind**: 1061 (`kindMlsMemberJoined`)
+When inviting a user, the inviter publishes a NIP-29 put-user event to officially add them to the group:
+- **Kind**: 9000 (`kindPutUser`)
 - **Content**: Empty
 - **Tags**:
-  - `['g', groupIdHex]`: MLS group ID (hex-encoded)
-  - `['p', inviterPubkey]`: The pubkey of the user who sent the invitation
+  - `['h', groupIdHex]`: Group ID (NIP-29 uses 'h' tag)
+  - `['p', inviteeNostrPubkey]`: The pubkey of the user being added
   - `['client', 'comunifi']`: Client identifier
 
 This event serves as:
-1. Confirmation that the invitation was successfully processed
-2. Notification to other group members that someone joined
+1. Official group membership record per NIP-29
+2. Notification to the relay that a user was added to the group
 3. An audit trail of group membership changes
 
 ## Security Considerations
