@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:math';
 import 'crypto/crypto.dart' as mls_crypto;
+import 'crypto/crypto_isolate.dart';
 import 'crypto/default_crypto.dart';
 import 'group_state/group_state.dart';
 import 'key_schedule/key_schedule.dart';
@@ -36,43 +37,59 @@ class MlsGroup {
     }
   }
 
-  /// Encrypt an application message
+  /// Get application secret for background crypto operations
+  Uint8List get applicationSecret => _state.secrets.applicationSecret;
+
+  /// Get sender leaf index value
+  int get senderLeafIndexValue => _state.members.keys.first.value;
+
+  /// Get expected generation for a sender
+  int getExpectedGeneration(int senderIndex) {
+    return _state.getGeneration(LeafIndex(senderIndex));
+  }
+
+  /// Update generation after successful decryption
+  void updateGeneration(int senderIndex, int generation) {
+    _state.setGeneration(LeafIndex(senderIndex), generation);
+  }
+
+  /// Increment and get generation for encryption
+  int incrementAndGetGeneration() {
+    final senderLeafIndex = _state.members.keys.first;
+    return _state.incrementGeneration(senderLeafIndex);
+  }
+
+  /// Encrypt an application message (runs crypto in background isolate)
   Future<MlsCiphertext> encryptApplicationMessage(Uint8List plaintext) async {
-    // Get sender leaf index (simplified - in production would track local member)
+    // Get sender leaf index
     final senderLeafIndex = _state.members.keys.first;
 
     // Get and increment generation for this sender (prevents nonce reuse)
     final generation = _state.incrementGeneration(senderLeafIndex);
 
-    // Derive application keys
-    final keySchedule = KeySchedule(_crypto.kdf);
-    final keyMaterial = await keySchedule.deriveApplicationKeys(
+    // Run encryption in background isolate to keep UI smooth
+    final result = await MlsCryptoBackground.encrypt(
+      plaintext: plaintext,
       applicationSecret: _state.secrets.applicationSecret,
       senderIndex: senderLeafIndex.value,
       generation: generation,
     );
 
-    // Encrypt with AEAD
-    final nonce = keyMaterial.nonce;
-    final aad = Uint8List(0); // Simplified
-    final ciphertext = await _crypto.aead.seal(
-      key: keyMaterial.key,
-      nonce: nonce,
-      plaintext: plaintext,
-      aad: aad,
-    );
+    if (!result.success) {
+      throw MlsError('Encryption failed: ${result.error}');
+    }
 
     return MlsCiphertext(
       groupId: id,
       epoch: _state.context.epoch,
       senderIndex: senderLeafIndex.value,
-      nonce: nonce,
-      ciphertext: ciphertext,
+      nonce: result.nonce!,
+      ciphertext: result.ciphertext!,
       contentType: MlsContentType.application,
     );
   }
 
-  /// Decrypt an application message
+  /// Decrypt an application message (runs crypto in background isolate)
   Future<Uint8List> decryptApplicationMessage(MlsCiphertext ciphertext) async {
     // Verify group ID and epoch
     if (ciphertext.groupId.bytes.toString() != id.bytes.toString()) {
@@ -84,60 +101,32 @@ class MlsGroup {
     }
 
     final senderLeafIndex = LeafIndex(ciphertext.senderIndex);
-    
+
     // Get expected generation (what we think the sender should be at)
     final expectedGeneration = _state.getGeneration(senderLeafIndex);
-    
-    // Try decrypting with expected generation and nearby generations
-    // This handles out-of-order messages or if we missed some messages
-    final generationsToTry = [
-      expectedGeneration,
-      expectedGeneration + 1,
-      expectedGeneration + 2,
-      expectedGeneration - 1,
-      expectedGeneration - 2,
-    ].where((g) => g >= 0).toSet().toList()..sort();
 
-    final keySchedule = KeySchedule(_crypto.kdf);
-    final aad = Uint8List(0); // Simplified
-    
-    Exception? lastError;
-    for (final generation in generationsToTry) {
-      try {
-        // Derive application keys for this generation
-        final keyMaterial = await keySchedule.deriveApplicationKeys(
-          applicationSecret: _state.secrets.applicationSecret,
-          senderIndex: ciphertext.senderIndex,
-          generation: generation,
-        );
+    // Run decryption in background isolate to keep UI smooth
+    final result = await MlsCryptoBackground.decrypt(
+      epoch: ciphertext.epoch,
+      senderIndex: ciphertext.senderIndex,
+      nonce: ciphertext.nonce,
+      ciphertext: ciphertext.ciphertext,
+      applicationSecret: _state.secrets.applicationSecret,
+      expectedGeneration: expectedGeneration,
+    );
 
-        // Verify nonce matches (since nonce is deterministic from generation)
-        if (keyMaterial.nonce.toString() != ciphertext.nonce.toString()) {
-          continue; // Wrong generation, try next
-        }
-
-        // Try to decrypt
-        final decrypted = await _crypto.aead.open(
-          key: keyMaterial.key,
-          nonce: ciphertext.nonce,
-          ciphertext: ciphertext.ciphertext,
-          aad: aad,
-        );
-
-        // Success! Update our generation tracking
-        _state.setGeneration(senderLeafIndex, generation);
-        
-        return decrypted;
-      } catch (e) {
-        lastError = e is Exception ? e : Exception(e.toString());
-        // Continue to next generation
-      }
+    if (!result.success) {
+      throw DecryptionFailed(
+        'Failed to decrypt message: ${result.error ?? "Unknown error"}',
+      );
     }
 
-    // If we get here, decryption failed for all generations
-    throw DecryptionFailed(
-      'Failed to decrypt message: ${lastError?.toString() ?? "Unknown error"}',
-    );
+    // Update our generation tracking
+    if (result.usedGeneration != null) {
+      _state.setGeneration(senderLeafIndex, result.usedGeneration!);
+    }
+
+    return result.plaintext!;
   }
 
   /// Add members to the group

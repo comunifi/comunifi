@@ -1171,12 +1171,9 @@ class _EventItemContentWidget extends StatelessWidget {
         ? groupState.getGroupName(groupIdHex)
         : null;
 
-    // Get group announcement for the picture
+    // Get group announcement for the picture - O(1) lookup
     final groupAnnouncement = groupIdHex != null
-        ? groupState.discoveredGroups.cast<GroupAnnouncement?>().firstWhere(
-            (a) => a?.mlsGroupId == groupIdHex,
-            orElse: () => null,
-          )
+        ? groupState.getGroupAnnouncementByHexId(groupIdHex)
         : null;
     final groupPicture = groupAnnouncement?.picture;
 
@@ -1221,16 +1218,10 @@ class _EventItemContentWidget extends StatelessWidget {
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () {
-                    // Find the MlsGroup by groupIdHex and select it
-                    final matchingGroup = groupState.groups
-                        .cast<MlsGroup?>()
-                        .firstWhere((g) {
-                          if (g == null) return false;
-                          final gIdHex = g.id.bytes
-                              .map((b) => b.toRadixString(16).padLeft(2, '0'))
-                              .join();
-                          return gIdHex == groupIdHex;
-                        }, orElse: () => null);
+                    // Find the MlsGroup by groupIdHex using O(1) cached lookup
+                    final matchingGroup = groupState.getGroupByHexId(
+                      groupIdHex,
+                    );
                     if (matchingGroup != null) {
                       groupState.setActiveGroup(matchingGroup);
                     }

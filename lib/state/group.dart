@@ -82,6 +82,9 @@ class GroupState with ChangeNotifier {
   // Map of group ID (hex) to group name from announcements (cached from DB)
   final Map<String, String> _groupNameCache = {};
 
+  // Map of group ID (hex) to group announcement for O(1) lookup
+  final Map<String, GroupAnnouncement> _groupAnnouncementCache = {};
+
   // Callback to ensure user profile (set by widgets that have access to ProfileState)
   // Parameters: pubkey, privateKey, hpkePublicKeyHex
   Future<void> Function(
@@ -861,7 +864,7 @@ class GroupState with ChangeNotifier {
 
     if (index >= 0) {
       final existing = _discoveredGroups[index];
-      _discoveredGroups[index] = GroupAnnouncement(
+      final updatedAnnouncement = GroupAnnouncement(
         eventId: existing.eventId,
         pubkey: existing.pubkey,
         name: name,
@@ -870,6 +873,11 @@ class GroupState with ChangeNotifier {
         mlsGroupId: existing.mlsGroupId,
         createdAt: existing.createdAt,
       );
+      _discoveredGroups[index] = updatedAnnouncement;
+
+      // Also update the announcement cache
+      _groupAnnouncementCache[groupIdHex] = updatedAnnouncement;
+
       debugPrint('Updated local group metadata for $groupIdHex: $name');
     }
   }
@@ -882,14 +890,19 @@ class GroupState with ChangeNotifier {
     if (dbName != null) return dbName;
 
     // Fallback to MLS groups (groups user is a member of)
-    for (final group in _groups) {
-      final groupIdHexFromGroup = _groupIdToHex(group.id);
-      if (groupIdHexFromGroup == groupIdHex) {
-        return group.name;
-      }
+    // Use the cached map for O(1) lookup instead of iterating
+    final cachedGroup = _mlsGroups[groupIdHex];
+    if (cachedGroup != null) {
+      return cachedGroup.name;
     }
 
     return null;
+  }
+
+  /// Get MlsGroup by hex ID - O(1) lookup using cached map
+  /// Returns null if group is not found
+  MlsGroup? getGroupByHexId(String groupIdHex) {
+    return _mlsGroups[groupIdHex];
   }
 
   // state variables here
@@ -1234,23 +1247,43 @@ class GroupState with ChangeNotifier {
   }
 
   /// Toggle/select active group
-  Future<void> setActiveGroup(MlsGroup? group) async {
+  /// This method is designed to keep the UI responsive:
+  /// 1. Immediately updates state and notifies listeners (UI shows loading)
+  /// 2. Defers heavy work to next microtask so UI can update first
+  /// 3. Loads messages in background (cryptography runs in isolate via compute())
+  void setActiveGroup(MlsGroup? group) {
     _activeGroup = group;
     _groupMessages = [];
     _hashtagFilter = null; // Clear hashtag filter when switching groups
 
-    if (group != null) {
-      // Load messages for this group
-      await _loadGroupMessages(group);
-      // Start listening for new messages
-      _startListeningForGroupMessages(group);
-    } else {
+    if (group == null) {
       // Stop listening for messages
       _messageEventSubscription?.cancel();
       _messageEventSubscription = null;
+      safeNotifyListeners();
+      return;
     }
 
-    safeNotifyListeners();
+    // Immediately notify to show loading state
+    // This triggers UI rebuild BEFORE any heavy work starts
+    _isLoading = true;
+    notifyListeners(); // Use direct notify for immediate UI update
+
+    // Defer ALL heavy work to the next microtask
+    // This ensures the UI frame completes and shows loading state first
+    Future.microtask(() async {
+      try {
+        // Start listening for new messages
+        _startListeningForGroupMessages(group);
+
+        // Load messages - crypto runs in isolate via compute()
+        await _loadGroupMessages(group);
+      } catch (e) {
+        debugPrint('Error loading group messages: $e');
+        _isLoading = false;
+        safeNotifyListeners();
+      }
+    });
   }
 
   /// Refresh messages for the active group
@@ -1265,9 +1298,6 @@ class GroupState with ChangeNotifier {
     if (_nostrService == null || !_isConnected) return;
 
     try {
-      _isLoading = true;
-      safeNotifyListeners();
-
       final groupIdHex = _groupIdToHex(group.id);
       debugPrint('Loading messages for group: $groupIdHex');
 
@@ -1459,14 +1489,14 @@ class GroupState with ChangeNotifier {
       _groupNameCache[groupIdHex] = name;
     }
 
-    // Update discovered groups list
+    // Update discovered groups list and cache
     final index = _discoveredGroups.indexWhere(
       (g) => g.mlsGroupId == groupIdHex,
     );
 
     if (index >= 0) {
       final existing = _discoveredGroups[index];
-      _discoveredGroups[index] = GroupAnnouncement(
+      final updatedAnnouncement = GroupAnnouncement(
         eventId: event.id, // Use the new event ID
         pubkey: existing.pubkey,
         name: name ?? existing.name,
@@ -1475,6 +1505,11 @@ class GroupState with ChangeNotifier {
         mlsGroupId: existing.mlsGroupId,
         createdAt: event.createdAt,
       );
+      _discoveredGroups[index] = updatedAnnouncement;
+
+      // Also update the announcement cache
+      _groupAnnouncementCache[groupIdHex] = updatedAnnouncement;
+
       debugPrint('Applied edit-metadata update for group $groupIdHex');
       safeNotifyListeners();
     }
@@ -1890,30 +1925,29 @@ class GroupState with ChangeNotifier {
                 null, // Disable cache for pagination or when explicitly disabled
       );
 
-      // Store events in our event table and update cache
-      if (_eventTable != null) {
-        for (final event in events) {
-          try {
-            await _eventTable!.insert(event);
-            // Update cache
-            final announcement = _parseCreateGroupEvent(event);
-            if (announcement != null &&
-                announcement.mlsGroupId != null &&
-                announcement.name != null) {
-              _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
-            }
-          } catch (e) {
-            debugPrint('Failed to store create-group event: $e');
-          }
-        }
-      }
-
-      // Parse events into GroupAnnouncement objects
+      // Parse events into GroupAnnouncement objects and update caches
       final announcements = <GroupAnnouncement>[];
       for (final event in events) {
         final announcement = _parseCreateGroupEvent(event);
         if (announcement != null) {
           announcements.add(announcement);
+
+          // Update caches for O(1) lookup
+          if (announcement.mlsGroupId != null) {
+            _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+            if (announcement.name != null) {
+              _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+            }
+          }
+        }
+
+        // Store in event table
+        if (_eventTable != null) {
+          try {
+            await _eventTable!.insert(event);
+          } catch (e) {
+            debugPrint('Failed to store create-group event: $e');
+          }
         }
       }
 
@@ -1943,6 +1977,10 @@ class GroupState with ChangeNotifier {
     for (final group in newGroups) {
       if (!_discoveredGroups.any((g) => g.eventId == group.eventId)) {
         _discoveredGroups.add(group);
+        // Also add to cache
+        if (group.mlsGroupId != null) {
+          _groupAnnouncementCache[group.mlsGroupId!] = group;
+        }
       }
     }
 
@@ -1961,6 +1999,9 @@ class GroupState with ChangeNotifier {
     final newGroups = await fetchGroupsFromRelay(limit: limit, useCache: false);
     _discoveredGroups = newGroups;
 
+    // Build announcement cache for O(1) lookup
+    _rebuildAnnouncementCache();
+
     // Also sync group names from NIP-29 create-group events (kind 9007)
     // This ensures we have the correct names for groups created with NIP-29
     await syncGroupNamesFromCreateEvents();
@@ -1969,6 +2010,21 @@ class GroupState with ChangeNotifier {
     await _syncEditMetadataEvents();
 
     safeNotifyListeners();
+  }
+
+  /// Rebuild the announcement cache from discovered groups
+  void _rebuildAnnouncementCache() {
+    _groupAnnouncementCache.clear();
+    for (final announcement in _discoveredGroups) {
+      if (announcement.mlsGroupId != null) {
+        _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+      }
+    }
+  }
+
+  /// Get group announcement by hex ID - O(1) lookup
+  GroupAnnouncement? getGroupAnnouncementByHexId(String groupIdHex) {
+    return _groupAnnouncementCache[groupIdHex];
   }
 
   /// Sync edit-metadata events (kind 9002) and apply updates to discovered groups
