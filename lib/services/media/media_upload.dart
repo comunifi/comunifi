@@ -9,6 +9,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'package:comunifi/services/nostr/client_signature.dart';
+import 'package:comunifi/services/media/encrypted_media.dart';
+import 'package:comunifi/services/mls/mls_group.dart';
 
 /// Result of a successful media upload
 class MediaUploadResult {
@@ -17,11 +19,15 @@ class MediaUploadResult {
   final int size;
   final String mimeType;
 
+  /// Whether the uploaded content is MLS encrypted
+  final bool isEncrypted;
+
   const MediaUploadResult({
     required this.url,
     required this.sha256,
     required this.size,
     required this.mimeType,
+    this.isEncrypted = false,
   });
 }
 
@@ -29,7 +35,12 @@ class MediaUploadResult {
 class MediaUploadService {
   static const int maxFileSize = 50 * 1024 * 1024; // 50MB
 
+  final EncryptedMediaService _encryptedMediaService = EncryptedMediaService();
+
   /// Upload a media file to the relay
+  ///
+  /// If [mlsGroup] is provided, the file will be encrypted using MLS before upload.
+  /// The [isEncrypted] flag in the result will be true for encrypted uploads.
   ///
   /// Returns a [MediaUploadResult] containing the URL and metadata
   Future<MediaUploadResult> upload({
@@ -37,38 +48,62 @@ class MediaUploadService {
     required String mimeType,
     required String groupId,
     required NostrKeyPairs keyPairs,
+    MlsGroup? mlsGroup,
   }) async {
     // Validate file size
     if (fileBytes.length > maxFileSize) {
       throw Exception('File exceeds maximum size of 50MB');
     }
 
-    // Calculate SHA-256 hash
-    final sha256 = await _calculateHash(fileBytes);
-    debugPrint('MediaUpload: File hash: $sha256 (${fileBytes.length} bytes)');
+    Uint8List bytesToUpload = fileBytes;
+    bool isEncrypted = false;
+
+    // Encrypt if MLS group is provided
+    if (mlsGroup != null) {
+      debugPrint('MediaUpload: Encrypting with MLS before upload');
+      final encryptResult = await _encryptedMediaService.encryptMedia(
+        fileBytes,
+        mlsGroup,
+      );
+      bytesToUpload = encryptResult.encryptedBytes;
+      isEncrypted = true;
+      debugPrint(
+        'MediaUpload: Encrypted ${fileBytes.length} -> ${bytesToUpload.length} bytes',
+      );
+    }
+
+    // Calculate SHA-256 hash of the bytes being uploaded (encrypted or plain)
+    final sha256 = await _calculateHash(bytesToUpload);
+    debugPrint(
+      'MediaUpload: File hash: $sha256 (${bytesToUpload.length} bytes)',
+    );
 
     // Create authorization event
     final authEvent = await _createAuthEvent(
       sha256: sha256,
       groupId: groupId,
-      fileSize: fileBytes.length,
+      fileSize: bytesToUpload.length,
       keyPairs: keyPairs,
     );
 
+    // Use application/octet-stream for encrypted content
+    final uploadMimeType = isEncrypted ? 'application/octet-stream' : mimeType;
+
     // Upload the file
     final url = await _uploadFile(
-      fileBytes: fileBytes,
-      mimeType: mimeType,
+      fileBytes: bytesToUpload,
+      mimeType: uploadMimeType,
       authEvent: authEvent,
     );
 
-    debugPrint('MediaUpload: Upload complete: $url');
+    debugPrint('MediaUpload: Upload complete: $url (encrypted: $isEncrypted)');
 
     return MediaUploadResult(
       url: url,
       sha256: sha256,
-      size: fileBytes.length,
+      size: bytesToUpload.length,
       mimeType: mimeType,
+      isEncrypted: isEncrypted,
     );
   }
 

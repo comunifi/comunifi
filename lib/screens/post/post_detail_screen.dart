@@ -11,7 +11,7 @@ import 'package:comunifi/widgets/heart_button.dart';
 import 'package:comunifi/widgets/quote_button.dart';
 import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
-import 'package:comunifi/widgets/dismissible_image_viewer.dart';
+import 'package:comunifi/widgets/encrypted_image.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -418,7 +418,7 @@ class _PostItemContentState extends State<_PostItemContent> {
               _RichContentText(content: widget.event.content),
               // Display attached images (NIP-92 imeta)
               if (widget.event.hasImages)
-                _EventImages(imageUrls: widget.event.imageUrls),
+                EventImages(images: widget.event.imageInfoList),
               // Link previews
               Builder(
                 builder: (context) {
@@ -670,7 +670,7 @@ class _CommentItemContentState extends State<_CommentItemContent> {
               _RichContentText(content: widget.event.content),
               // Display attached images (NIP-92 imeta)
               if (widget.event.hasImages)
-                _EventImages(imageUrls: widget.event.imageUrls),
+                EventImages(images: widget.event.imageInfoList),
               // Link previews for comments
               Builder(
                 builder: (context) {
@@ -788,84 +788,6 @@ class _RichContentText extends StatelessWidget {
         debugPrint('Could not launch URL: $e');
       }
     }
-  }
-}
-
-/// Widget to display images attached to an event
-class _EventImages extends StatelessWidget {
-  final List<String> imageUrls;
-
-  /// Fixed max width for images (same as link previews)
-  static const double maxImageWidth = 500;
-
-  /// Fixed max height for images
-  static const double maxImageHeight = 400;
-
-  const _EventImages({required this.imageUrls});
-
-  @override
-  Widget build(BuildContext context) {
-    if (imageUrls.isEmpty) return const SizedBox.shrink();
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 8.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: imageUrls.map((url) {
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8.0),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(
-                maxWidth: maxImageWidth,
-                maxHeight: maxImageHeight,
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12.0),
-                child: GestureDetector(
-                  onTap: () => _showFullImage(context, url),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: CupertinoColors.systemGrey5,
-                      borderRadius: BorderRadius.circular(12.0),
-                    ),
-                    child: Image.network(
-                      url,
-                      fit: BoxFit.contain,
-                      loadingBuilder: (context, child, loadingProgress) {
-                        if (loadingProgress == null) return child;
-                        return const SizedBox(
-                          width: maxImageWidth,
-                          height: maxImageHeight,
-                          child: Center(
-                            child: CupertinoActivityIndicator(),
-                          ),
-                        );
-                      },
-                      errorBuilder: (context, error, stackTrace) {
-                        return const SizedBox(
-                          width: maxImageWidth,
-                          height: 100,
-                          child: Center(
-                            child: Icon(
-                              CupertinoIcons.photo,
-                              color: CupertinoColors.systemGrey,
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-
-  void _showFullImage(BuildContext context, String url) {
-    DismissibleImageViewer.show(context, url);
   }
 }
 

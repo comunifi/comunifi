@@ -355,26 +355,46 @@ class NostrEventModel {
   /// Get image URLs from the event (NIP-92 imeta tags)
   /// Returns a list of image URLs found in imeta tags
   List<String> get imageUrls {
-    final urls = <String>[];
+    return imageInfoList.map((info) => info.url).toList();
+  }
+
+  /// Get detailed image info from the event (NIP-92 imeta tags)
+  /// Returns a list of [EventImageInfo] containing URL, sha256, and encryption status
+  List<EventImageInfo> get imageInfoList {
+    final images = <EventImageInfo>[];
     for (final tag in tags) {
       if (tag.isNotEmpty && tag[0] == 'imeta') {
-        // imeta tag format: ['imeta', 'url <url>', 'blurhash <hash>', ...]
+        // imeta tag format: ['imeta', 'url <url>', 'x <sha256>', 'encrypted mls', ...]
+        String? url;
+        String? sha256;
+        bool isEncrypted = false;
+
         for (int i = 1; i < tag.length; i++) {
           final value = tag[i];
           if (value.startsWith('url ')) {
-            final url = value.substring(4).trim();
-            if (url.isNotEmpty) {
-              urls.add(url);
-            }
+            url = value.substring(4).trim();
+          } else if (value.startsWith('x ')) {
+            sha256 = value.substring(2).trim();
+          } else if (value == 'encrypted mls') {
+            isEncrypted = true;
           }
+        }
+
+        if (url != null && url.isNotEmpty) {
+          images.add(
+            EventImageInfo(url: url, sha256: sha256, isEncrypted: isEncrypted),
+          );
         }
       }
     }
-    return urls;
+    return images;
   }
 
   /// Check if this event has images attached
-  bool get hasImages => imageUrls.isNotEmpty;
+  bool get hasImages => imageInfoList.isNotEmpty;
+
+  /// Check if this event has any encrypted images
+  bool get hasEncryptedImages => imageInfoList.any((info) => info.isEncrypted);
 
   /// Extract hashtags from 't' tags (NIP-12)
   /// Returns a list of hashtags (lowercase, without the # symbol)
@@ -449,7 +469,13 @@ class NostrEventModel {
 /// Synchronous version that only adds client ID tag (no signature)
 /// Use addClientTagsWithSignature from client_signature.dart for signed tags
 List<List<String>> addClientIdTag(List<List<String>> tags) {
-  if (tags.any((tag) => tag.isNotEmpty && tag[0] == 'client' && tag.length > 1 && tag[1] == 'comunifi')) {
+  if (tags.any(
+    (tag) =>
+        tag.isNotEmpty &&
+        tag[0] == 'client' &&
+        tag.length > 1 &&
+        tag[1] == 'comunifi',
+  )) {
     return tags;
   }
 
@@ -457,4 +483,22 @@ List<List<String>> addClientIdTag(List<List<String>> tags) {
     ['client', 'comunifi'],
     ...tags,
   ];
+}
+
+/// Information about an image attached to a Nostr event
+class EventImageInfo {
+  /// URL of the image blob
+  final String url;
+
+  /// SHA-256 hash of the blob (used as cache key for encrypted images)
+  final String? sha256;
+
+  /// Whether the image is MLS encrypted
+  final bool isEncrypted;
+
+  const EventImageInfo({
+    required this.url,
+    this.sha256,
+    this.isEncrypted = false,
+  });
 }

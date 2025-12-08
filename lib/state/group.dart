@@ -1657,7 +1657,14 @@ class GroupState with ChangeNotifier {
   /// Message will be encrypted with MLS and sent as kind 1059 envelope
   /// Automatically extracts URLs from content and adds 'r' tags (Nostr convention)
   /// If [imageUrl] is provided, it will be added as an 'imeta' tag (NIP-92)
-  Future<void> postMessage(String content, {String? imageUrl}) async {
+  /// If [isImageEncrypted] is true, the 'encrypted mls' flag is added to the imeta tag
+  /// and [imageSha256] is required for decryption cache lookup
+  Future<void> postMessage(
+    String content, {
+    String? imageUrl,
+    bool isImageEncrypted = false,
+    String? imageSha256,
+  }) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
     }
@@ -1689,8 +1696,18 @@ class GroupState with ChangeNotifier {
       ];
 
       // Add image tag if provided (NIP-92 imeta format)
+      // For encrypted images, add 'encrypted mls' flag and sha256 for cache lookup
       if (imageUrl != null) {
-        baseTags.add(['imeta', 'url $imageUrl']);
+        if (isImageEncrypted && imageSha256 != null) {
+          baseTags.add([
+            'imeta',
+            'url $imageUrl',
+            'x $imageSha256',
+            'encrypted mls',
+          ]);
+        } else {
+          baseTags.add(['imeta', 'url $imageUrl']);
+        }
       }
 
       // Create a normal Nostr event (kind 1 = text note)
@@ -1747,7 +1764,7 @@ class GroupState with ChangeNotifier {
         debugPrint('Added ${urlTags.length} URL reference tag(s)');
       }
       if (imageUrl != null) {
-        debugPrint('Added image: $imageUrl');
+        debugPrint('Added image: $imageUrl (encrypted: $isImageEncrypted)');
       }
     } catch (e) {
       debugPrint('Failed to post message: $e');
@@ -1755,10 +1772,16 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Upload media to the relay and return the URL
+  /// Upload media to the relay with MLS encryption
   ///
-  /// Uses the Blossom protocol with the active group's ID
-  Future<String> uploadMedia(Uint8List fileBytes, String mimeType) async {
+  /// Uses the Blossom protocol with the active group's ID.
+  /// The image is encrypted using the active group's MLS before upload.
+  ///
+  /// Returns a [MediaUploadResult] containing URL, sha256, and encryption status.
+  Future<MediaUploadResult> uploadMedia(
+    Uint8List fileBytes,
+    String mimeType,
+  ) async {
     if (_activeGroup == null) {
       throw Exception('No active group selected. Please select a group first.');
     }
@@ -1773,14 +1796,16 @@ class GroupState with ChangeNotifier {
     final keyPair = NostrKeyPairs(private: privateKey);
     final groupIdHex = _groupIdToHex(_activeGroup!.id);
 
+    // Upload with MLS encryption using the active group
     final result = await _mediaUploadService.upload(
       fileBytes: fileBytes,
       mimeType: mimeType,
       groupId: groupIdHex,
       keyPairs: keyPair,
+      mlsGroup: _activeGroup,
     );
 
-    return result.url;
+    return result;
   }
 
   /// Upload media to the user's own (personal) group

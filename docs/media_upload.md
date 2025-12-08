@@ -497,6 +497,51 @@ Future<void> deleteBlob({
 4. **Handle upload failures** gracefully with retry logic
 5. **Show upload progress** for large files using chunked uploads
 
+## MLS Encryption for Images
+
+Images uploaded to groups are encrypted using MLS before upload. This ensures only group members can view the images.
+
+### How It Works
+
+1. **Upload Flow**:
+   - Image bytes are encrypted using `MlsGroup.encryptApplicationMessage()`
+   - The resulting `MlsCiphertext` is serialized to bytes
+   - Encrypted bytes are uploaded as `application/octet-stream`
+   - The `imeta` tag includes `encrypted mls` flag and SHA-256 hash
+
+2. **Download/Display Flow**:
+   - `EncryptedImage` widget detects encrypted images via `imeta` tag
+   - Downloads the encrypted blob from the URL
+   - Deserializes and decrypts using the active group's MLS
+   - Caches decrypted image locally (keyed by SHA-256 hash)
+   - Displays from local file via `Image.file()`
+
+### imeta Tag Format
+
+For encrypted images:
+```
+['imeta', 'url <url>', 'x <sha256>', 'encrypted mls']
+```
+
+For non-encrypted images (profile photos, etc.):
+```
+['imeta', 'url <url>']
+```
+
+### Key Files
+
+- `lib/services/media/encrypted_media.dart` - Encryption/decryption/caching service
+- `lib/services/media/media_upload.dart` - Upload service with optional MLS encryption
+- `lib/widgets/encrypted_image.dart` - Widget for displaying encrypted images
+- `lib/models/nostr_event.dart` - `EventImageInfo` model for parsing imeta tags
+
+### Cache Location
+
+Decrypted images are cached at:
+```
+{app_documents}/encrypted_media_cache/{sha256}
+```
+
 ## Future Improvements
 
 - [ ] Add upload progress callbacks
@@ -505,4 +550,6 @@ Future<void> deleteBlob({
 - [ ] Support for resumable uploads
 - [ ] Client-side thumbnail generation
 - [ ] Tor support for uploads (via SOCKS proxy)
+- [x] MLS encryption for images
+- [ ] Cache cleanup (LRU or time-based eviction)
 
