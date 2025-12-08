@@ -4,12 +4,12 @@ import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
 
 import 'package:comunifi/models/nostr_event.dart';
-import 'package:comunifi/services/media/encrypted_media.dart';
 import 'package:comunifi/state/group.dart';
 
 /// Widget for displaying encrypted images
 ///
 /// Handles downloading, decrypting, caching, and displaying encrypted images.
+/// Uses GroupState for decryption and caching via the database.
 /// Falls back to regular network image for non-encrypted images.
 class EncryptedImage extends StatefulWidget {
   final EventImageInfo imageInfo;
@@ -34,8 +34,6 @@ class EncryptedImage extends StatefulWidget {
 }
 
 class _EncryptedImageState extends State<EncryptedImage> {
-  final EncryptedMediaService _encryptedMediaService = EncryptedMediaService();
-
   String? _localPath;
   bool _isLoading = true;
   Object? _error;
@@ -68,6 +66,34 @@ class _EncryptedImageState extends State<EncryptedImage> {
       return;
     }
 
+    // Get sha256 - required for encrypted images
+    final sha256 = widget.imageInfo.sha256;
+    if (sha256 == null || sha256.isEmpty) {
+      setState(() {
+        _isLoading = false;
+        _error = Exception('SHA-256 hash required for encrypted image');
+      });
+      return;
+    }
+
+    // Check memory cache first (synchronous)
+    final groupState = context.read<GroupState>();
+    final cachedPath = groupState.getDecryptedImagePath(sha256);
+    if (cachedPath != null) {
+      // Verify file exists
+      final file = File(cachedPath);
+      if (await file.exists()) {
+        if (mounted) {
+          setState(() {
+            _localPath = cachedPath;
+            _isLoading = false;
+            _error = null;
+          });
+        }
+        return;
+      }
+    }
+
     // Encrypted image - need to decrypt and cache
     setState(() {
       _isLoading = true;
@@ -76,26 +102,15 @@ class _EncryptedImageState extends State<EncryptedImage> {
     });
 
     try {
-      // Get the active MLS group for decryption
-      final groupState = context.read<GroupState>();
-      final activeGroup = groupState.activeGroup;
-
-      if (activeGroup == null) {
-        throw Exception('No active group for decryption');
-      }
-
-      // Get sha256 - required for encrypted images
-      final sha256 = widget.imageInfo.sha256;
-      if (sha256 == null || sha256.isEmpty) {
-        throw Exception('SHA-256 hash required for encrypted image');
-      }
-
-      // Decrypt and cache
-      final localPath = await _encryptedMediaService.decryptAndCacheMedia(
+      // Use GroupState to decrypt and cache (handles DB persistence)
+      final localPath = await groupState.getOrDecryptImage(
         url: widget.imageInfo.url,
         sha256: sha256,
-        group: activeGroup,
       );
+
+      if (localPath == null) {
+        throw Exception('Failed to decrypt image');
+      }
 
       if (mounted) {
         setState(() {

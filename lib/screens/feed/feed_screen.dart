@@ -1727,7 +1727,8 @@ class _GroupHeaderState extends State<_GroupHeader> {
   Future<void> _checkAdminStatus() async {
     final groupIdHex = _groupIdToHex(widget.group);
     final isAdmin = await widget.groupState.isGroupAdmin(groupIdHex);
-    if (mounted) {
+    // Verify the group hasn't changed since the check started before updating state
+    if (mounted && _groupIdToHex(widget.group) == groupIdHex) {
       setState(() {
         _isAdmin = isAdmin;
         _checkedAdmin = true;

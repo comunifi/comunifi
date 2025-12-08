@@ -3,7 +3,9 @@ import 'dart:io';
 import 'package:cryptography/cryptography.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:sqflite_common/sqflite.dart';
 
+import 'package:comunifi/services/db/decrypted_media_cache.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/services/mls/messages/messages.dart';
 import 'package:comunifi/services/mls/group_state/group_state.dart';
@@ -35,6 +37,20 @@ class EncryptedMediaService {
   /// Directory name for cached decrypted images
   static const String _cacheDir = 'encrypted_media_cache';
 
+  /// Database table for caching decrypted media paths
+  DecryptedMediaCacheTable? _cacheTable;
+
+  /// Initialize the service with a database connection
+  void initWithDatabase(Database db) {
+    _cacheTable = DecryptedMediaCacheTable(db);
+  }
+
+  /// Ensure the cache table is created in the database
+  Future<void> ensureTableCreated(Database db) async {
+    _cacheTable ??= DecryptedMediaCacheTable(db);
+    await _cacheTable!.create(db);
+  }
+
   /// Encrypt media bytes using the group's MLS encryption
   ///
   /// Returns [EncryptedMediaResult] containing encrypted bytes and metadata
@@ -64,19 +80,21 @@ class EncryptedMediaService {
   /// Decrypt and cache media from a URL
   ///
   /// Downloads the encrypted blob, decrypts it using the MLS group,
-  /// caches to local filesystem, and returns the local file path.
+  /// caches to local filesystem and database, and returns the local file path.
   ///
   /// [url] - URL of the encrypted blob
   /// [sha256] - SHA-256 hash of the encrypted blob (used as cache key)
   /// [group] - MLS group for decryption
+  /// [groupIdHex] - Hex string of the group ID (for database storage)
   ///
   /// Returns the local file path of the decrypted image
   Future<String> decryptAndCacheMedia({
     required String url,
     required String sha256,
     required MlsGroup group,
+    String? groupIdHex,
   }) async {
-    // Check if already cached
+    // Check if already cached (DB first, then filesystem)
     final cachedPath = await getCachedPath(sha256);
     if (cachedPath != null) {
       debugPrint('EncryptedMedia: Using cached file: $cachedPath');
@@ -99,16 +117,61 @@ class EncryptedMediaService {
     // Cache to local filesystem
     final localPath = await _cacheDecryptedMedia(sha256, decryptedBytes);
 
+    // Store in database for quick lookup
+    final effectiveGroupIdHex = groupIdHex ??
+        group.id.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    await _storeCacheEntry(sha256, localPath, effectiveGroupIdHex);
+
     debugPrint('EncryptedMedia: Cached to $localPath');
 
     return localPath;
   }
 
+  /// Store a cache entry in the database
+  Future<void> _storeCacheEntry(
+    String sha256,
+    String localPath,
+    String groupId,
+  ) async {
+    if (_cacheTable == null) {
+      debugPrint('EncryptedMedia: DB not initialized, skipping DB cache');
+      return;
+    }
+
+    try {
+      await _cacheTable!.insert(
+        DecryptedMediaCacheEntry(
+          sha256: sha256,
+          localPath: localPath,
+          groupId: groupId,
+          createdAt: DateTime.now(),
+        ),
+      );
+    } catch (e) {
+      debugPrint('EncryptedMedia: Failed to store cache entry in DB: $e');
+    }
+  }
+
   /// Check if a decrypted media file is already cached
   ///
-  /// Returns the local file path if cached, null otherwise
+  /// First checks the database for the path, then verifies the file exists.
+  /// Returns the local file path if cached, null otherwise.
   Future<String?> getCachedPath(String sha256) async {
     try {
+      // First check database for cached path
+      if (_cacheTable != null) {
+        final dbPath = await _cacheTable!.getLocalPath(sha256);
+        if (dbPath != null) {
+          final file = File(dbPath);
+          if (await file.exists()) {
+            return dbPath;
+          }
+          // File doesn't exist anymore, remove stale DB entry
+          await _cacheTable!.delete(sha256);
+        }
+      }
+
+      // Fallback: check filesystem directly
       final cacheDirectory = await _getCacheDirectory();
       final filePath = '${cacheDirectory.path}/$sha256';
       final file = File(filePath);
@@ -123,9 +186,35 @@ class EncryptedMediaService {
     }
   }
 
-  /// Clear all cached decrypted media
+  /// Get the local path from database only (without filesystem check)
+  /// This is faster for state manager lookups when we trust the DB
+  Future<String?> getCachedPathFromDB(String sha256) async {
+    if (_cacheTable == null) return null;
+    return await _cacheTable!.getLocalPath(sha256);
+  }
+
+  /// Get all cached paths for a group as a map (sha256 -> localPath)
+  /// Used by state manager to load cache on group activation
+  Future<Map<String, String>> getGroupCacheMap(String groupId) async {
+    if (_cacheTable == null) return {};
+    return await _cacheTable!.getGroupCacheMap(groupId);
+  }
+
+  /// Get all cached paths as a map (sha256 -> localPath)
+  Future<Map<String, String>> getAllCacheMap() async {
+    if (_cacheTable == null) return {};
+    return await _cacheTable!.getAllAsMap();
+  }
+
+  /// Clear all cached decrypted media (both filesystem and database)
   Future<void> clearCache() async {
     try {
+      // Clear database entries
+      if (_cacheTable != null) {
+        await _cacheTable!.clear();
+      }
+
+      // Clear filesystem cache
       final cacheDirectory = await _getCacheDirectory();
       if (await cacheDirectory.exists()) {
         await cacheDirectory.delete(recursive: true);
@@ -133,6 +222,34 @@ class EncryptedMediaService {
       }
     } catch (e) {
       debugPrint('EncryptedMedia: Error clearing cache: $e');
+    }
+  }
+
+  /// Clear cache for a specific group
+  Future<void> clearGroupCache(String groupId) async {
+    if (_cacheTable == null) return;
+
+    try {
+      // Get all entries for this group before deleting from DB
+      final entries = await _cacheTable!.getByGroupId(groupId);
+
+      // Delete files
+      for (final entry in entries) {
+        try {
+          final file = File(entry.localPath);
+          if (await file.exists()) {
+            await file.delete();
+          }
+        } catch (e) {
+          debugPrint('EncryptedMedia: Failed to delete file: $e');
+        }
+      }
+
+      // Delete from DB
+      await _cacheTable!.deleteByGroupId(groupId);
+      debugPrint('EncryptedMedia: Cleared cache for group $groupId');
+    } catch (e) {
+      debugPrint('EncryptedMedia: Error clearing group cache: $e');
     }
   }
 

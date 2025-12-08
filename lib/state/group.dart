@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
@@ -39,6 +40,8 @@ import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/media/media_upload.dart';
+import 'package:comunifi/services/media/encrypted_media.dart';
+import 'package:comunifi/services/db/decrypted_media_cache.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -97,6 +100,15 @@ class GroupState with ChangeNotifier {
 
   // Map of group ID (hex) to group announcement for O(1) lookup
   final Map<String, GroupAnnouncement> _groupAnnouncementCache = {};
+
+  // Map of image SHA-256 to local file path for decrypted images
+  final Map<String, String> _decryptedImagePaths = {};
+
+  // Encrypted media service for decryption operations
+  final EncryptedMediaService _encryptedMediaService = EncryptedMediaService();
+
+  // Database table for decrypted media cache
+  DecryptedMediaCacheTable? _decryptedMediaCacheTable;
 
   // Callback to ensure user profile (set by widgets that have access to ProfileState)
   // Parameters: pubkey, privateKey, hpkePublicKeyHex
@@ -215,6 +227,18 @@ class GroupState with ChangeNotifier {
     try {
       _dbService = AppDBService();
       await _dbService!.init('group_keys');
+
+      // Initialize decrypted media cache table
+      _decryptedMediaCacheTable = DecryptedMediaCacheTable(
+        _dbService!.database!,
+      );
+      await _decryptedMediaCacheTable!.create(_dbService!.database!);
+
+      // Initialize encrypted media service with database
+      _encryptedMediaService.initWithDatabase(_dbService!.database!);
+
+      // Load all cached image paths into memory
+      await _loadDecryptedImagePaths();
 
       _mlsStorage = await SecurePersistentMlsStorage.fromDatabase(
         database: _dbService!.database!,
@@ -1874,6 +1898,108 @@ class GroupState with ChangeNotifier {
     );
 
     return result.url;
+  }
+
+  // ============================================================================
+  // Decrypted Image Cache Management
+  // ============================================================================
+
+  /// Get the encrypted media service for direct access by widgets
+  EncryptedMediaService get encryptedMediaService => _encryptedMediaService;
+
+  /// Load all decrypted image paths from database into memory
+  Future<void> _loadDecryptedImagePaths() async {
+    if (_decryptedMediaCacheTable == null) return;
+
+    try {
+      final allPaths = await _decryptedMediaCacheTable!.getAllAsMap();
+      _decryptedImagePaths.clear();
+      _decryptedImagePaths.addAll(allPaths);
+      debugPrint(
+        'Loaded ${_decryptedImagePaths.length} decrypted image paths from DB',
+      );
+    } catch (e) {
+      debugPrint('Failed to load decrypted image paths: $e');
+    }
+  }
+
+  /// Get the local path for a decrypted image (from memory cache)
+  ///
+  /// Returns null if not cached. This is a fast synchronous lookup.
+  String? getDecryptedImagePath(String sha256) {
+    return _decryptedImagePaths[sha256];
+  }
+
+  /// Get the local path for a decrypted image, decrypting if necessary
+  ///
+  /// This is the main method widgets should use. It:
+  /// 1. Checks memory cache first
+  /// 2. Falls back to database lookup
+  /// 3. Downloads and decrypts if not cached
+  /// 4. Updates memory cache and database
+  Future<String?> getOrDecryptImage({
+    required String url,
+    required String sha256,
+  }) async {
+    // Check memory cache first
+    final memoryPath = _decryptedImagePaths[sha256];
+    if (memoryPath != null) {
+      // Verify file still exists
+      final file = File(memoryPath);
+      if (await file.exists()) {
+        return memoryPath;
+      }
+      // File doesn't exist, remove from memory cache
+      _decryptedImagePaths.remove(sha256);
+    }
+
+    // Need an active group for decryption
+    if (_activeGroup == null) {
+      debugPrint('Cannot decrypt image: no active group');
+      return null;
+    }
+
+    try {
+      final groupIdHex = _groupIdToHex(_activeGroup!.id);
+
+      // Decrypt and cache (service handles DB storage)
+      final localPath = await _encryptedMediaService.decryptAndCacheMedia(
+        url: url,
+        sha256: sha256,
+        group: _activeGroup!,
+        groupIdHex: groupIdHex,
+      );
+
+      // Update memory cache
+      _decryptedImagePaths[sha256] = localPath;
+      safeNotifyListeners();
+
+      return localPath;
+    } catch (e) {
+      debugPrint('Failed to decrypt image: $e');
+      return null;
+    }
+  }
+
+  /// Check if an image is already cached
+  bool isImageCached(String sha256) {
+    return _decryptedImagePaths.containsKey(sha256);
+  }
+
+  /// Clear all decrypted image cache
+  Future<void> clearDecryptedImageCache() async {
+    await _encryptedMediaService.clearCache();
+    _decryptedImagePaths.clear();
+    safeNotifyListeners();
+  }
+
+  /// Clear decrypted image cache for a specific group
+  Future<void> clearGroupImageCache(String groupId) async {
+    await _encryptedMediaService.clearGroupCache(groupId);
+
+    // Reload paths from DB (stale entries removed)
+    await _loadDecryptedImagePaths();
+    safeNotifyListeners();
   }
 
   /// Get the stored Nostr private key
