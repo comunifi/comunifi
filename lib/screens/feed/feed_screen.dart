@@ -12,6 +12,7 @@ import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
+import 'package:comunifi/screens/feed/edit_group_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
 import 'package:comunifi/widgets/members_sidebar.dart';
@@ -1681,11 +1682,20 @@ class _ContentMatch {
 }
 
 /// Group header with banner, profile photo, and name (Twitter-style)
-class _GroupHeader extends StatelessWidget {
+/// Admins can tap on the photo/name to edit group metadata
+class _GroupHeader extends StatefulWidget {
   final MlsGroup group;
   final GroupState groupState;
 
   const _GroupHeader({required this.group, required this.groupState});
+
+  @override
+  State<_GroupHeader> createState() => _GroupHeaderState();
+}
+
+class _GroupHeaderState extends State<_GroupHeader> {
+  bool _isAdmin = false;
+  bool _checkedAdmin = false;
 
   String _groupIdToHex(MlsGroup group) {
     return group.id.bytes
@@ -1694,98 +1704,209 @@ class _GroupHeader extends StatelessWidget {
   }
 
   @override
+  void initState() {
+    super.initState();
+    _checkAdminStatus();
+  }
+
+  @override
+  void didUpdateWidget(_GroupHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Recheck admin status if group changes
+    if (_groupIdToHex(oldWidget.group) != _groupIdToHex(widget.group)) {
+      _checkAdminStatus();
+    }
+  }
+
+  Future<void> _checkAdminStatus() async {
+    final groupIdHex = _groupIdToHex(widget.group);
+    final isAdmin = await widget.groupState.isGroupAdmin(groupIdHex);
+    if (mounted) {
+      setState(() {
+        _isAdmin = isAdmin;
+        _checkedAdmin = true;
+      });
+    }
+  }
+
+  void _showEditModal(GroupAnnouncement announcement) {
+    showEditGroupModal(
+      context,
+      announcement,
+      onSaved: () {
+        // Refresh will happen automatically via GroupState notifyListeners
+      },
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final groupIdHex = _groupIdToHex(group);
+    final groupIdHex = _groupIdToHex(widget.group);
 
     // Find the group announcement to get the picture
-    final announcement = groupState.discoveredGroups
+    final announcement = widget.groupState.discoveredGroups
         .cast<GroupAnnouncement?>()
         .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
 
-    final groupName = announcement?.name ?? group.name;
+    final groupName = announcement?.name ?? widget.group.name;
     final groupPicture = announcement?.picture;
     final groupAbout = announcement?.about;
+
+    // Create a placeholder announcement if none exists (for newly created groups)
+    final effectiveAnnouncement =
+        announcement ??
+        GroupAnnouncement(
+          eventId: '',
+          pubkey: '',
+          name: widget.group.name,
+          mlsGroupId: groupIdHex,
+          createdAt: DateTime.now(),
+        );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Banner area
-        Stack(
-          clipBehavior: Clip.none,
-          children: [
-            // Banner placeholder
-            Container(
-              height: 120,
-              width: double.infinity,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    CupertinoColors.systemIndigo.withOpacity(0.6),
-                    CupertinoColors.systemPurple.withOpacity(0.4),
-                  ],
-                ),
-              ),
-            ),
-            // Profile photo overlapping the banner
-            Positioned(
-              left: 16,
-              bottom: -40,
-              child: Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: CupertinoColors.systemBackground,
-                  border: Border.all(
-                    color: CupertinoColors.systemBackground,
-                    width: 4,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: CupertinoColors.black.withOpacity(0.15),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
+        // Banner area with profile photo
+        SizedBox(
+          height: 160, // 120 banner + 40 overflow for profile photo
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              // Banner placeholder
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 120,
                 child: Container(
                   decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: CupertinoColors.systemGrey4,
-                    image: groupPicture != null
-                        ? DecorationImage(
-                            image: NetworkImage(groupPicture),
-                            fit: BoxFit.cover,
-                          )
-                        : null,
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        CupertinoColors.systemIndigo.withOpacity(0.6),
+                        CupertinoColors.systemPurple.withOpacity(0.4),
+                      ],
+                    ),
                   ),
-                  child: groupPicture == null
-                      ? const Icon(
-                          CupertinoIcons.person_2_fill,
-                          size: 36,
-                          color: CupertinoColors.systemGrey,
-                        )
-                      : null,
                 ),
               ),
-            ),
-          ],
+              // Profile photo overlapping the banner
+              Positioned(
+                left: 16,
+                top: 80, // 120 - 40 = starts 40px from bottom of banner
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _isAdmin
+                      ? () => _showEditModal(effectiveAnnouncement)
+                      : null,
+                  child: Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: CupertinoColors.systemBackground,
+                      border: Border.all(
+                        color: CupertinoColors.systemBackground,
+                        width: 4,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: CupertinoColors.black.withOpacity(0.15),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: CupertinoColors.systemGrey4,
+                              image: groupPicture != null
+                                  ? DecorationImage(
+                                      image: NetworkImage(groupPicture),
+                                      fit: BoxFit.cover,
+                                    )
+                                  : null,
+                            ),
+                            child: groupPicture == null
+                                ? const Center(
+                                    child: Icon(
+                                      CupertinoIcons.person_2_fill,
+                                      size: 36,
+                                      color: CupertinoColors.systemGrey,
+                                    ),
+                                  )
+                                : null,
+                          ),
+                        ),
+                        // Edit badge for admins
+                        if (_isAdmin && _checkedAdmin)
+                          Positioned(
+                            bottom: 0,
+                            right: 0,
+                            child: Container(
+                              width: 24,
+                              height: 24,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: CupertinoColors.activeBlue,
+                                border: Border.all(
+                                  color: CupertinoColors.systemBackground,
+                                  width: 2,
+                                ),
+                              ),
+                              child: const Icon(
+                                CupertinoIcons.pencil,
+                                size: 12,
+                                color: CupertinoColors.white,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
-        // Space for the overlapping profile photo
-        const SizedBox(height: 48),
+        // Space between photo and group name
+        const SizedBox(height: 8),
         // Group name and about
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                groupName,
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
+              GestureDetector(
+                onTap: _isAdmin
+                    ? () => _showEditModal(effectiveAnnouncement)
+                    : null,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        groupName,
+                        style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    if (_isAdmin && _checkedAdmin) ...[
+                      const SizedBox(width: 8),
+                      Icon(
+                        CupertinoIcons.pencil,
+                        size: 16,
+                        color: CupertinoColors.activeBlue.resolveFrom(context),
+                      ),
+                    ],
+                  ],
                 ),
               ),
               if (groupAbout != null && groupAbout.isNotEmpty) ...[
