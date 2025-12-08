@@ -202,37 +202,78 @@ The `_CreateGroupModal` provides a bottom sheet for creating groups:
    }
 ```
 
+### NIP-29 Membership Determination
+
+Group membership is determined by NIP-29 events from the relay:
+
+| Kind | Name | Purpose |
+|------|------|---------|
+| 9000 | put-user | User was added to group |
+| 9001 | remove-user | User was removed from group |
+
+**Membership Logic:**
+A user is considered a member of a group if their latest `kind 9000` (put-user) event is more recent than their latest `kind 9001` (remove-user) event, or if no remove-user event exists.
+
+```dart
+/// Check if user is a member based on NIP-29 events
+Future<bool> isUserMemberOfGroup(String groupIdHex, String userPubkey) async {
+  // Query kind 9000 (put-user) events for this user in this group
+  final putEvents = await requestPastEvents(kind: 9000, tags: [groupIdHex], tagKey: 'h');
+  final userPutEvents = putEvents.where((e) => e.hasUserInPTag(userPubkey));
+  
+  if (userPutEvents.isEmpty) return false; // Never added
+  
+  // Query kind 9001 (remove-user) events  
+  final removeEvents = await requestPastEvents(kind: 9001, tags: [groupIdHex], tagKey: 'h');
+  final userRemoveEvents = removeEvents.where((e) => e.hasUserInPTag(userPubkey));
+  
+  if (userRemoveEvents.isEmpty) return true; // Added but never removed
+  
+  // Member if added after last removal
+  return latestPutTime.isAfter(latestRemoveTime);
+}
+```
+
 ### Building the Group List
 
-Groups are combined from discovered (relay) and local (MLS storage):
+Groups are filtered based on NIP-29 membership. Personal groups (groups the user created) are excluded:
 
 ```dart
 List<_GroupItem> _buildGroupList(GroupState groupState) {
   final allGroups = <_GroupItem>[];
 
-  // 1. Add discovered groups with matching local groups
+  // Filter based on NIP-29 membership (kind 9000/9001 events)
   for (final announcement in groupState.discoveredGroups) {
-    MlsGroup? matchingGroup = ...;
+    // Skip the auto-created "Personal" group
+    final isPersonalGroup = announcement.pubkey == userPubkey &&
+        announcement.name?.toLowerCase() == 'personal';
+    if (isPersonalGroup) continue;
+
+    // Check NIP-29 membership
+    final isMember = memberships[announcement.mlsGroupId] ?? false;
+    if (!isMember) continue;
+
+    // Find matching local MLS group if available
+    MlsGroup? matchingGroup = findLocalGroup(announcement.mlsGroupId);
+
     allGroups.add(_GroupItem(
       announcement: announcement,
       mlsGroup: matchingGroup,
-      isMyGroup: announcement.pubkey == userPubkey,
+      isMyGroup: false,
     ));
   }
 
-  // 2. Add local-only groups (not on relay)
-  for (final group in groupState.groups) {
-    if (!alreadyIncluded) {
-      allGroups.add(_GroupItem(mlsGroup: group, isMyGroup: true));
-    }
-  }
-
-  // 3. Sort by creation date (newest first)
+  // Sort by creation date (newest first)
   allGroups.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
   return allGroups;
 }
 ```
+
+**Filtering Rules:**
+- Groups are filtered based on NIP-29 membership events (kind 9000/9001)
+- User is a member if latest kind 9000 (put-user) is after latest kind 9001 (remove-user)
+- Only the auto-created "Personal" group is hidden from the sidebar (other user-created groups are shown)
 
 ## Key Files
 
@@ -247,6 +288,7 @@ List<_GroupItem> _buildGroupList(GroupState groupState) {
 | Kind | Name | Purpose |
 |------|------|---------|
 | 9000 | put-user | Add member to group |
+| 9001 | remove-user | Remove member from group |
 | 9002 | edit-metadata | Update group name/about/picture |
 | 9007 | create-group | Announce group creation |
 | 39001 | group-admins | List of group admins |

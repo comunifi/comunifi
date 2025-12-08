@@ -31,6 +31,7 @@ import 'package:comunifi/models/nostr_event.dart'
         kindGroupMembers,
         kindMlsWelcome,
         kindPutUser,
+        kindRemoveUser,
         NostrEventModel;
 import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/messages/messages.dart'
@@ -2858,5 +2859,195 @@ class GroupState with ChangeNotifier {
       debugPrint('Failed to ensure personal group: $e');
       // Don't throw - this is not critical for app functionality
     }
+  }
+
+  // ============================================================================
+  // NIP-29 Group Membership
+  // ============================================================================
+
+  // Cached membership status: Map<groupIdHex, bool>
+  Map<String, bool> _membershipCache = {};
+  bool _membershipCacheLoaded = false;
+
+  /// Check if a user is a member of a group based on NIP-29 events
+  /// Returns true if the latest kind 9000 (put-user) is after the latest kind 9001 (remove-user)
+  Future<bool> isUserMemberOfGroup(String groupIdHex, String userPubkey) async {
+    if (_nostrService == null || !_isConnected) {
+      return false;
+    }
+
+    try {
+      // Query kind 9000 (put-user) events for this group
+      final putUserEvents = await _nostrService!.requestPastEvents(
+        kind: kindPutUser,
+        tags: [groupIdHex],
+        tagKey: 'h',
+        limit: 100,
+        useCache: false,
+      );
+
+      // Filter for events that have user's pubkey in 'p' tag
+      final userPutEvents = putUserEvents.where((e) {
+        return e.tags.any(
+          (t) => t.length >= 2 && t[0] == 'p' && t[1] == userPubkey,
+        );
+      }).toList();
+
+      if (userPutEvents.isEmpty) {
+        return false; // Never added to this group
+      }
+
+      // Query kind 9001 (remove-user) events for this group
+      final removeUserEvents = await _nostrService!.requestPastEvents(
+        kind: kindRemoveUser,
+        tags: [groupIdHex],
+        tagKey: 'h',
+        limit: 100,
+        useCache: false,
+      );
+
+      // Filter for events that have user's pubkey in 'p' tag
+      final userRemoveEvents = removeUserEvents.where((e) {
+        return e.tags.any(
+          (t) => t.length >= 2 && t[0] == 'p' && t[1] == userPubkey,
+        );
+      }).toList();
+
+      // Get latest put-user timestamp
+      final latestPut = userPutEvents
+          .map((e) => e.createdAt)
+          .reduce((a, b) => a.isAfter(b) ? a : b);
+
+      if (userRemoveEvents.isEmpty) {
+        return true; // Added but never removed
+      }
+
+      // Get latest remove-user timestamp
+      final latestRemove = userRemoveEvents
+          .map((e) => e.createdAt)
+          .reduce((a, b) => a.isAfter(b) ? a : b);
+
+      // Member if added after last removal
+      return latestPut.isAfter(latestRemove);
+    } catch (e) {
+      debugPrint('Failed to check membership for group $groupIdHex: $e');
+      return false;
+    }
+  }
+
+  /// Get map of group memberships for the current user based on NIP-29 events
+  /// Returns Map<groupIdHex, bool> where true = member
+  /// This fetches all membership events at once for efficiency
+  Future<Map<String, bool>> getUserGroupMemberships({
+    bool forceRefresh = false,
+  }) async {
+    // Return cached result if available and not forcing refresh
+    if (_membershipCacheLoaded && !forceRefresh) {
+      return Map.unmodifiable(_membershipCache);
+    }
+
+    if (_nostrService == null || !_isConnected) {
+      return {};
+    }
+
+    final userPubkey = await getNostrPublicKey();
+    if (userPubkey == null) {
+      return {};
+    }
+
+    try {
+      // Query all kind 9000 (put-user) events addressed to user
+      final putEvents = await _nostrService!.requestPastEvents(
+        kind: kindPutUser,
+        tags: [userPubkey],
+        tagKey: 'p',
+        limit: 1000,
+        useCache: false,
+      );
+
+      // Query all kind 9001 (remove-user) events addressed to user
+      final removeEvents = await _nostrService!.requestPastEvents(
+        kind: kindRemoveUser,
+        tags: [userPubkey],
+        tagKey: 'p',
+        limit: 1000,
+        useCache: false,
+      );
+
+      // Build maps of latest event per group
+      // Map<groupIdHex, DateTime>
+      final latestPutByGroup = <String, DateTime>{};
+      final latestRemoveByGroup = <String, DateTime>{};
+
+      // Process put-user events
+      for (final event in putEvents) {
+        // Extract group ID from 'h' tag
+        String? groupIdHex;
+        for (final tag in event.tags) {
+          if (tag.length >= 2 && tag[0] == 'h') {
+            groupIdHex = tag[1];
+            break;
+          }
+        }
+        if (groupIdHex == null) continue;
+
+        // Update latest timestamp for this group
+        final existing = latestPutByGroup[groupIdHex];
+        if (existing == null || event.createdAt.isAfter(existing)) {
+          latestPutByGroup[groupIdHex] = event.createdAt;
+        }
+      }
+
+      // Process remove-user events
+      for (final event in removeEvents) {
+        // Extract group ID from 'h' tag
+        String? groupIdHex;
+        for (final tag in event.tags) {
+          if (tag.length >= 2 && tag[0] == 'h') {
+            groupIdHex = tag[1];
+            break;
+          }
+        }
+        if (groupIdHex == null) continue;
+
+        // Update latest timestamp for this group
+        final existing = latestRemoveByGroup[groupIdHex];
+        if (existing == null || event.createdAt.isAfter(existing)) {
+          latestRemoveByGroup[groupIdHex] = event.createdAt;
+        }
+      }
+
+      // Build membership map
+      final memberships = <String, bool>{};
+
+      // Check all groups where user was ever added
+      for (final groupIdHex in latestPutByGroup.keys) {
+        final putTime = latestPutByGroup[groupIdHex]!;
+        final removeTime = latestRemoveByGroup[groupIdHex];
+
+        // Member if no removal or put is after removal
+        memberships[groupIdHex] =
+            removeTime == null || putTime.isAfter(removeTime);
+      }
+
+      // Cache the result
+      _membershipCache = memberships;
+      _membershipCacheLoaded = true;
+
+      debugPrint(
+        'Loaded ${memberships.length} group memberships (${memberships.values.where((v) => v).length} active)',
+      );
+
+      return Map.unmodifiable(memberships);
+    } catch (e) {
+      debugPrint('Failed to get user group memberships: $e');
+      return {};
+    }
+  }
+
+  /// Invalidate the membership cache (call when membership changes)
+  void invalidateMembershipCache() {
+    _membershipCache = {};
+    _membershipCacheLoaded = false;
   }
 }

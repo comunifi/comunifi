@@ -35,12 +35,15 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   bool _isFetchingGroups = false;
   String? _userNostrPubkey;
   bool _hasFetchedOnConnect = false;
+  Map<String, bool> _memberships = {};
+  bool _membershipsLoaded = false;
 
   @override
   void initState() {
     super.initState();
     _loadUserPubkey();
     _fetchGroupsFromRelay();
+    _loadMemberships();
   }
 
   Future<void> _loadUserPubkey() async {
@@ -62,6 +65,23 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     }
   }
 
+  Future<void> _loadMemberships() async {
+    final groupState = context.read<GroupState>();
+    if (!groupState.isConnected) return;
+
+    try {
+      final memberships = await groupState.getUserGroupMemberships();
+      if (mounted) {
+        setState(() {
+          _memberships = memberships;
+          _membershipsLoaded = true;
+        });
+      }
+    } catch (e) {
+      // Silently fail - will fall back to showing all local groups
+    }
+  }
+
   Future<void> _fetchGroupsFromRelay() async {
     final groupState = context.read<GroupState>();
     if (!groupState.isConnected || _isFetchingGroups) return;
@@ -70,6 +90,8 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
 
     try {
       await groupState.refreshDiscoveredGroups(limit: 1000);
+      // Also refresh memberships when fetching groups
+      await _loadMemberships();
     } catch (e) {
       // Silently fail
     } finally {
@@ -82,6 +104,10 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
       context: context,
       builder: (context) => _CreateGroupModal(
         onCreated: () {
+          // Invalidate membership cache since we just created a group
+          final groupState = context.read<GroupState>();
+          groupState.invalidateMembershipCache();
+          _membershipsLoaded = false;
           _fetchGroupsFromRelay();
         },
       ),
@@ -121,49 +147,51 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   List<_GroupItem> _buildGroupList(GroupState groupState) {
     final allGroups = <_GroupItem>[];
 
-    // Add discovered groups
+    // Filter groups based on NIP-29 membership (kind 9000/9001 events)
+    // Exclude the auto-created "Personal" group
     for (final announcement in groupState.discoveredGroups) {
+      final groupIdHex = announcement.mlsGroupId;
+      if (groupIdHex == null) continue;
+
+      // Skip the auto-created "Personal" group (created by user with name "Personal")
+      final isPersonalGroup =
+          _userNostrPubkey != null &&
+          announcement.pubkey == _userNostrPubkey &&
+          announcement.name?.toLowerCase() == 'personal';
+
+      if (isPersonalGroup) {
+        continue;
+      }
+
+      // Check NIP-29 membership: user is member if latest kind 9000 (put-user)
+      // is after latest kind 9001 (remove-user), or no 9001 exists
+      final isMember = _memberships[groupIdHex] ?? false;
+
+      // Skip groups user is not a member of
+      if (!isMember) {
+        continue;
+      }
+
+      // Find matching local MLS group if available
       MlsGroup? matchingGroup;
       try {
         matchingGroup = groupState.groups.firstWhere((g) {
-          final groupIdHex = g.id.bytes
+          final gIdHex = g.id.bytes
               .map((b) => b.toRadixString(16).padLeft(2, '0'))
               .join();
-          return announcement.mlsGroupId == groupIdHex;
+          return gIdHex == groupIdHex;
         });
       } catch (e) {
         matchingGroup = null;
       }
 
-      final isMyGroup =
-          _userNostrPubkey != null && announcement.pubkey == _userNostrPubkey;
-
       allGroups.add(
         _GroupItem(
           announcement: announcement,
           mlsGroup: matchingGroup,
-          isMyGroup: isMyGroup,
+          isMyGroup: false,
         ),
       );
-    }
-
-    // Add local groups not in discovered
-    for (final group in groupState.groups) {
-      final groupIdHex = group.id.bytes
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join();
-
-      final alreadyIncluded = allGroups.any(
-        (item) =>
-            item.announcement?.mlsGroupId == groupIdHex ||
-            item.mlsGroup?.id.bytes.toString() == group.id.bytes.toString(),
-      );
-
-      if (!alreadyIncluded) {
-        allGroups.add(
-          _GroupItem(announcement: null, mlsGroup: group, isMyGroup: true),
-        );
-      }
     }
 
     // Sort by creation date (newest first)
@@ -190,6 +218,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
           });
         } else if (!groupState.isConnected) {
           _hasFetchedOnConnect = false;
+          _membershipsLoaded = false;
         }
 
         final allGroups = _buildGroupList(groupState);
@@ -308,7 +337,8 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                 // Loading indicator
                 if (_isFetchingGroups ||
                     groupState.isLoadingGroups ||
-                    groupState.isLoading)
+                    groupState.isLoading ||
+                    (groupState.isConnected && !_membershipsLoaded))
                   const Padding(
                     padding: EdgeInsets.all(8),
                     child: CupertinoActivityIndicator(radius: 8),
