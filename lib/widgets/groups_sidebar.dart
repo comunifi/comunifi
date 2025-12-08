@@ -195,42 +195,49 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
 
         return SafeArea(
           child: Container(
-            width: 58,
+            width: 68,
             color: CupertinoColors.systemBackground,
             child: Column(
               children: [
                 const SizedBox(height: 8),
                 // Create group button
-                SizedBox(
-                  height: 40,
-                  child: Center(
-                    child: GestureDetector(
-                      onTap: _showCreateGroupModal,
-                      child: Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: CupertinoColors.systemGrey5,
-                          borderRadius: BorderRadius.circular(20),
+                Center(
+                  child: GestureDetector(
+                    onTap: _showCreateGroupModal,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemGrey5,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Icon(
+                            CupertinoIcons.plus,
+                            color: CupertinoColors.systemGreen,
+                            size: 20,
+                          ),
                         ),
-                        child: const Icon(
-                          CupertinoIcons.plus,
-                          color: CupertinoColors.systemGreen,
-                          size: 20,
+                        const SizedBox(height: 2),
+                        const Text(
+                          'New',
+                          style: TextStyle(
+                            fontSize: 9,
+                            color: CupertinoColors.secondaryLabel,
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
                 ),
                 const SizedBox(height: 8),
                 // Global feed button
-                SizedBox(
-                  height: 40,
-                  child: Center(
-                    child: GestureDetector(
-                      onTap: () => _selectGroup(null),
-                      child: _GlobalFeedIcon(isActive: isGlobalFeed),
-                    ),
+                Center(
+                  child: GestureDetector(
+                    onTap: () => _selectGroup(null),
+                    child: _GlobalFeedIcon(isActive: isGlobalFeed),
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -310,7 +317,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   }
 }
 
-/// Global feed icon (globe)
+/// Global feed icon (globe) with label
 class _GlobalFeedIcon extends StatelessWidget {
   final bool isActive;
 
@@ -318,30 +325,48 @@ class _GlobalFeedIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 150),
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: isActive
-            ? CupertinoColors.activeBlue
-            : CupertinoColors.systemGrey5,
-        borderRadius: BorderRadius.circular(isActive ? 12 : 20),
-        boxShadow: isActive
-            ? [
-                BoxShadow(
-                  color: CupertinoColors.activeBlue.withOpacity(0.4),
-                  blurRadius: 8,
-                  spreadRadius: 1,
-                ),
-              ]
-            : null,
-      ),
-      child: Icon(
-        CupertinoIcons.globe,
-        color: isActive ? CupertinoColors.white : CupertinoColors.systemGrey,
-        size: 20,
-      ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: isActive
+                ? CupertinoColors.activeBlue
+                : CupertinoColors.systemGrey5,
+            borderRadius: BorderRadius.circular(isActive ? 12 : 20),
+            boxShadow: isActive
+                ? [
+                    BoxShadow(
+                      color: CupertinoColors.activeBlue.withOpacity(0.4),
+                      blurRadius: 8,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : null,
+          ),
+          child: Icon(
+            CupertinoIcons.globe,
+            color: isActive
+                ? CupertinoColors.white
+                : CupertinoColors.systemGrey,
+            size: 20,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'Feed',
+          style: TextStyle(
+            fontSize: 9,
+            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+            color: isActive
+                ? CupertinoColors.label
+                : CupertinoColors.secondaryLabel,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -393,18 +418,20 @@ class _GroupIconButton extends StatelessWidget {
   }
 }
 
-/// Circular group avatar
+/// Circular group avatar with name label
 class _GroupAvatar extends StatelessWidget {
   final String name;
   final String? pictureUrl;
   final bool isActive;
   final bool isMember;
+  final bool showLabel;
 
   const _GroupAvatar({
     required this.name,
     this.pictureUrl,
     required this.isActive,
     required this.isMember,
+    this.showLabel = true,
   });
 
   String _getInitials(String name) {
@@ -418,45 +445,69 @@ class _GroupAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 150),
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: isMember
-            ? CupertinoColors.systemIndigo
-            : CupertinoColors.systemGrey4,
-        borderRadius: BorderRadius.circular(isActive ? 12 : 20),
-        image: pictureUrl != null
-            ? DecorationImage(
-                image: NetworkImage(pictureUrl!),
-                fit: BoxFit.cover,
-              )
-            : null,
-        boxShadow: isActive
-            ? [
-                BoxShadow(
-                  color: CupertinoColors.systemIndigo.withOpacity(0.5),
-                  blurRadius: 8,
-                  spreadRadius: 1,
-                ),
-              ]
-            : null,
-      ),
-      child: pictureUrl == null
-          ? Center(
-              child: Text(
-                _getInitials(name),
-                style: TextStyle(
-                  color: isMember
-                      ? CupertinoColors.white
-                      : CupertinoColors.systemGrey,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: isMember
+                ? CupertinoColors.systemIndigo
+                : CupertinoColors.systemGrey4,
+            borderRadius: BorderRadius.circular(isActive ? 12 : 20),
+            image: pictureUrl != null
+                ? DecorationImage(
+                    image: NetworkImage(pictureUrl!),
+                    fit: BoxFit.cover,
+                  )
+                : null,
+            boxShadow: isActive
+                ? [
+                    BoxShadow(
+                      color: CupertinoColors.systemIndigo.withOpacity(0.5),
+                      blurRadius: 8,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : null,
+          ),
+          child: pictureUrl == null
+              ? Center(
+                  child: Text(
+                    _getInitials(name),
+                    style: TextStyle(
+                      color: isMember
+                          ? CupertinoColors.white
+                          : CupertinoColors.systemGrey,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                )
+              : null,
+        ),
+        if (showLabel) ...[
+          const SizedBox(height: 2),
+          SizedBox(
+            width: 56,
+            child: Text(
+              name,
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                color: isActive
+                    ? CupertinoColors.label
+                    : CupertinoColors.secondaryLabel,
               ),
-            )
-          : null,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

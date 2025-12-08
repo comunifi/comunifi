@@ -7,20 +7,27 @@ This document describes how the group list works in ComuniFi, including how grou
 The group list is displayed in the `GroupsSidebar` widget (`lib/widgets/groups_sidebar.dart`). It uses a minimal Discord-like design with circular avatars in a narrow vertical bar.
 
 ```
-┌────┐
-│ +  │  ← Create group button
-│ 🌐 │  ← Global feed (globe icon)
-│────│
-│ PA │  ← Group avatar with initials
-│    │
-│●WT │  ← Active group (pill indicator + glow)
-│    │
-│ 📷 │  ← Group with photo
-│ ◌  │  ← Loading indicator
-└────┘
+┌──────┐
+│  +   │
+│ New  │  ← Create group button
+│──────│
+│  🌐  │
+│ Feed │  ← Global feed
+│──────│
+│  PA  │
+│ Name │  ← Group with initials + label
+│      │
+│● WT  │
+│ Work │  ← Active group (glow + bold label)
+│      │
+│  📷  │
+│ Photo│  ← Group with photo
+│  ◌   │  ← Loading indicator
+└──────┘
 
-Width: 58px
+Width: 68px
 Avatar: 40px, 12px radius when active, 20px radius when inactive
+Label: 9px font, truncated with ellipsis
 ```
 
 ## State Provider

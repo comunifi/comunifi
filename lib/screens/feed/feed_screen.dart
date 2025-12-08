@@ -511,7 +511,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                 });
               },
               position: SlideInSidebarPosition.left,
-              width: 58,
+              width: 68,
               child: GroupsSidebar(
                 onClose: () {
                   setState(() {
@@ -1096,7 +1096,7 @@ class _EventItemContentWidget extends StatelessWidget {
   static const double wideScreenBreakpoint = 1000;
 
   /// Groups sidebar width (left, minimal)
-  static const double groupsSidebarWidth = 58;
+  static const double groupsSidebarWidth = 68;
 
   /// Profile sidebar width (right)
   static const double profileSidebarWidth = 320;
