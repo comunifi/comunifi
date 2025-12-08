@@ -23,8 +23,10 @@ import 'package:comunifi/services/mls/storage/secure_storage.dart'
 import 'package:comunifi/models/nostr_event.dart'
     show
         kindCreateGroup,
+        kindEditMetadata,
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
+        kindGroupAdmins,
         kindMlsWelcome,
         kindPutUser,
         NostrEventModel;
@@ -43,6 +45,7 @@ class GroupAnnouncement {
   final String pubkey;
   final String? name;
   final String? about;
+  final String? picture;
   final String? mlsGroupId; // MLS group ID from 'g' tag
   final DateTime createdAt;
 
@@ -51,6 +54,7 @@ class GroupAnnouncement {
     required this.pubkey,
     this.name,
     this.about,
+    this.picture,
     this.mlsGroupId,
     required this.createdAt,
   });
@@ -802,6 +806,74 @@ class GroupState with ChangeNotifier {
     return null;
   }
 
+  /// Check if the current user is an admin of a specific group
+  /// Uses NIP-29 kind 39001 (group admins list) events
+  Future<bool> isGroupAdmin(String groupIdHex) async {
+    if (_nostrService == null || !_isConnected) {
+      return false;
+    }
+
+    try {
+      final pubkey = await getNostrPublicKey();
+      if (pubkey == null) return false;
+
+      // Query kind 39001 (group admins) events for this group
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindGroupAdmins,
+        tags: [groupIdHex],
+        tagKey: 'd',
+        limit: 1,
+        useCache: true,
+      );
+
+      if (events.isEmpty) return false;
+
+      // Check if our pubkey is in the 'p' tags with 'admin' role
+      final adminEvent = events.first;
+      for (final tag in adminEvent.tags) {
+        if (tag.length >= 3 &&
+            tag[0] == 'p' &&
+            tag[1] == pubkey &&
+            tag[2] == 'admin') {
+          return true;
+        }
+      }
+
+      return false;
+    } catch (e) {
+      debugPrint('Failed to check admin status: $e');
+      return false;
+    }
+  }
+
+  /// Update a discovered group's metadata locally
+  /// Called after publishing a kind 9002 edit-metadata event
+  void _updateDiscoveredGroupMetadata({
+    required String groupIdHex,
+    required String name,
+    String? about,
+    String? picture,
+  }) {
+    // Find and update the group in discovered groups
+    final index = _discoveredGroups.indexWhere(
+      (g) => g.mlsGroupId == groupIdHex,
+    );
+
+    if (index >= 0) {
+      final existing = _discoveredGroups[index];
+      _discoveredGroups[index] = GroupAnnouncement(
+        eventId: existing.eventId,
+        pubkey: existing.pubkey,
+        name: name,
+        about: about ?? existing.about,
+        picture: picture ?? existing.picture,
+        mlsGroupId: existing.mlsGroupId,
+        createdAt: existing.createdAt,
+      );
+      debugPrint('Updated local group metadata for $groupIdHex: $name');
+    }
+  }
+
   /// Get group name from any available source (DB, MLS groups, etc.)
   /// This is the main method to use for resolving group names
   String? getGroupName(String groupIdHex) {
@@ -959,7 +1031,11 @@ class GroupState with ChangeNotifier {
   }
 
   /// Create a new MLS group
-  Future<void> createGroup(String name, {String? about}) async {
+  Future<void> createGroup(
+    String name, {
+    String? about,
+    String? picture,
+  }) async {
     if (_mlsService == null) {
       throw Exception('MLS service not initialized');
     }
@@ -998,6 +1074,7 @@ class GroupState with ChangeNotifier {
             ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
             ['name', name],
             if (about != null && about.isNotEmpty) ['about', about],
+            if (picture != null && picture.isNotEmpty) ['picture', picture],
             ['public'], // Group is readable by anyone
             ['open'], // Anyone can join
           ], createdAt: createGroupCreatedAt);
@@ -1069,6 +1146,89 @@ class GroupState with ChangeNotifier {
       }
     } catch (e) {
       debugPrint('Failed to create group: $e');
+      rethrow;
+    }
+  }
+
+  /// Update group metadata (name, about, picture)
+  /// This publishes a new NIP-29 create-group event (kind 9007) which replaces the previous one
+  /// Only group admins should call this method
+  Future<void> updateGroupMetadata({
+    required String groupIdHex,
+    required String name,
+    String? about,
+    String? picture,
+  }) async {
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception(
+          'No Nostr key found. Please ensure keys are initialized.',
+        );
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Create kind 9002 event (edit-metadata) per NIP-29
+      // Tags contain the fields from kind:39000 to be modified
+      // See: https://github.com/nostr-protocol/nips/blob/master/29.md
+      final updateCreatedAt = DateTime.now();
+      final updateTags = await addClientTagsWithSignature([
+        ['h', groupIdHex], // Required: group ID
+        ['name', name],
+        if (about != null && about.isNotEmpty) ['about', about],
+        if (picture != null && picture.isNotEmpty) ['picture', picture],
+      ], createdAt: updateCreatedAt);
+
+      final updateEvent = NostrEvent.fromPartialData(
+        kind: kindEditMetadata, // kind 9002 for edit-metadata
+        content: '', // Optional reason
+        keyPairs: keyPair,
+        tags: updateTags,
+        createdAt: updateCreatedAt,
+      );
+
+      final updateModel = NostrEventModel(
+        id: updateEvent.id,
+        pubkey: updateEvent.pubkey,
+        kind: updateEvent.kind,
+        content: updateEvent.content,
+        tags: updateEvent.tags,
+        sig: updateEvent.sig,
+        createdAt: updateEvent.createdAt,
+      );
+
+      // Publish to relay
+      await _nostrService!.publishEvent(updateModel.toJson());
+
+      debugPrint(
+        'Published NIP-29 edit-metadata (kind 9002): ${updateModel.id}',
+      );
+
+      // Update local cache
+      _groupNameCache[groupIdHex] = name;
+
+      // Update MLS group name in storage if we have this group locally
+      if (_mlsGroups.containsKey(groupIdHex) && _mlsStorage != null) {
+        final group = _mlsGroups[groupIdHex]!;
+        await _mlsStorage!.saveGroupName(group.id, name);
+      }
+
+      // Immediately update the discovered groups list with new metadata
+      _updateDiscoveredGroupMetadata(
+        groupIdHex: groupIdHex,
+        name: name,
+        about: about,
+        picture: picture,
+      );
+
+      safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Failed to update group metadata: $e');
       rethrow;
     }
   }
@@ -1241,8 +1401,82 @@ class GroupState with ChangeNotifier {
               debugPrint('Error listening to create-group events: $error');
             },
           );
+
+      // Listen for NIP-29 edit-metadata events (kind 9002) to update group info
+      _nostrService!
+          .listenToEvents(kind: kindEditMetadata, limit: null)
+          .listen(
+            (event) {
+              _handleEditMetadataEvent(event);
+            },
+            onError: (error) {
+              debugPrint('Error listening to edit-metadata events: $error');
+            },
+          );
     } catch (e) {
       debugPrint('Failed to start listening for group events: $e');
+    }
+  }
+
+  /// Handle incoming kind 9002 (edit-metadata) events
+  void _handleEditMetadataEvent(NostrEventModel event) {
+    if (event.kind != kindEditMetadata) return;
+
+    // Extract group ID and metadata from tags
+    String? groupIdHex;
+    String? name;
+    String? about;
+    String? picture;
+
+    for (final tag in event.tags) {
+      if (tag.isEmpty || tag.length < 2) continue;
+
+      switch (tag[0]) {
+        case 'h':
+          groupIdHex = tag[1];
+          break;
+        case 'name':
+          name = tag[1];
+          break;
+        case 'about':
+          about = tag[1];
+          break;
+        case 'picture':
+          picture = tag[1];
+          break;
+      }
+    }
+
+    if (groupIdHex == null) {
+      debugPrint('edit-metadata event missing group ID (h tag)');
+      return;
+    }
+
+    debugPrint('Received edit-metadata for group $groupIdHex');
+
+    // Update name cache if provided
+    if (name != null) {
+      _groupNameCache[groupIdHex] = name;
+    }
+
+    // Update discovered groups list
+    final index = _discoveredGroups.indexWhere(
+      (g) => g.mlsGroupId == groupIdHex,
+    );
+
+    if (index >= 0) {
+      final existing = _discoveredGroups[index];
+      _discoveredGroups[index] = GroupAnnouncement(
+        eventId: event.id, // Use the new event ID
+        pubkey: existing.pubkey,
+        name: name ?? existing.name,
+        about: about ?? existing.about,
+        picture: picture ?? existing.picture,
+        mlsGroupId: existing.mlsGroupId,
+        createdAt: event.createdAt,
+      );
+      debugPrint('Applied edit-metadata update for group $groupIdHex');
+      safeNotifyListeners();
     }
   }
 
@@ -1731,7 +1965,51 @@ class GroupState with ChangeNotifier {
     // This ensures we have the correct names for groups created with NIP-29
     await syncGroupNamesFromCreateEvents();
 
+    // Apply any edit-metadata events (kind 9002) to update group info
+    await _syncEditMetadataEvents();
+
     safeNotifyListeners();
+  }
+
+  /// Sync edit-metadata events (kind 9002) and apply updates to discovered groups
+  Future<void> _syncEditMetadataEvents() async {
+    if (_nostrService == null || !_isConnected) return;
+
+    try {
+      // Fetch recent edit-metadata events
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindEditMetadata,
+        limit: 500,
+        useCache: false,
+      );
+
+      // Group events by group ID and keep only the most recent for each
+      final latestByGroup = <String, NostrEventModel>{};
+      for (final event in events) {
+        String? groupIdHex;
+        for (final tag in event.tags) {
+          if (tag.isNotEmpty && tag[0] == 'h' && tag.length > 1) {
+            groupIdHex = tag[1];
+            break;
+          }
+        }
+        if (groupIdHex == null) continue;
+
+        final existing = latestByGroup[groupIdHex];
+        if (existing == null || event.createdAt.isAfter(existing.createdAt)) {
+          latestByGroup[groupIdHex] = event;
+        }
+      }
+
+      // Apply each edit to discovered groups
+      for (final entry in latestByGroup.entries) {
+        _handleEditMetadataEvent(entry.value);
+      }
+
+      debugPrint('Synced ${latestByGroup.length} edit-metadata events');
+    } catch (e) {
+      debugPrint('Failed to sync edit-metadata events: $e');
+    }
   }
 
   /// Parse a NIP-29 create-group event (kind 9007) into a GroupAnnouncement
@@ -1744,6 +2022,7 @@ class GroupState with ChangeNotifier {
     String? mlsGroupId;
     String? name;
     String? about;
+    String? picture;
 
     for (final tag in event.tags) {
       if (tag.isEmpty || tag.length < 2) continue;
@@ -1758,6 +2037,9 @@ class GroupState with ChangeNotifier {
         case 'about':
           about = tag[1];
           break;
+        case 'picture':
+          picture = tag[1];
+          break;
       }
     }
 
@@ -1766,6 +2048,7 @@ class GroupState with ChangeNotifier {
       pubkey: event.pubkey,
       name: name,
       about: about,
+      picture: picture,
       mlsGroupId: mlsGroupId,
       createdAt: event.createdAt,
     );

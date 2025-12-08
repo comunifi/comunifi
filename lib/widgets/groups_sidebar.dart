@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
@@ -36,6 +38,11 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   String? _fetchGroupsError;
   String? _userNostrPubkey;
   bool _hasFetchedOnConnect = false;
+
+  // Group photo state
+  Uint8List? _selectedPhotoBytes;
+  bool _isUploadingPhoto = false;
+  final ImagePicker _imagePicker = ImagePicker();
 
   @override
   void initState() {
@@ -106,6 +113,28 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     }
   }
 
+  Future<void> _pickGroupPhoto() async {
+    try {
+      final XFile? pickedFile = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 400,
+        maxHeight: 400,
+        imageQuality: 85,
+      );
+
+      if (pickedFile == null) return;
+
+      final bytes = await pickedFile.readAsBytes();
+      setState(() {
+        _selectedPhotoBytes = bytes;
+      });
+    } catch (e) {
+      setState(() {
+        _createGroupError = 'Failed to pick image: $e';
+      });
+    }
+  }
+
   Future<void> _createGroup() async {
     final groupName = _groupNameController.text.trim();
     if (groupName.isEmpty) {
@@ -129,24 +158,55 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     });
 
     try {
+      String? pictureUrl;
+
+      // Upload photo if selected
+      if (_selectedPhotoBytes != null) {
+        setState(() {
+          _isUploadingPhoto = true;
+        });
+        pictureUrl = await groupState.uploadMediaToOwnGroup(
+          _selectedPhotoBytes!,
+          'image/jpeg',
+        );
+        setState(() {
+          _isUploadingPhoto = false;
+        });
+      }
+
       final about = _groupAboutController.text.trim();
       await groupState.createGroup(
         groupName,
         about: about.isEmpty ? null : about,
+        picture: pictureUrl,
       );
       _groupNameController.clear();
       _groupAboutController.clear();
       setState(() {
         _isCreatingGroup = false;
+        _selectedPhotoBytes = null;
       });
       // Refresh discovered groups to show the newly created group
       await _fetchGroupsFromRelay();
     } catch (e) {
       setState(() {
         _isCreatingGroup = false;
+        _isUploadingPhoto = false;
         _createGroupError = e.toString();
       });
     }
+  }
+
+  void _showEditGroupModal(GroupAnnouncement announcement) {
+    showCupertinoModalPopup(
+      context: context,
+      builder: (context) => _EditGroupModal(
+        announcement: announcement,
+        onSaved: () {
+          _fetchGroupsFromRelay();
+        },
+      ),
+    );
   }
 
   void _toggleGroup(MlsGroup group, VoidCallback onClose) {
@@ -287,6 +347,46 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                             ],
                           ),
                         ),
+                      // Group photo picker
+                      Center(
+                        child: GestureDetector(
+                          onTap: _isCreatingGroup ? null : _pickGroupPhoto,
+                          child: Container(
+                            width: 80,
+                            height: 80,
+                            decoration: BoxDecoration(
+                              color: CupertinoColors.systemGrey4,
+                              shape: BoxShape.circle,
+                              image: _selectedPhotoBytes != null
+                                  ? DecorationImage(
+                                      image: MemoryImage(_selectedPhotoBytes!),
+                                      fit: BoxFit.cover,
+                                    )
+                                  : null,
+                            ),
+                            child: _selectedPhotoBytes == null
+                                ? const Icon(
+                                    CupertinoIcons.camera_fill,
+                                    size: 32,
+                                    color: CupertinoColors.systemGrey,
+                                  )
+                                : null,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Center(
+                        child: Text(
+                          _selectedPhotoBytes != null
+                              ? 'Tap to change'
+                              : 'Add photo (optional)',
+                          style: const TextStyle(
+                            color: CupertinoColors.secondaryLabel,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
                       CupertinoTextField(
                         controller: _groupNameController,
                         placeholder: 'Group Name',
@@ -303,8 +403,20 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                       CupertinoButton.filled(
                         onPressed: _isCreatingGroup ? null : _createGroup,
                         child: _isCreatingGroup
-                            ? const CupertinoActivityIndicator(
-                                color: CupertinoColors.white,
+                            ? Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const CupertinoActivityIndicator(
+                                    color: CupertinoColors.white,
+                                  ),
+                                  if (_isUploadingPhoto) ...[
+                                    const SizedBox(width: 8),
+                                    const Text(
+                                      'Uploading...',
+                                      style: TextStyle(color: CupertinoColors.white),
+                                    ),
+                                  ],
+                                ],
                               )
                             : const Text('Create Group'),
                       ),
@@ -539,6 +651,31 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                                     children: [
                                       Row(
                                         children: [
+                                          // Group photo
+                                          Container(
+                                            width: 40,
+                                            height: 40,
+                                            margin: const EdgeInsets.only(right: 12),
+                                            decoration: BoxDecoration(
+                                              color: CupertinoColors.systemGrey4,
+                                              shape: BoxShape.circle,
+                                              image: announcement?.picture != null
+                                                  ? DecorationImage(
+                                                      image: NetworkImage(
+                                                        announcement!.picture!,
+                                                      ),
+                                                      fit: BoxFit.cover,
+                                                    )
+                                                  : null,
+                                            ),
+                                            child: announcement?.picture == null
+                                                ? const Icon(
+                                                    CupertinoIcons.person_2_fill,
+                                                    size: 20,
+                                                    color: CupertinoColors.systemGrey,
+                                                  )
+                                                : null,
+                                          ),
                                           Expanded(
                                             child: Column(
                                               crossAxisAlignment:
@@ -546,16 +683,19 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                                               children: [
                                                 Row(
                                                   children: [
-                                                    Text(
-                                                      groupName,
-                                                      style: TextStyle(
-                                                        fontWeight:
-                                                            FontWeight.bold,
-                                                        fontSize: 16,
-                                                        color: isActive
-                                                            ? CupertinoColors
-                                                                  .systemBlue
-                                                            : null,
+                                                    Expanded(
+                                                      child: Text(
+                                                        groupName,
+                                                        style: TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.bold,
+                                                          fontSize: 16,
+                                                          color: isActive
+                                                              ? CupertinoColors
+                                                                    .systemBlue
+                                                              : null,
+                                                        ),
+                                                        overflow: TextOverflow.ellipsis,
                                                       ),
                                                     ),
                                                     if (isMyGroup)
@@ -630,20 +770,35 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                                             // mlsGroup is non-null when isLocalGroup is true
                                             // Extract to local variable for type narrowing
                                             final group = mlsGroup;
-                                            return CupertinoButton(
-                                              padding: EdgeInsets.zero,
-                                              minSize: 0,
-                                              onPressed: () =>
-                                                  _toggleGroup(group, widget.onClose),
-                                              child: Text(
-                                                isActive
-                                                    ? 'Deselect'
-                                                    : 'Select',
-                                                style: const TextStyle(
-                                                  color: CupertinoColors
-                                                      .systemBlue,
+                                            // Check if this is the Personal group (not editable)
+                                            final isPersonalGroup =
+                                                groupName.toLowerCase() == 'personal';
+                                            return Row(
+                                              children: [
+                                                CupertinoButton(
+                                                  padding: EdgeInsets.zero,
+                                                  minSize: 0,
+                                                  onPressed: () =>
+                                                      _toggleGroup(group, widget.onClose),
+                                                  child: Text(
+                                                    isActive
+                                                        ? 'Deselect'
+                                                        : 'Select',
+                                                    style: const TextStyle(
+                                                      color: CupertinoColors
+                                                          .systemBlue,
+                                                    ),
+                                                  ),
                                                 ),
-                                              ),
+                                                // Edit button for admin groups (not Personal group)
+                                                if (!isPersonalGroup && announcement != null)
+                                                  _GroupEditButton(
+                                                    groupIdHex: groupIdHex,
+                                                    announcement: announcement,
+                                                    onEdit: () =>
+                                                        _showEditGroupModal(announcement),
+                                                  ),
+                                              ],
                                             );
                                           },
                                         )
@@ -674,6 +829,417 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Edit button that checks admin status before showing
+class _GroupEditButton extends StatefulWidget {
+  final String groupIdHex;
+  final GroupAnnouncement announcement;
+  final VoidCallback onEdit;
+
+  const _GroupEditButton({
+    required this.groupIdHex,
+    required this.announcement,
+    required this.onEdit,
+  });
+
+  @override
+  State<_GroupEditButton> createState() => _GroupEditButtonState();
+}
+
+class _GroupEditButtonState extends State<_GroupEditButton> {
+  bool _isAdmin = false;
+  bool _isChecking = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkAdminStatus();
+  }
+
+  Future<void> _checkAdminStatus() async {
+    try {
+      final groupState = context.read<GroupState>();
+      final isAdmin = await groupState.isGroupAdmin(widget.groupIdHex);
+      if (mounted) {
+        setState(() {
+          _isAdmin = isAdmin;
+          _isChecking = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isChecking = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Don't show anything while checking or if not admin
+    if (_isChecking || !_isAdmin) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 16),
+      child: CupertinoButton(
+        padding: EdgeInsets.zero,
+        minSize: 0,
+        onPressed: widget.onEdit,
+        child: const Text(
+          'Edit',
+          style: TextStyle(
+            color: CupertinoColors.systemOrange,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Modal for editing group metadata
+class _EditGroupModal extends StatefulWidget {
+  final GroupAnnouncement announcement;
+  final VoidCallback onSaved;
+
+  const _EditGroupModal({
+    required this.announcement,
+    required this.onSaved,
+  });
+
+  @override
+  State<_EditGroupModal> createState() => _EditGroupModalState();
+}
+
+class _EditGroupModalState extends State<_EditGroupModal> {
+  late TextEditingController _nameController;
+  late TextEditingController _aboutController;
+  String? _pictureUrl;
+  Uint8List? _selectedPhotoBytes;
+  bool _isSaving = false;
+  bool _isUploadingPhoto = false;
+  String? _error;
+  final ImagePicker _imagePicker = ImagePicker();
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.announcement.name ?? '');
+    _aboutController = TextEditingController(text: widget.announcement.about ?? '');
+    _pictureUrl = widget.announcement.picture;
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _aboutController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickPhoto() async {
+    try {
+      final XFile? pickedFile = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 400,
+        maxHeight: 400,
+        imageQuality: 85,
+      );
+
+      if (pickedFile == null) return;
+
+      final bytes = await pickedFile.readAsBytes();
+      setState(() {
+        _selectedPhotoBytes = bytes;
+      });
+    } catch (e) {
+      setState(() {
+        _error = 'Failed to pick image: $e';
+      });
+    }
+  }
+
+  Future<void> _save() async {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      setState(() {
+        _error = 'Group name cannot be empty';
+      });
+      return;
+    }
+
+    final groupIdHex = widget.announcement.mlsGroupId;
+    if (groupIdHex == null) {
+      setState(() {
+        _error = 'Invalid group ID';
+      });
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+      _error = null;
+    });
+
+    try {
+      final groupState = context.read<GroupState>();
+      String? newPictureUrl = _pictureUrl;
+
+      // Upload new photo if selected
+      if (_selectedPhotoBytes != null) {
+        setState(() {
+          _isUploadingPhoto = true;
+        });
+        newPictureUrl = await groupState.uploadMediaToOwnGroup(
+          _selectedPhotoBytes!,
+          'image/jpeg',
+        );
+        setState(() {
+          _isUploadingPhoto = false;
+        });
+      }
+
+      final about = _aboutController.text.trim();
+      await groupState.updateGroupMetadata(
+        groupIdHex: groupIdHex,
+        name: name,
+        about: about.isEmpty ? null : about,
+        picture: newPictureUrl,
+      );
+
+      widget.onSaved();
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (e) {
+      setState(() {
+        _isSaving = false;
+        _isUploadingPhoto = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.7,
+      decoration: const BoxDecoration(
+        color: CupertinoColors.systemBackground,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            // Handle bar
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemGrey4,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Header
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minSize: 0,
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancel'),
+                  ),
+                  const Text(
+                    'Edit Group',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minSize: 0,
+                    onPressed: _isSaving ? null : _save,
+                    child: _isSaving
+                        ? const CupertinoActivityIndicator()
+                        : const Text(
+                            'Save',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                  ),
+                ],
+              ),
+            ),
+                Container(
+                  height: 0.5,
+                  color: CupertinoColors.separator,
+                ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  if (_error != null)
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: CupertinoColors.systemRed.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            CupertinoIcons.exclamationmark_triangle,
+                            color: CupertinoColors.systemRed,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _error!,
+                              style: const TextStyle(
+                                color: CupertinoColors.systemRed,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          CupertinoButton(
+                            padding: EdgeInsets.zero,
+                            minSize: 0,
+                            onPressed: () => setState(() => _error = null),
+                            child: const Icon(
+                              CupertinoIcons.xmark_circle_fill,
+                              color: CupertinoColors.systemRed,
+                              size: 20,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  // Photo picker
+                  Center(
+                    child: GestureDetector(
+                      onTap: _isSaving ? null : _pickPhoto,
+                      child: Stack(
+                        children: [
+                          Container(
+                            width: 100,
+                            height: 100,
+                            decoration: BoxDecoration(
+                              color: CupertinoColors.systemGrey4,
+                              shape: BoxShape.circle,
+                              image: _selectedPhotoBytes != null
+                                  ? DecorationImage(
+                                      image: MemoryImage(_selectedPhotoBytes!),
+                                      fit: BoxFit.cover,
+                                    )
+                                  : _pictureUrl != null
+                                      ? DecorationImage(
+                                          image: NetworkImage(_pictureUrl!),
+                                          fit: BoxFit.cover,
+                                        )
+                                      : null,
+                            ),
+                            child: (_selectedPhotoBytes == null && _pictureUrl == null)
+                                ? const Icon(
+                                    CupertinoIcons.person_2_fill,
+                                    size: 40,
+                                    color: CupertinoColors.systemGrey,
+                                  )
+                                : null,
+                          ),
+                          if (_isUploadingPhoto)
+                            Container(
+                              width: 100,
+                              height: 100,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: CupertinoColors.black.withOpacity(0.5),
+                              ),
+                              child: const CupertinoActivityIndicator(
+                                color: CupertinoColors.white,
+                              ),
+                            ),
+                          if (!_isSaving)
+                            Positioned(
+                              bottom: 0,
+                              right: 0,
+                              child: Container(
+                                width: 32,
+                                height: 32,
+                                decoration: const BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: CupertinoColors.activeBlue,
+                                ),
+                                child: const Icon(
+                                  CupertinoIcons.camera_fill,
+                                  size: 16,
+                                  color: CupertinoColors.white,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Center(
+                    child: Text(
+                      _isUploadingPhoto ? 'Uploading...' : 'Tap to change photo',
+                      style: const TextStyle(
+                        color: CupertinoColors.secondaryLabel,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  // Name field
+                  const Text(
+                    'Group Name',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  CupertinoTextField(
+                    controller: _nameController,
+                    placeholder: 'Enter group name',
+                    padding: const EdgeInsets.all(12),
+                    enabled: !_isSaving,
+                  ),
+                  const SizedBox(height: 16),
+                  // About field
+                  const Text(
+                    'About',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  CupertinoTextField(
+                    controller: _aboutController,
+                    placeholder: 'Describe your group (optional)',
+                    padding: const EdgeInsets.all(12),
+                    maxLines: 3,
+                    enabled: !_isSaving,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -618,6 +618,13 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                                 await groupState.refreshActiveGroupMessages();
                               },
                             ),
+                            // Group header with banner, photo, and name
+                            SliverToBoxAdapter(
+                              child: _GroupHeader(
+                                group: groupState.activeGroup!,
+                                groupState: groupState,
+                              ),
+                            ),
                             SliverList(
                               delegate: SliverChildBuilderDelegate((
                                 context,
@@ -1642,6 +1649,137 @@ class _ContentMatch {
   final String? captured;
 
   _ContentMatch(this.start, this.end, this.type, this.text, [this.captured]);
+}
+
+/// Group header with banner, profile photo, and name (Twitter-style)
+class _GroupHeader extends StatelessWidget {
+  final MlsGroup group;
+  final GroupState groupState;
+
+  const _GroupHeader({required this.group, required this.groupState});
+
+  String _groupIdToHex(MlsGroup group) {
+    return group.id.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final groupIdHex = _groupIdToHex(group);
+
+    // Find the group announcement to get the picture
+    final announcement = groupState.discoveredGroups
+        .cast<GroupAnnouncement?>()
+        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
+
+    final groupName = announcement?.name ?? group.name;
+    final groupPicture = announcement?.picture;
+    final groupAbout = announcement?.about;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Banner area
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // Banner placeholder
+            Container(
+              height: 120,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    CupertinoColors.systemIndigo.withOpacity(0.6),
+                    CupertinoColors.systemPurple.withOpacity(0.4),
+                  ],
+                ),
+              ),
+            ),
+            // Profile photo overlapping the banner
+            Positioned(
+              left: 16,
+              bottom: -40,
+              child: Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CupertinoColors.systemBackground,
+                  border: Border.all(
+                    color: CupertinoColors.systemBackground,
+                    width: 4,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: CupertinoColors.black.withOpacity(0.15),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: CupertinoColors.systemGrey4,
+                    image: groupPicture != null
+                        ? DecorationImage(
+                            image: NetworkImage(groupPicture),
+                            fit: BoxFit.cover,
+                          )
+                        : null,
+                  ),
+                  child: groupPicture == null
+                      ? const Icon(
+                          CupertinoIcons.person_2_fill,
+                          size: 36,
+                          color: CupertinoColors.systemGrey,
+                        )
+                      : null,
+                ),
+              ),
+            ),
+          ],
+        ),
+        // Space for the overlapping profile photo
+        const SizedBox(height: 48),
+        // Group name and about
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                groupName,
+                style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (groupAbout != null && groupAbout.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  groupAbout,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: CupertinoColors.secondaryLabel,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        // Divider
+        Container(height: 0.5, color: CupertinoColors.separator),
+      ],
+    );
+  }
 }
 
 /// Indicator showing the current hashtag filter with clear button
