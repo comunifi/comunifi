@@ -386,24 +386,12 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
           return Row(
             children: [
               // Left sidebar (Groups) - always visible on wide screens
-              Container(
-                width: sidebarWidth,
-                decoration: const BoxDecoration(
-                  color: CupertinoColors.systemBackground,
-                  border: Border(
-                    right: BorderSide(
-                      color: CupertinoColors.separator,
-                      width: 0.5,
-                    ),
-                  ),
-                ),
-                child: GroupsSidebar(
-                  onClose: () {
-                    // On wide screens, sidebars are persistent, so this is a no-op
-                    // But we keep it for consistency with the sidebar widget
-                  },
-                  showCloseButton: false,
-                ),
+              GroupsSidebar(
+                onClose: () {
+                  // On wide screens, sidebars are persistent, so this is a no-op
+                  // But we keep it for consistency with the sidebar widget
+                },
+                showCloseButton: false,
               ),
               // Main feed content
               Expanded(
@@ -523,7 +511,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                 });
               },
               position: SlideInSidebarPosition.left,
-              width: sidebarWidth,
+              width: 58,
               child: GroupsSidebar(
                 onClose: () {
                   setState(() {
@@ -1107,8 +1095,11 @@ class _EventItemContentWidget extends StatelessWidget {
   /// Wide screen breakpoint (same as sidebar layout)
   static const double wideScreenBreakpoint = 1000;
 
-  /// Sidebar width (same as sidebar layout)
-  static const double sidebarWidth = 320;
+  /// Groups sidebar width (left, minimal)
+  static const double groupsSidebarWidth = 58;
+
+  /// Profile sidebar width (right)
+  static const double profileSidebarWidth = 320;
 
   const _EventItemContentWidget({
     required this.event,
@@ -1181,7 +1172,7 @@ class _EventItemContentWidget extends StatelessWidget {
     final screenWidth = MediaQuery.of(context).size.width;
     final isWideScreen = screenWidth > wideScreenBreakpoint;
     final maxContentWidth = isWideScreen
-        ? screenWidth - (sidebarWidth * 2)
+        ? screenWidth - groupsSidebarWidth - profileSidebarWidth
         : screenWidth;
 
     final hasGroupFrame = groupName != null && groupIdHex != null;

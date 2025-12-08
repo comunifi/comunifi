@@ -1260,7 +1260,7 @@ class GroupState with ChangeNotifier {
       // Stop listening for messages
       _messageEventSubscription?.cancel();
       _messageEventSubscription = null;
-      safeNotifyListeners();
+      notifyListeners(); // Use direct notify for immediate UI update
       return;
     }
 
