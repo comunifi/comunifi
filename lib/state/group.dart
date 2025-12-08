@@ -27,6 +27,7 @@ import 'package:comunifi/models/nostr_event.dart'
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
         kindGroupAdmins,
+        kindGroupMembers,
         kindMlsWelcome,
         kindPutUser,
         NostrEventModel;
@@ -58,6 +59,18 @@ class GroupAnnouncement {
     this.mlsGroupId,
     required this.createdAt,
   });
+}
+
+/// Represents a group member from NIP-29 events (kind 9000, 39001, 39002)
+/// Contains the pubkey and optional role (admin, moderator, etc.)
+class NIP29GroupMember {
+  final String pubkey;
+  final String? role; // 'admin', 'moderator', or null for regular member
+
+  NIP29GroupMember({required this.pubkey, this.role});
+
+  bool get isAdmin => role == 'admin';
+  bool get isModerator => role == 'moderator';
 }
 
 class GroupState with ChangeNotifier {
@@ -849,6 +862,75 @@ class GroupState with ChangeNotifier {
     }
   }
 
+  /// Get all members of a group from NIP-29 events (kind 39001 admins + kind 39002 members)
+  /// Returns a list of NIP29GroupMember with pubkeys and roles
+  Future<List<NIP29GroupMember>> getGroupMembers(String groupIdHex) async {
+    if (_nostrService == null || !_isConnected) {
+      return [];
+    }
+
+    try {
+      final members = <String, NIP29GroupMember>{};
+
+      // Query kind 39001 (group admins) - these have roles
+      final adminEvents = await _nostrService!.requestPastEvents(
+        kind: kindGroupAdmins,
+        tags: [groupIdHex],
+        tagKey: 'd',
+        limit: 1,
+        useCache: true,
+      );
+
+      if (adminEvents.isNotEmpty) {
+        final adminEvent = adminEvents.first;
+        for (final tag in adminEvent.tags) {
+          if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
+            final pubkey = tag[1];
+            final role = tag.length >= 3 ? tag[2] : null;
+            members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
+          }
+        }
+      }
+
+      // Query kind 39002 (group members) - regular members without roles
+      final memberEvents = await _nostrService!.requestPastEvents(
+        kind: kindGroupMembers,
+        tags: [groupIdHex],
+        tagKey: 'd',
+        limit: 1,
+        useCache: true,
+      );
+
+      if (memberEvents.isNotEmpty) {
+        final memberEvent = memberEvents.first;
+        for (final tag in memberEvent.tags) {
+          if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
+            final pubkey = tag[1];
+            // Only add if not already in admins (to preserve admin role)
+            if (!members.containsKey(pubkey)) {
+              members[pubkey] = NIP29GroupMember(pubkey: pubkey);
+            }
+          }
+        }
+      }
+
+      // Sort: admins first, then by pubkey
+      final memberList = members.values.toList();
+      memberList.sort((a, b) {
+        if (a.isAdmin && !b.isAdmin) return -1;
+        if (!a.isAdmin && b.isAdmin) return 1;
+        if (a.isModerator && !b.isModerator) return -1;
+        if (!a.isModerator && b.isModerator) return 1;
+        return a.pubkey.compareTo(b.pubkey);
+      });
+
+      return memberList;
+    } catch (e) {
+      debugPrint('Failed to get group members: $e');
+      return [];
+    }
+  }
+
   /// Update a discovered group's metadata locally
   /// Called after publishing a kind 9002 edit-metadata event
   void _updateDiscoveredGroupMetadata({
@@ -1058,9 +1140,15 @@ class GroupState with ChangeNotifier {
     }
 
     try {
-      // Create MLS group
+      // Get creator's Nostr pubkey for consistent member identification
+      final creatorPubkey = await getNostrPublicKey();
+      if (creatorPubkey == null || creatorPubkey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      // Create MLS group with creator's pubkey as userId
       final mlsGroup = await _mlsService!.createGroup(
-        creatorUserId: 'self',
+        creatorUserId: creatorPubkey,
         groupName: name,
       );
 
@@ -2336,11 +2424,12 @@ class GroupState with ChangeNotifier {
       final inviteeHpkePublicKey = DefaultPublicKey(hpkePublicKeyBytes);
 
       // Invite the member with their actual HPKE public key
+      // Use Nostr pubkey as userId for consistent profile resolution
       await inviteMember(
         inviteeNostrPubkey: inviteeNostrPubkey,
         inviteeIdentityKey: identityKeyPair.publicKey,
         inviteeHpkePublicKey: inviteeHpkePublicKey,
-        inviteeUserId: username,
+        inviteeUserId: inviteeNostrPubkey,
       );
 
       debugPrint(

@@ -25,10 +25,13 @@ class MlsGroup {
   /// Get current epoch (for testing)
   int get epoch => _state.context.epoch;
 
-  /// Get member count (for testing)
+  /// Get member count
   int get memberCount => _state.members.length;
 
-  /// Get member by user ID (for testing)
+  /// Get all members as a list
+  List<GroupMember> get members => _state.members.values.toList();
+
+  /// Get member by user ID
   GroupMember? getMemberByUserId(String userId) {
     try {
       return _state.members.values.firstWhere((m) => m.userId == userId);

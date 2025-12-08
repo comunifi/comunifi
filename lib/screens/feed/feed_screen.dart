@@ -11,10 +11,10 @@ import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/models/nostr_event.dart';
-import 'package:comunifi/screens/feed/invite_user_modal.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
+import 'package:comunifi/widgets/members_sidebar.dart';
 import 'package:comunifi/widgets/slide_in_sidebar.dart';
 import 'package:comunifi/widgets/comment_bubble.dart';
 import 'package:comunifi/widgets/heart_button.dart';
@@ -398,27 +398,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                 child: CupertinoPageScaffold(
                   navigationBar: CupertinoNavigationBar(
                     middle: Text(_getGroupDisplayName(groupState, activeGroup)),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // Username display (not a button on wide screens)
-                        _UsernameButton(),
-                        // Group-specific actions
-                        if (activeGroup != null) ...[
-                          const SizedBox(width: 8),
-                          CupertinoButton(
-                            padding: EdgeInsets.zero,
-                            onPressed: () {
-                              showCupertinoModalPopup(
-                                context: context,
-                                builder: (context) => const InviteUserModal(),
-                              );
-                            },
-                            child: const Icon(CupertinoIcons.person_add),
-                          ),
-                        ],
-                      ],
-                    ),
+                    trailing: _UsernameButton(),
                   ),
                   child: SafeArea(
                     child: _buildFeedContent(
@@ -429,7 +409,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   ),
                 ),
               ),
-              // Right sidebar (Profile) - always visible on wide screens
+              // Right sidebar - shows Profile (global feed) or Members (group)
               Container(
                 width: sidebarWidth,
                 decoration: const BoxDecoration(
@@ -441,13 +421,9 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     ),
                   ),
                 ),
-                child: ProfileSidebar(
-                  onClose: () {
-                    // On wide screens, sidebars are persistent, so this is a no-op
-                    // But we keep it for consistency with the sidebar widget
-                  },
-                  showCloseButton: false,
-                ),
+                child: activeGroup != null
+                    ? MembersSidebar(onClose: () {}, showCloseButton: false)
+                    : ProfileSidebar(onClose: () {}, showCloseButton: false),
               ),
             ],
           );
@@ -468,34 +444,16 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   child: const Icon(CupertinoIcons.bars),
                 ),
                 middle: Text(_getGroupDisplayName(groupState, activeGroup)),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Username button
-                    CupertinoButton(
-                      padding: EdgeInsets.zero,
-                      onPressed: () {
-                        setState(() {
-                          _isRightSidebarOpen = true;
-                        });
-                      },
-                      child: _UsernameButton(),
-                    ),
-                    // Group-specific actions
-                    if (activeGroup != null) ...[
-                      const SizedBox(width: 8),
-                      CupertinoButton(
-                        padding: EdgeInsets.zero,
-                        onPressed: () {
-                          showCupertinoModalPopup(
-                            context: context,
-                            builder: (context) => const InviteUserModal(),
-                          );
-                        },
-                        child: const Icon(CupertinoIcons.person_add),
-                      ),
-                    ],
-                  ],
+                trailing: CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  onPressed: () {
+                    setState(() {
+                      _isRightSidebarOpen = true;
+                    });
+                  },
+                  child: activeGroup != null
+                      ? const Icon(CupertinoIcons.person_2)
+                      : _UsernameButton(),
                 ),
               ),
               child: SafeArea(
@@ -520,7 +478,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                 },
               ),
             ),
-            // Right sidebar (Profile) - overlay on narrow screens
+            // Right sidebar - Profile (global feed) or Members (group) - overlay on narrow screens
             SlideInSidebar(
               isOpen: _isRightSidebarOpen,
               onClose: () {
@@ -530,13 +488,21 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
               },
               position: SlideInSidebarPosition.right,
               width: sidebarWidth,
-              child: ProfileSidebar(
-                onClose: () {
-                  setState(() {
-                    _isRightSidebarOpen = false;
-                  });
-                },
-              ),
+              child: activeGroup != null
+                  ? MembersSidebar(
+                      onClose: () {
+                        setState(() {
+                          _isRightSidebarOpen = false;
+                        });
+                      },
+                    )
+                  : ProfileSidebar(
+                      onClose: () {
+                        setState(() {
+                          _isRightSidebarOpen = false;
+                        });
+                      },
+                    ),
             ),
           ],
         );
