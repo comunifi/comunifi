@@ -2781,8 +2781,11 @@ class GroupState with ChangeNotifier {
         }
       }
 
-      // Update UI
-      safeNotifyListeners();
+      // Invalidate membership cache so the sidebar reloads memberships
+      // and shows the newly joined group. The inviter already published
+      // kind 9000 (put-user), so the fresh fetch will include this group.
+      // Pass notify: true to trigger sidebar rebuild and reload.
+      invalidateMembershipCache(notify: true);
 
       // Note: When a user is invited via MLS Welcome, the inviter publishes
       // kind 9000 (put-user) to add them to the group per NIP-29.
@@ -2919,6 +2922,11 @@ class GroupState with ChangeNotifier {
   // Cached membership status: Map<groupIdHex, bool>
   Map<String, bool> _membershipCache = {};
   bool _membershipCacheLoaded = false;
+
+  // Version counter that increments when membership cache is invalidated
+  // Widgets can observe this to know when to reload memberships
+  int _membershipCacheVersion = 0;
+  int get membershipCacheVersion => _membershipCacheVersion;
 
   /// Check if a user is a member of a group based on NIP-29 events
   /// Returns true if the latest kind 9000 (put-user) is after the latest kind 9001 (remove-user)
@@ -3097,8 +3105,14 @@ class GroupState with ChangeNotifier {
   }
 
   /// Invalidate the membership cache (call when membership changes)
-  void invalidateMembershipCache() {
+  /// Increments the version counter. Set [notify] to true to also notify
+  /// listeners (useful when the caller won't trigger a reload themselves).
+  void invalidateMembershipCache({bool notify = false}) {
     _membershipCache = {};
     _membershipCacheLoaded = false;
+    _membershipCacheVersion++;
+    if (notify) {
+      safeNotifyListeners();
+    }
   }
 }

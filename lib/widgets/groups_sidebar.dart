@@ -37,6 +37,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   bool _hasFetchedOnConnect = false;
   Map<String, bool> _memberships = {};
   bool _membershipsLoaded = false;
+  int _lastMembershipVersion = 0;
 
   @override
   void initState() {
@@ -218,6 +219,15 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
         } else if (!groupState.isConnected) {
           _hasFetchedOnConnect = false;
           _membershipsLoaded = false;
+        }
+
+        // Reload memberships when cache is invalidated (e.g., after joining a group)
+        if (groupState.membershipCacheVersion != _lastMembershipVersion) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _lastMembershipVersion = groupState.membershipCacheVersion;
+            _membershipsLoaded = false;
+            _loadMemberships();
+          });
         }
 
         final allGroups = _buildGroupList(groupState);
