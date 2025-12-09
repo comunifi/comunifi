@@ -573,10 +573,25 @@ class NostrService {
       // Cache the decrypted event (but not the envelope)
       _cacheEvent(decryptedEvent);
 
-      // Emit decrypted event to the subscription
-      final controller = _subscriptions[subscriptionId];
-      if (controller != null && !controller.isClosed) {
-        controller.add(decryptedEvent);
+      // Emit decrypted event to ALL active subscriptions (not just the one that received it)
+      // This ensures any listener waiting for decrypted events will receive them,
+      // even if the event arrived on a different subscription
+      int emittedCount = 0;
+      for (final controller in _subscriptions.values) {
+        if (!controller.isClosed) {
+          controller.add(decryptedEvent);
+          emittedCount++;
+        }
+      }
+      
+      debugPrint(
+        'Emitted decrypted event ${decryptedEvent.id.substring(0, 8)}... to $emittedCount active subscription(s)',
+      );
+      
+      if (emittedCount == 0) {
+        debugPrint(
+          'WARNING: No active subscriptions to receive decrypted event ${decryptedEvent.id.substring(0, 8)}...',
+        );
       }
     } catch (e) {
       debugPrint(
@@ -1034,8 +1049,13 @@ class NostrService {
     final List<dynamic> request = ['REQ', subscriptionId, filter];
     _sendMessage(request);
 
+    debugPrint(
+      '>>> SUBSCRIPTION CREATED: $subscriptionId for kind=$kind, filter=$filter',
+    );
+
     // Clean up when the stream is cancelled
     controller.onCancel = () {
+      debugPrint('>>> SUBSCRIPTION CANCELLED: $subscriptionId');
       _unsubscribe(subscriptionId);
     };
 

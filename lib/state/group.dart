@@ -1955,8 +1955,9 @@ class GroupState with ChangeNotifier {
           .listen(
             (event) {
               // Events are automatically decrypted by NostrService
+              final tagsStr = event.tags.map((t) => t.join(':')).join(', ');
               debugPrint(
-                'Received decrypted event from envelope: kind=${event.kind}, id=${event.id.substring(0, 8)}...',
+                '>>> ALL GROUPS LISTENER: Received event kind=${event.kind}, id=${event.id.substring(0, 8)}..., tags=$tagsStr',
               );
 
               // Extract group ID from event
@@ -1968,7 +1969,12 @@ class GroupState with ChangeNotifier {
                 }
               }
 
-              if (groupIdHex == null) return;
+              if (groupIdHex == null) {
+                debugPrint(
+                  '>>> ALL GROUPS LISTENER: No group tag found in event ${event.id.substring(0, 8)}...',
+                );
+                return;
+              }
 
               // Handle kind 7 (reactions)
               if (event.kind == 7) {
@@ -2123,6 +2129,9 @@ class GroupState with ChangeNotifier {
           .listenToEvents(kind: kindEncryptedEnvelope, limit: null)
           .listen(
             (event) {
+              debugPrint(
+                '>>> GROUP LISTENER: Received event ${event.id.substring(0, 8)}... kind=${event.kind}',
+              );
               // Events are automatically decrypted by NostrService
               // Check if this message is for the active group by looking for 'g' tag
               final hasGroupTag = event.tags.any(
@@ -2130,7 +2139,12 @@ class GroupState with ChangeNotifier {
                     tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
               );
 
-              if (!hasGroupTag) return;
+              if (!hasGroupTag) {
+                debugPrint(
+                  '>>> GROUP LISTENER: Event ${event.id.substring(0, 8)}... has no matching group tag (expected g=$groupIdHex)',
+                );
+                return;
+              }
 
               // Skip kind 7 reactions - they are handled by _startListeningForAllGroupEvents()
               if (event.kind == 7) return;
@@ -2138,11 +2152,18 @@ class GroupState with ChangeNotifier {
               // Handle kind 1 messages
               if (!_groupMessages.any((e) => e.id == event.id)) {
                 _groupMessages.insert(0, event);
+                debugPrint(
+                  '>>> GROUP LISTENER: Added event ${event.id.substring(0, 8)}... to groupMessages',
+                );
                 // Also add to unified messages list (for main feed view)
                 if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
                   _allDecryptedMessages.insert(0, event);
                 }
                 safeNotifyListeners();
+              } else {
+                debugPrint(
+                  '>>> GROUP LISTENER: Event ${event.id.substring(0, 8)}... already in groupMessages',
+                );
               }
             },
             onError: (error) {
