@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/post_detail.dart';
+import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/profile/profile.dart';
@@ -286,25 +288,93 @@ class _PostItemContentState extends State<_PostItemContent> {
   bool _isLoadingReactionCount = true;
   bool _hasUserReacted = false;
   bool _isReacting = false;
+  StreamSubscription<GroupReactionUpdate>? _groupReactionSubscription;
+  StreamSubscription<PostReactionUpdate>? _postReactionSubscription;
+
+  /// Get group ID from event's 'g' tag (for encrypted group messages)
+  String? get _groupIdHex {
+    for (final tag in widget.event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
+  /// Whether this event belongs to a group (has encrypted reactions)
+  bool get _isGroupEvent => _groupIdHex != null;
 
   @override
   void initState() {
     super.initState();
     _loadReactionData();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      if (_isGroupEvent) {
+        // Subscribe to real-time reaction updates for group events
+        final groupState = context.read<GroupState>();
+        _groupReactionSubscription = groupState.reactionUpdates.listen((update) {
+          if (update.eventId == widget.event.id && mounted) {
+            _loadReactionData();
+          }
+        });
+      } else {
+        // Subscribe to real-time reaction updates for regular events
+        final postDetailState = context.read<PostDetailState>();
+        _postReactionSubscription =
+            postDetailState.reactionUpdates.listen((update) {
+          if (update.eventId == widget.event.id && mounted) {
+            _loadReactionData();
+          }
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _groupReactionSubscription?.cancel();
+    _postReactionSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadReactionData() async {
     if (!mounted) return;
 
-    final postDetailState = context.read<PostDetailState>();
-    final count = await postDetailState.getReactionCount(widget.event.id);
-    final hasReacted = await postDetailState.hasUserReacted(widget.event.id);
-    if (mounted) {
-      setState(() {
-        _reactionCount = count;
-        _hasUserReacted = hasReacted;
-        _isLoadingReactionCount = false;
-      });
+    final groupIdHex = _groupIdHex;
+
+    if (groupIdHex != null) {
+      // Group event - use GroupState for encrypted reactions
+      final groupState = context.read<GroupState>();
+      final count = await groupState.getGroupReactionCount(
+        widget.event.id,
+        groupIdHex,
+      );
+      final hasReacted = await groupState.hasUserReactedInGroup(
+        widget.event.id,
+        groupIdHex,
+      );
+      if (mounted) {
+        setState(() {
+          _reactionCount = count;
+          _hasUserReacted = hasReacted;
+          _isLoadingReactionCount = false;
+        });
+      }
+    } else {
+      // Regular feed event - use PostDetailState for unencrypted reactions
+      final postDetailState = context.read<PostDetailState>();
+      final count = await postDetailState.getReactionCount(widget.event.id);
+      final hasReacted = await postDetailState.hasUserReacted(widget.event.id);
+      if (mounted) {
+        setState(() {
+          _reactionCount = count;
+          _hasUserReacted = hasReacted;
+          _isLoadingReactionCount = false;
+        });
+      }
     }
   }
 
@@ -325,15 +395,26 @@ class _PostItemContentState extends State<_PostItemContent> {
     });
 
     try {
-      final postDetailState = context.read<PostDetailState>();
+      final groupIdHex = _groupIdHex;
 
-      // If user had already reacted, publish an unlike reaction
-      // Some Nostr clients use "-" content to indicate unliking
-      await postDetailState.publishReaction(
-        widget.event.id,
-        widget.event.pubkey,
-        isUnlike: wasReacted,
-      );
+      if (groupIdHex != null) {
+        // Group event - publish encrypted reaction via GroupState
+        final groupState = context.read<GroupState>();
+        await groupState.publishGroupReaction(
+          widget.event.id,
+          widget.event.pubkey,
+          groupIdHex,
+          isUnlike: wasReacted,
+        );
+      } else {
+        // Regular feed event - publish unencrypted reaction via PostDetailState
+        final postDetailState = context.read<PostDetailState>();
+        await postDetailState.publishReaction(
+          widget.event.id,
+          widget.event.pubkey,
+          isUnlike: wasReacted,
+        );
+      }
 
       // Add a small delay to ensure cache is written before reloading
       await Future.delayed(const Duration(milliseconds: 150));
@@ -538,25 +619,93 @@ class _CommentItemContentState extends State<_CommentItemContent> {
   bool _isLoadingReactionCount = true;
   bool _hasUserReacted = false;
   bool _isReacting = false;
+  StreamSubscription<GroupReactionUpdate>? _groupReactionSubscription;
+  StreamSubscription<PostReactionUpdate>? _postReactionSubscription;
+
+  /// Get group ID from event's 'g' tag (for encrypted group messages)
+  String? get _groupIdHex {
+    for (final tag in widget.event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
+  /// Whether this event belongs to a group (has encrypted reactions)
+  bool get _isGroupEvent => _groupIdHex != null;
 
   @override
   void initState() {
     super.initState();
     _loadReactionData();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      if (_isGroupEvent) {
+        // Subscribe to real-time reaction updates for group events
+        final groupState = context.read<GroupState>();
+        _groupReactionSubscription = groupState.reactionUpdates.listen((update) {
+          if (update.eventId == widget.event.id && mounted) {
+            _loadReactionData();
+          }
+        });
+      } else {
+        // Subscribe to real-time reaction updates for regular events
+        final postDetailState = context.read<PostDetailState>();
+        _postReactionSubscription =
+            postDetailState.reactionUpdates.listen((update) {
+          if (update.eventId == widget.event.id && mounted) {
+            _loadReactionData();
+          }
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _groupReactionSubscription?.cancel();
+    _postReactionSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadReactionData() async {
     if (!mounted) return;
 
-    final postDetailState = context.read<PostDetailState>();
-    final count = await postDetailState.getReactionCount(widget.event.id);
-    final hasReacted = await postDetailState.hasUserReacted(widget.event.id);
-    if (mounted) {
-      setState(() {
-        _reactionCount = count;
-        _hasUserReacted = hasReacted;
-        _isLoadingReactionCount = false;
-      });
+    final groupIdHex = _groupIdHex;
+
+    if (groupIdHex != null) {
+      // Group event - use GroupState for encrypted reactions
+      final groupState = context.read<GroupState>();
+      final count = await groupState.getGroupReactionCount(
+        widget.event.id,
+        groupIdHex,
+      );
+      final hasReacted = await groupState.hasUserReactedInGroup(
+        widget.event.id,
+        groupIdHex,
+      );
+      if (mounted) {
+        setState(() {
+          _reactionCount = count;
+          _hasUserReacted = hasReacted;
+          _isLoadingReactionCount = false;
+        });
+      }
+    } else {
+      // Regular comment - use PostDetailState for unencrypted reactions
+      final postDetailState = context.read<PostDetailState>();
+      final count = await postDetailState.getReactionCount(widget.event.id);
+      final hasReacted = await postDetailState.hasUserReacted(widget.event.id);
+      if (mounted) {
+        setState(() {
+          _reactionCount = count;
+          _hasUserReacted = hasReacted;
+          _isLoadingReactionCount = false;
+        });
+      }
     }
   }
 
@@ -577,15 +726,26 @@ class _CommentItemContentState extends State<_CommentItemContent> {
     });
 
     try {
-      final postDetailState = context.read<PostDetailState>();
+      final groupIdHex = _groupIdHex;
 
-      // If user had already reacted, publish an unlike reaction
-      // Some Nostr clients use "-" content to indicate unliking
-      await postDetailState.publishReaction(
-        widget.event.id,
-        widget.event.pubkey,
-        isUnlike: wasReacted,
-      );
+      if (groupIdHex != null) {
+        // Group event - publish encrypted reaction via GroupState
+        final groupState = context.read<GroupState>();
+        await groupState.publishGroupReaction(
+          widget.event.id,
+          widget.event.pubkey,
+          groupIdHex,
+          isUnlike: wasReacted,
+        );
+      } else {
+        // Regular comment - publish unencrypted reaction via PostDetailState
+        final postDetailState = context.read<PostDetailState>();
+        await postDetailState.publishReaction(
+          widget.event.id,
+          widget.event.pubkey,
+          isUnlike: wasReacted,
+        );
+      }
 
       // Add a small delay to ensure cache is written before reloading
       await Future.delayed(const Duration(milliseconds: 150));

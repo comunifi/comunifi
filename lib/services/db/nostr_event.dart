@@ -210,6 +210,102 @@ class NostrEventTable extends DBTable {
     return query(tagKey: tagKey, tagValue: tagValue, limit: limit);
   }
 
+  /// Query events with multiple tag filters (all tags must match)
+  ///
+  /// This is useful for querying reactions in a specific group:
+  /// ```dart
+  /// // Get all kind 7 reactions in group X for post Y
+  /// queryWithMultipleTags(
+  ///   kind: 7,
+  ///   tagFilters: {'g': groupIdHex, 'e': postId},
+  /// )
+  /// ```
+  Future<List<NostrEventModel>> queryWithMultipleTags({
+    String? pubkey,
+    int? kind,
+    int? limit,
+    int? offset,
+    required Map<String, String> tagFilters,
+  }) async {
+    if (tagFilters.isEmpty) {
+      return query(pubkey: pubkey, kind: kind, limit: limit, offset: offset);
+    }
+
+    // Get event IDs that match ALL tag filters
+    Set<String>? matchingEventIds;
+
+    for (final entry in tagFilters.entries) {
+      final eventIds = await _tagTable.queryEventIds(
+        tagKey: entry.key,
+        tagValue: entry.value,
+      );
+
+      if (matchingEventIds == null) {
+        matchingEventIds = eventIds.toSet();
+      } else {
+        // Intersect to keep only events that match all filters
+        matchingEventIds = matchingEventIds.intersection(eventIds.toSet());
+      }
+
+      // Early exit if no matches
+      if (matchingEventIds.isEmpty) {
+        return [];
+      }
+    }
+
+    if (matchingEventIds == null || matchingEventIds.isEmpty) {
+      return [];
+    }
+
+    // Now query the events table with the filtered IDs
+    String whereClause = '1=1';
+    List<dynamic> whereArgs = [];
+
+    if (pubkey != null) {
+      whereClause += ' AND pubkey = ?';
+      whereArgs.add(pubkey);
+    }
+
+    if (kind != null) {
+      whereClause += ' AND kind = ?';
+      whereArgs.add(kind);
+    }
+
+    whereClause +=
+        ' AND id IN (${List.filled(matchingEventIds.length, '?').join(',')})';
+    whereArgs.addAll(matchingEventIds);
+
+    final List<Map<String, dynamic>> maps = await db.query(
+      name,
+      where: whereClause,
+      whereArgs: whereArgs,
+      orderBy: 'created_at DESC',
+      limit: limit,
+      offset: offset,
+    );
+
+    final events = <NostrEventModel>[];
+
+    for (final eventMap in maps) {
+      final tags = await _tagTable.getTags(eventMap['id']);
+      events.add(
+        NostrEventModel(
+          id: eventMap['id'],
+          pubkey: eventMap['pubkey'],
+          kind: eventMap['kind'],
+          content: eventMap['content'],
+          tags: tags,
+          sig: eventMap['sig'],
+          createdAt: DateTime.fromMillisecondsSinceEpoch(
+            (eventMap['created_at'] as int) * 1000,
+          ),
+        ),
+      );
+    }
+
+    return events;
+  }
+
   /// Delete an event by id (tags are automatically deleted)
   Future<void> delete(String id) async {
     await _tagTable.deleteTags(id);

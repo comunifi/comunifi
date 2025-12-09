@@ -307,14 +307,48 @@ Reactions allow users to "like" posts and comments. Implemented using Nostr **ki
 3. **Event is published to relay** and cached locally
 4. **Reaction count updates** by querying cached kind 7 events
 
+### Encrypted Group Reactions
+
+For posts within MLS groups, reactions are **encrypted** to protect privacy:
+
+1. **Kind 7 reaction created** with `g` tag for group filtering
+2. **Encrypted with MLS** and wrapped in kind 1059 envelope
+3. **Decrypted on receive** and stored locally for counting
+4. **Real-time updates** via subscription stream
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Kind 1059 Envelope                                             │
+│  Tags: ['g', groupIdHex], ['p', recipientPubkey]               │
+│  Content: MLS-encrypted kind 7 reaction                        │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  Kind 7 Reaction (decrypted)                             │   │
+│  │  Tags: ['g', groupIdHex], ['e', postId], ['p', author]   │   │
+│  │  Content: '+' or '-'                                      │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ### Reaction Event Structure
 
 ```dart
-// Like reaction event
+// Regular (unencrypted) reaction event
 NostrEventModel(
   kind: 7,                    // Reaction event type
   content: '+',               // '+' for like, '-' for unlike
   tags: [
+    ['e', '<event_id>'],      // Event being reacted to
+    ['p', '<author_pubkey>'], // Author of the event being reacted to
+    ['client', 'comunifi'],   // Client identifier
+  ],
+)
+
+// Group (encrypted) reaction event - inner content before encryption
+NostrEventModel(
+  kind: 7,                    // Reaction event type
+  content: '+',               // '+' for like, '-' for unlike
+  tags: [
+    ['g', '<group_id_hex>'],  // Group ID for filtering
     ['e', '<event_id>'],      // Event being reacted to
     ['p', '<author_pubkey>'], // Author of the event being reacted to
     ['client', 'comunifi'],   // Client identifier
@@ -358,7 +392,7 @@ bool _isReacting = false;         // Prevent double-tap
 
 ### State Methods
 
-Both `FeedState` and `PostDetailState` provide identical reaction methods:
+Both `FeedState` and `PostDetailState` provide reaction methods for regular posts:
 
 ```dart
 // Publish a reaction (like or unlike)
@@ -373,6 +407,31 @@ final count = await state.getReactionCount(eventId);
 
 // Check if current user has reacted
 final hasReacted = await state.hasUserReacted(eventId);
+```
+
+For **group posts**, use `GroupState` methods which handle encryption:
+
+```dart
+// Publish encrypted reaction to a group post
+await groupState.publishGroupReaction(
+  eventId,           // ID of post being reacted to
+  eventAuthorPubkey, // Author of the post
+  groupIdHex,        // MLS group ID (hex string)
+  isUnlike: false,   // true to unlike
+);
+
+// Get reaction count for a group post
+final count = await groupState.getGroupReactionCount(eventId, groupIdHex);
+
+// Check if current user has reacted in group
+final hasReacted = await groupState.hasUserReactedInGroup(eventId, groupIdHex);
+
+// Subscribe to real-time reaction updates
+groupState.reactionUpdates.listen((update) {
+  if (update.eventId == myEventId) {
+    // Reload reaction data
+  }
+});
 ```
 
 ### Data Flow
@@ -544,9 +603,11 @@ class _PostCardState extends State<PostCard> {
 | File | Purpose |
 |------|---------|
 | `lib/widgets/heart_button.dart` | HeartButton presentation widget |
-| `lib/state/feed.dart` | publishReaction, getReactionCount, hasUserReacted |
+| `lib/state/feed.dart` | publishReaction, getReactionCount, hasUserReacted (unencrypted) |
+| `lib/state/group.dart` | publishGroupReaction, getGroupReactionCount, hasUserReactedInGroup (encrypted) |
 | `lib/state/post_detail.dart` | Same reaction methods for post detail view |
-| `lib/screens/feed/feed_screen.dart` | Reaction UI in feed |
+| `lib/services/db/nostr_event.dart` | queryWithMultipleTags for g+e tag filtering |
+| `lib/screens/feed/feed_screen.dart` | Reaction UI in feed (auto-detects group vs regular) |
 | `lib/screens/post/post_detail_screen.dart` | Reaction UI in post detail |
 
 ---

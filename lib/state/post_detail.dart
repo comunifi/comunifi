@@ -16,6 +16,15 @@ class PostDetailState with ChangeNotifier {
   final String postId;
   NostrService? _nostrService;
   StreamSubscription<NostrEventModel>? _eventSubscription;
+  StreamSubscription<NostrEventModel>? _reactionSubscription;
+
+  // Stream controller for reaction updates on this post
+  final _reactionUpdateController =
+      StreamController<PostReactionUpdate>.broadcast();
+
+  /// Stream of reaction updates for real-time UI updates
+  Stream<PostReactionUpdate> get reactionUpdates =>
+      _reactionUpdateController.stream;
 
   PostDetailState(this.postId) {
     _initialize();
@@ -50,6 +59,7 @@ class PostDetailState with ChangeNotifier {
           _loadPost();
           _loadComments();
           _startListeningForNewComments();
+          _startListeningForReactions();
         } else {
           _isConnected = false;
           _errorMessage = 'Failed to connect to relay';
@@ -73,6 +83,8 @@ class PostDetailState with ChangeNotifier {
   void dispose() {
     _mounted = false;
     _eventSubscription?.cancel();
+    _reactionSubscription?.cancel();
+    _reactionUpdateController.close();
     _nostrService?.disconnect();
     super.dispose();
   }
@@ -218,6 +230,70 @@ class PostDetailState with ChangeNotifier {
       debugPrint('Failed to start listening for comments: $e');
       _errorMessage = 'Failed to start listening: $e';
       safeNotifyListeners();
+    }
+  }
+
+  /// Start listening for reactions on this post and its comments
+  void _startListeningForReactions() {
+    if (_nostrService == null || !_isConnected) return;
+
+    try {
+      _reactionSubscription?.cancel();
+
+      // Listen for kind 7 (reaction) events
+      _reactionSubscription = _nostrService!
+          .listenToEvents(kind: 7, limit: null)
+          .listen(
+            (event) {
+              // Check if this reaction is for this post or any of its comments
+              String? targetEventId;
+              for (final tag in event.tags) {
+                if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+                  targetEventId = tag[1];
+                  break;
+                }
+              }
+
+              if (targetEventId == null) return;
+
+              // Check if the reaction is for this post or one of its comments
+              final isForThisPost = targetEventId == postId;
+              final isForComment = _comments.any((c) => c.id == targetEventId);
+
+              if (isForThisPost || isForComment) {
+                // Cache the reaction
+                _nostrService!
+                    .cacheEvent(event)
+                    .then((_) {
+                      // Emit update for real-time UI after caching
+                      _reactionUpdateController.add(
+                        PostReactionUpdate(
+                          eventId: targetEventId!,
+                          pubkey: event.pubkey,
+                          content: event.content,
+                        ),
+                      );
+
+                      // Also notify listeners to trigger any widgets watching the state
+                      safeNotifyListeners();
+
+                      debugPrint(
+                        'Received reaction ${event.content} on event $targetEventId',
+                      );
+                    })
+                    .catchError((e) {
+                      debugPrint('Failed to cache reaction: $e');
+                    });
+              }
+            },
+            onError: (error) {
+              debugPrint('Error listening to reactions: $error');
+            },
+          );
+
+      debugPrint('Started listening for reactions on post $postId');
+    } catch (e) {
+      debugPrint('Failed to start listening for reactions: $e');
     }
   }
 
@@ -585,4 +661,20 @@ class PostDetailState with ChangeNotifier {
       return false;
     }
   }
+}
+
+/// Represents a reaction update for real-time UI notifications
+class PostReactionUpdate {
+  final String eventId;
+  final String pubkey;
+  final String content; // '+' for like, '-' for unlike
+
+  PostReactionUpdate({
+    required this.eventId,
+    required this.pubkey,
+    required this.content,
+  });
+
+  bool get isLike => content == '+';
+  bool get isUnlike => content == '-';
 }

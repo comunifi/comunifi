@@ -718,6 +718,8 @@ class GroupState with ChangeNotifier {
     _mounted = false;
     _groupEventSubscription?.cancel();
     _messageEventSubscription?.cancel();
+    _encryptedEnvelopeSubscription?.cancel();
+    _reactionUpdateController.close();
     _nostrService?.disconnect();
     _dbService?.database?.close();
     _eventDbService?.database?.close();
@@ -1177,13 +1179,17 @@ class GroupState with ChangeNotifier {
   String? get hashtagFilter => _hashtagFilter;
 
   /// Get group messages, optionally filtered by hashtag
+  /// Only returns kind 1 (text notes), excludes kind 7 (reactions)
   List<NostrEventModel> get groupMessages {
+    // Filter to only kind 1 messages (exclude reactions)
+    final messagesOnly = _groupMessages.where((e) => e.kind == 1);
+
     if (_hashtagFilter == null) {
-      return _groupMessages;
+      return messagesOnly.toList();
     }
     // Filter messages that have the hashtag (check both tags and content)
     final filterLower = _hashtagFilter!.toLowerCase();
-    return _groupMessages.where((event) {
+    return messagesOnly.where((event) {
       // Check 't' tags first
       if (event.hashtags.contains(filterLower)) {
         return true;
@@ -1197,12 +1203,16 @@ class GroupState with ChangeNotifier {
   }
 
   /// Get all group messages (unfiltered) for active group
-  List<NostrEventModel> get allGroupMessages => _groupMessages;
+  /// Only returns kind 1 (text notes), excludes kind 7 (reactions)
+  List<NostrEventModel> get allGroupMessages =>
+      _groupMessages.where((e) => e.kind == 1).toList();
 
   /// Get all decrypted messages across ALL groups (for unified main feed)
   /// These persist across group switches
-  List<NostrEventModel> get allDecryptedMessages =>
-      List.unmodifiable(_allDecryptedMessages);
+  /// Only returns kind 1 (text notes), excludes kind 7 (reactions)
+  List<NostrEventModel> get allDecryptedMessages => List.unmodifiable(
+    _allDecryptedMessages.where((e) => e.kind == 1).toList(),
+  );
 
   /// Set hashtag filter
   void setHashtagFilter(String? hashtag) {
@@ -1325,6 +1335,10 @@ class GroupState with ChangeNotifier {
 
       // Add to groups list
       _groups.insert(0, mlsGroup);
+
+      // Refresh the reaction listener to include the new group
+      refreshReactionListener();
+
       safeNotifyListeners();
 
       debugPrint('Created MLS group: ${mlsGroup.name} (${groupIdHex})');
@@ -1589,13 +1603,19 @@ class GroupState with ChangeNotifier {
       // Use a map to deduplicate by event ID
       final allEvents = <String, NostrEventModel>{};
 
-      // Add cached decrypted messages
+      // Add cached decrypted messages (kind 1 only)
       for (final event in cachedDecrypted) {
-        allEvents[event.id] = event;
+        if (event.kind == 1) {
+          allEvents[event.id] = event;
+        }
       }
 
-      // Add newly decrypted events from relay
+      // Add newly decrypted events from relay (kind 1 messages only)
+      // Skip kind 7 reactions - they are handled separately
       for (final event in pastEvents) {
+        // Only include kind 1 (text notes/messages)
+        if (event.kind != 1) continue;
+
         // Check if event has 'g' tag with matching group ID
         final hasGroupTag = event.tags.any(
           (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
@@ -1636,6 +1656,9 @@ class GroupState with ChangeNotifier {
   /// Start listening for new group events
   /// Note: Groups are now MLS-based, so we just refresh the list periodically
   /// Also listens for Welcome messages (kind 1060) and NIP-29 create-group events (kind 9007)
+  // Subscription for encrypted envelopes (reactions + messages from all groups)
+  StreamSubscription<NostrEventModel>? _encryptedEnvelopeSubscription;
+
   Future<void> _startListeningForGroupEvents() async {
     if (_nostrService == null || !_isConnected) return;
 
@@ -1704,9 +1727,85 @@ class GroupState with ChangeNotifier {
               debugPrint('Error listening to edit-metadata events: $error');
             },
           );
+
+      // Listen for ALL encrypted envelopes (kind 1059) to receive reactions from all groups
+      // This ensures reactions are received in real-time regardless of which group is active
+      _startListeningForAllGroupReactions();
     } catch (e) {
       debugPrint('Failed to start listening for group events: $e');
     }
+  }
+
+  /// Start listening for encrypted reactions from ALL groups the user is a member of
+  /// This runs independently of the active group selection
+  void _startListeningForAllGroupReactions() {
+    if (_nostrService == null || !_isConnected) return;
+
+    // Get the list of group IDs we're a member of
+    final groupIds = _mlsGroups.keys.toList();
+    if (groupIds.isEmpty) {
+      debugPrint('No groups to listen for reactions');
+      return;
+    }
+
+    try {
+      // Cancel existing subscription if any
+      _encryptedEnvelopeSubscription?.cancel();
+
+      // Listen to encrypted envelopes (kind 1059) for groups we're a member of
+      // Filter by #g tag to only receive events for our groups
+      // NostrService will attempt to decrypt using the MLS group resolver
+      // Successfully decrypted events will be emitted to this stream
+      _encryptedEnvelopeSubscription = _nostrService!
+          .listenToEvents(
+            kind: kindEncryptedEnvelope,
+            tags: groupIds, // Filter by group IDs we're a member of
+            limit: null,
+          )
+          .listen(
+            (event) {
+              // Events are automatically decrypted by NostrService
+              debugPrint(
+                'Received decrypted event from envelope: kind=${event.kind}, id=${event.id.substring(0, 8)}...',
+              );
+
+              // Only kind 7 (reactions) are processed here
+              // Kind 1 (messages) are handled by _startListeningForGroupMessages
+              if (event.kind == 7) {
+                // Extract group ID to verify we're a member
+                String? groupIdHex;
+                for (final tag in event.tags) {
+                  if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+                    groupIdHex = tag[1];
+                    break;
+                  }
+                }
+
+                debugPrint('Received kind 7 reaction for group $groupIdHex');
+
+                // Process the reaction
+                if (groupIdHex != null) {
+                  handleDecryptedReaction(event);
+                }
+              }
+            },
+            onError: (error) {
+              debugPrint('Error listening to encrypted envelopes: $error');
+            },
+          );
+
+      debugPrint(
+        'Started listening for group reactions (${groupIds.length} groups)',
+      );
+    } catch (e) {
+      debugPrint('Failed to start listening for group reactions: $e');
+    }
+  }
+
+  /// Restart the reaction listener when groups change
+  /// Call this after joining or leaving a group
+  void refreshReactionListener() {
+    _startListeningForAllGroupReactions();
   }
 
   /// Handle incoming kind 9002 (edit-metadata) events
@@ -1784,6 +1883,7 @@ class GroupState with ChangeNotifier {
   }
 
   /// Start listening for new messages in the active group
+  /// Note: Kind 7 reactions are handled globally by _startListeningForAllGroupReactions()
   void _startListeningForGroupMessages(MlsGroup group) {
     if (_nostrService == null || !_isConnected || _activeGroup == null) return;
 
@@ -1803,7 +1903,14 @@ class GroupState with ChangeNotifier {
                 (tag) =>
                     tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
               );
-              if (hasGroupTag && !_groupMessages.any((e) => e.id == event.id)) {
+
+              if (!hasGroupTag) return;
+
+              // Skip kind 7 reactions - they are handled by _startListeningForAllGroupReactions()
+              if (event.kind == 7) return;
+
+              // Handle kind 1 messages
+              if (!_groupMessages.any((e) => e.id == event.id)) {
                 _groupMessages.insert(0, event);
                 // Also add to unified messages list (for main feed view)
                 if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
@@ -3017,6 +3124,9 @@ class GroupState with ChangeNotifier {
       // Pass notify: true to trigger sidebar rebuild and reload.
       invalidateMembershipCache(notify: true);
 
+      // Refresh the reaction listener to include the new group
+      refreshReactionListener();
+
       // Note: When a user is invited via MLS Welcome, the inviter publishes
       // kind 9000 (put-user) to add them to the group per NIP-29.
       // The invitee does NOT need to publish kind 9021 (join-request) since
@@ -3396,4 +3506,295 @@ class GroupState with ChangeNotifier {
       safeNotifyListeners();
     }
   }
+
+  // ============================================================================
+  // Group Reactions (Encrypted Likes)
+  // ============================================================================
+
+  // In-memory cache of reactions for real-time updates
+  // Map of eventId -> Map of pubkey -> reaction content ('+' or '-')
+  final Map<String, Map<String, String>> _groupReactionCache = {};
+
+  // Stream controller for reaction updates
+  final _reactionUpdateController =
+      StreamController<GroupReactionUpdate>.broadcast();
+
+  /// Stream of reaction updates for real-time UI updates
+  Stream<GroupReactionUpdate> get reactionUpdates =>
+      _reactionUpdateController.stream;
+
+  /// Publish a reaction (kind 7) to a group post
+  /// The reaction is encrypted with MLS and wrapped in kind 1059
+  ///
+  /// In Nostr, reactions are kind 7 events with:
+  /// - 'g' tag pointing to the group (for filtering)
+  /// - 'e' tag pointing to the event being reacted to
+  /// - 'p' tag pointing to the author of the event being reacted to
+  /// - Content is typically "+" for like/heart, "-" for unlike
+  Future<void> publishGroupReaction(
+    String eventId,
+    String eventAuthorPubkey,
+    String groupIdHex, {
+    bool isUnlike = false,
+  }) async {
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    // Find the MLS group
+    final mlsGroup = _mlsGroups[groupIdHex];
+    if (mlsGroup == null) {
+      throw Exception('Group not found: $groupIdHex');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception(
+          'No Nostr key found. Please ensure keys are initialized.',
+        );
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Create reaction content
+      final reactionContent = isUnlike ? '-' : '+';
+      final reactionCreatedAt = DateTime.now();
+
+      // Create client tags with signature
+      // Include 'g' tag for group filtering after decryption
+      final reactionTags = await addClientTagsWithSignature([
+        ['g', groupIdHex], // Group ID for filtering
+        ['e', eventId], // Event being reacted to
+        ['p', eventAuthorPubkey], // Author of the event being reacted to
+      ], createdAt: reactionCreatedAt);
+
+      // Create and sign a reaction event (kind 7)
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 7, // Reaction
+        content: reactionContent,
+        keyPairs: keyPair,
+        tags: reactionTags,
+        createdAt: reactionCreatedAt,
+      );
+
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      // Get recipient pubkey (use our own pubkey for the envelope)
+      final recipientPubkey = eventModel.pubkey;
+
+      // Publish to the relay - will be automatically encrypted and wrapped in kind 1059
+      await _nostrService!.publishEvent(
+        eventModel.toJson(),
+        mlsGroupId: groupIdHex,
+        recipientPubkey: recipientPubkey,
+        keyPairs: keyPair,
+      );
+
+      // Update local reaction cache immediately
+      _updateReactionCache(eventId, eventModel.pubkey, reactionContent);
+
+      // Cache the decrypted event locally for reaction count queries
+      if (_eventTable != null) {
+        try {
+          await _eventTable!.insert(eventModel);
+          debugPrint('Cached group reaction: ${eventModel.id}');
+        } catch (e) {
+          debugPrint('Failed to cache group reaction: $e');
+        }
+      }
+
+      // Emit reaction update for real-time UI
+      _reactionUpdateController.add(
+        GroupReactionUpdate(
+          eventId: eventId,
+          groupIdHex: groupIdHex,
+          pubkey: eventModel.pubkey,
+          content: reactionContent,
+        ),
+      );
+
+      debugPrint(
+        'Published ${isUnlike ? "unlike" : "like"} reaction to group event: $eventId',
+      );
+    } catch (e) {
+      debugPrint('Failed to publish group reaction: $e');
+      rethrow;
+    }
+  }
+
+  /// Get reaction count for a group post (kind 7 events with 'g' and 'e' tags)
+  /// Counts unique users whose most recent reaction is "+"
+  /// This properly handles like/unlike toggling by considering only the latest reaction per user
+  Future<int> getGroupReactionCount(String eventId, String groupIdHex) async {
+    if (_eventTable == null) return 0;
+
+    try {
+      // Query cached events with kind 7 and both 'g' and 'e' tags
+      final reactions = await _eventTable!.queryWithMultipleTags(
+        kind: 7,
+        tagFilters: {'g': groupIdHex, 'e': eventId},
+      );
+
+      // Group reactions by user pubkey, keeping only the most recent one
+      final Map<String, NostrEventModel> latestReactionByUser = {};
+      for (final reaction in reactions) {
+        final existing = latestReactionByUser[reaction.pubkey];
+        if (existing == null ||
+            reaction.createdAt.isAfter(existing.createdAt)) {
+          latestReactionByUser[reaction.pubkey] = reaction;
+        }
+      }
+
+      // Count users whose most recent reaction is "+"
+      return latestReactionByUser.values
+          .where((reaction) => reaction.content == '+')
+          .length;
+    } catch (e) {
+      debugPrint('Error getting group reaction count: $e');
+      return 0;
+    }
+  }
+
+  /// Check if the current user has reacted to a group post
+  /// Returns true only if the user's most recent reaction is "+"
+  /// This properly handles like/unlike toggling
+  Future<bool> hasUserReactedInGroup(String eventId, String groupIdHex) async {
+    if (_eventTable == null) return false;
+
+    try {
+      final userPubkey = await getNostrPublicKey();
+      if (userPubkey == null) return false;
+
+      // Query cached reactions for this event in this group
+      final reactions = await _eventTable!.queryWithMultipleTags(
+        kind: 7,
+        tagFilters: {'g': groupIdHex, 'e': eventId},
+      );
+
+      // Filter to only this user's reactions
+      final userReactions = reactions
+          .where((r) => r.pubkey == userPubkey)
+          .toList();
+
+      if (userReactions.isEmpty) return false;
+
+      // Find the most recent reaction from this user
+      userReactions.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      final latestReaction = userReactions.first;
+
+      // Return true only if the most recent reaction is "+"
+      return latestReaction.content == '+';
+    } catch (e) {
+      debugPrint('Error checking if user reacted in group: $e');
+      return false;
+    }
+  }
+
+  /// Update the in-memory reaction cache
+  void _updateReactionCache(String eventId, String pubkey, String content) {
+    _groupReactionCache[eventId] ??= {};
+    _groupReactionCache[eventId]![pubkey] = content;
+  }
+
+  /// Handle a decrypted reaction event from the subscription
+  /// This is called when we receive and decrypt a kind 7 event from the relay
+  void handleDecryptedReaction(NostrEventModel reaction) {
+    if (reaction.kind != 7) return;
+
+    // Extract event ID from 'e' tag
+    String? eventId;
+    String? groupIdHex;
+    for (final tag in reaction.tags) {
+      if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+        eventId = tag[1];
+      }
+      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+        groupIdHex = tag[1];
+      }
+    }
+
+    if (eventId == null || groupIdHex == null) {
+      debugPrint(
+        'Received reaction missing eventId or groupIdHex: eventId=$eventId, groupIdHex=$groupIdHex',
+      );
+      return;
+    }
+
+    debugPrint(
+      'Received decrypted reaction: ${reaction.content} on event $eventId from ${reaction.pubkey.substring(0, 8)}...',
+    );
+
+    // Update local cache
+    _updateReactionCache(eventId, reaction.pubkey, reaction.content);
+
+    // Capture non-null values for use in callback
+    final capturedEventId = eventId;
+    final capturedGroupIdHex = groupIdHex;
+
+    // Cache to database and then emit update
+    if (_eventTable != null) {
+      _eventTable!
+          .insert(reaction)
+          .then((_) {
+            // Emit update for real-time UI after caching
+            _reactionUpdateController.add(
+              GroupReactionUpdate(
+                eventId: capturedEventId,
+                groupIdHex: capturedGroupIdHex,
+                pubkey: reaction.pubkey,
+                content: reaction.content,
+              ),
+            );
+
+            // Also notify listeners to trigger any widgets watching the state
+            safeNotifyListeners();
+
+            debugPrint('Emitted reaction update for event $capturedEventId');
+          })
+          .catchError((e) {
+            debugPrint('Failed to cache decrypted reaction: $e');
+          });
+    } else {
+      // Emit even without caching
+      _reactionUpdateController.add(
+        GroupReactionUpdate(
+          eventId: capturedEventId,
+          groupIdHex: capturedGroupIdHex,
+          pubkey: reaction.pubkey,
+          content: reaction.content,
+        ),
+      );
+      safeNotifyListeners();
+      debugPrint(
+        'Emitted reaction update for event $capturedEventId (no cache)',
+      );
+    }
+  }
+}
+
+/// Represents a reaction update for real-time UI notifications
+class GroupReactionUpdate {
+  final String eventId;
+  final String groupIdHex;
+  final String pubkey;
+  final String content; // '+' for like, '-' for unlike
+
+  GroupReactionUpdate({
+    required this.eventId,
+    required this.groupIdHex,
+    required this.pubkey,
+    required this.content,
+  });
+
+  bool get isLike => content == '+';
+  bool get isUnlike => content == '-';
 }
