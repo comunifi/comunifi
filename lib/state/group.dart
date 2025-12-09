@@ -5,7 +5,6 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
@@ -695,22 +694,10 @@ class GroupState with ChangeNotifier {
 
   // private variables here
   bool _mounted = true;
-  bool _isScheduled = false;
   void safeNotifyListeners() {
-    if (!_mounted) return;
-
-    // If we're already scheduled to notify, don't schedule again
-    if (_isScheduled) return;
-
-    // Check if we're in a build phase by trying to schedule for next frame
-    // This prevents calling notifyListeners() during build
-    _isScheduled = true;
-    SchedulerBinding.instance.addPostFrameCallback((_) {
-      _isScheduled = false;
-      if (_mounted) {
-        notifyListeners();
-      }
-    });
+    if (_mounted) {
+      notifyListeners();
+    }
   }
 
   @override
@@ -1153,6 +1140,12 @@ class GroupState with ChangeNotifier {
   // Explore mode (shows discoverable groups in feed area)
   bool _isExploreMode = false;
 
+  // Group messages pagination state
+  DateTime? _oldestGroupMessageTime;
+  bool _hasMoreGroupMessages = true;
+  bool _isLoadingMoreGroupMessages = false;
+  static const int _groupMessagesPageSize = 50;
+
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
@@ -1161,6 +1154,8 @@ class GroupState with ChangeNotifier {
   List<GroupAnnouncement> get discoveredGroups => _discoveredGroups;
   bool get isLoadingGroups => _isLoadingGroups;
   bool get isExploreMode => _isExploreMode;
+  bool get hasMoreGroupMessages => _hasMoreGroupMessages;
+  bool get isLoadingMoreGroupMessages => _isLoadingMoreGroupMessages;
 
   /// Set explore mode (shows discoverable groups in feed area)
   void setExploreMode(bool value) {
@@ -1530,6 +1525,10 @@ class GroupState with ChangeNotifier {
     _groupMessages = [];
     _hashtagFilter = null; // Clear hashtag filter when switching groups
     _isExploreMode = false; // Exit explore mode when selecting a group
+    // Reset pagination state for new group
+    _oldestGroupMessageTime = null;
+    _hasMoreGroupMessages = true;
+    _isLoadingMoreGroupMessages = false;
 
     if (group == null) {
       // Stop listening for messages
@@ -1561,10 +1560,107 @@ class GroupState with ChangeNotifier {
     });
   }
 
-  /// Refresh messages for the active group
+  /// Refresh messages for the active group (pull-to-refresh)
+  /// Reloads all messages to ensure we have the latest
   Future<void> refreshActiveGroupMessages() async {
     if (_activeGroup != null) {
       await _loadGroupMessages(_activeGroup!);
+    }
+  }
+
+  /// Load more older messages for infinite scroll
+  /// Fetches messages older than the oldest one we currently have
+  Future<void> loadMoreGroupMessages() async {
+    if (_activeGroup == null ||
+        _nostrService == null ||
+        !_isConnected ||
+        _isLoadingMoreGroupMessages ||
+        !_hasMoreGroupMessages ||
+        _oldestGroupMessageTime == null) {
+      return;
+    }
+
+    try {
+      _isLoadingMoreGroupMessages = true;
+      safeNotifyListeners();
+
+      final groupIdHex = _groupIdToHex(_activeGroup!.id);
+      debugPrint(
+        'Loading more messages for group: $groupIdHex (before ${_oldestGroupMessageTime!.toIso8601String()})',
+      );
+
+      // Request older encrypted envelopes (before our oldest message)
+      final olderEvents = await _nostrService!.requestPastEvents(
+        kind: kindEncryptedEnvelope,
+        tags: [groupIdHex],
+        until: _oldestGroupMessageTime!.subtract(const Duration(seconds: 1)),
+        limit: _groupMessagesPageSize,
+        useCache: false,
+      );
+
+      debugPrint('Load more received ${olderEvents.length} older events');
+
+      if (olderEvents.isEmpty) {
+        // No more events available
+        _hasMoreGroupMessages = false;
+        _isLoadingMoreGroupMessages = false;
+        safeNotifyListeners();
+        return;
+      }
+
+      // Add older messages that we don't already have
+      int addedCount = 0;
+      DateTime? newOldestTime;
+
+      for (final event in olderEvents) {
+        // Only include kind 1 (text notes/messages)
+        if (event.kind != 1) continue;
+
+        // Check if event has 'g' tag with matching group ID
+        final hasGroupTag = event.tags.any(
+          (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
+        );
+        if (!hasGroupTag) continue;
+
+        // Track oldest time for next pagination
+        if (newOldestTime == null || event.createdAt.isBefore(newOldestTime)) {
+          newOldestTime = event.createdAt;
+        }
+
+        // Add if we don't already have it
+        if (!_groupMessages.any((e) => e.id == event.id)) {
+          _groupMessages.add(event);
+          addedCount++;
+          // Also add to unified messages list
+          if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
+            _allDecryptedMessages.add(event);
+          }
+        }
+      }
+
+      if (addedCount > 0) {
+        // Re-sort to ensure proper order
+        _groupMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        _allDecryptedMessages.sort(
+          (a, b) => b.createdAt.compareTo(a.createdAt),
+        );
+        debugPrint('Added $addedCount older messages from load more');
+
+        // Update oldest time for next pagination
+        if (newOldestTime != null) {
+          _oldestGroupMessageTime = newOldestTime;
+        }
+      }
+
+      // If we got fewer events than page size, there are no more to load
+      _hasMoreGroupMessages = olderEvents.length >= _groupMessagesPageSize;
+
+      _isLoadingMoreGroupMessages = false;
+      safeNotifyListeners();
+    } catch (e) {
+      _isLoadingMoreGroupMessages = false;
+      debugPrint('Failed to load more group messages: $e');
+      safeNotifyListeners();
     }
   }
 
@@ -1582,7 +1678,7 @@ class GroupState with ChangeNotifier {
         kind: 1, // Text notes (decrypted messages)
         tagKey: 'g',
         tagValue: groupIdHex,
-        limit: 200,
+        limit: _groupMessagesPageSize,
       );
 
       debugPrint('Found ${cachedDecrypted.length} cached decrypted messages');
@@ -1593,7 +1689,7 @@ class GroupState with ChangeNotifier {
       final pastEvents = await _nostrService!.requestPastEvents(
         kind: kindEncryptedEnvelope,
         tags: [groupIdHex], // Filter by 'g' tag
-        limit: 200,
+        limit: _groupMessagesPageSize,
         useCache: false, // We already checked cache for decrypted events
       );
 
@@ -1643,6 +1739,16 @@ class GroupState with ChangeNotifier {
       _groupMessages.sort(
         (a, b) => b.createdAt.compareTo(a.createdAt),
       ); // Newest first
+
+      // Update pagination state
+      if (_groupMessages.isNotEmpty) {
+        _oldestGroupMessageTime = _groupMessages.last.createdAt;
+        // If we got fewer events than page size, there are no more to load
+        _hasMoreGroupMessages = pastEvents.length >= _groupMessagesPageSize;
+      } else {
+        _oldestGroupMessageTime = null;
+        _hasMoreGroupMessages = false;
+      }
 
       _isLoading = false;
       safeNotifyListeners();
@@ -3791,7 +3897,6 @@ class GroupState with ChangeNotifier {
               ),
             );
 
-            // Also notify listeners to trigger any widgets watching the state
             safeNotifyListeners();
 
             debugPrint('Emitted reaction update for event $capturedEventId');

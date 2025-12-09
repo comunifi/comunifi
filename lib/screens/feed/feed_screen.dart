@@ -332,9 +332,20 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     if (_scrollController.position.pixels >=
         _scrollController.position.maxScrollExtent * 0.8) {
       // Load more when scrolled 80% down
-      final feedState = context.read<FeedState>();
-      if (feedState.hasMoreEvents && !feedState.isLoadingMore) {
-        feedState.loadMoreEvents();
+      final groupState = context.read<GroupState>();
+
+      // If there's an active group, load more group messages
+      if (groupState.activeGroup != null) {
+        if (groupState.hasMoreGroupMessages &&
+            !groupState.isLoadingMoreGroupMessages) {
+          groupState.loadMoreGroupMessages();
+        }
+      } else {
+        // Otherwise load more from regular feed
+        final feedState = context.read<FeedState>();
+        if (feedState.hasMoreEvents && !feedState.isLoadingMore) {
+          feedState.loadMoreEvents();
+        }
       }
     }
   }
@@ -716,6 +727,33 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                                 return const SizedBox.shrink();
                               }, childCount: groupState.groupMessages.length),
                             ),
+                            // Loading indicator for infinite scroll
+                            if (groupState.isLoadingMoreGroupMessages)
+                              const SliverToBoxAdapter(
+                                child: Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16.0),
+                                  child: Center(
+                                    child: CupertinoActivityIndicator(),
+                                  ),
+                                ),
+                              ),
+                            // "No more messages" indicator
+                            if (!groupState.hasMoreGroupMessages &&
+                                groupState.groupMessages.isNotEmpty)
+                              const SliverToBoxAdapter(
+                                child: Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16.0),
+                                  child: Center(
+                                    child: Text(
+                                      'No more messages',
+                                      style: TextStyle(
+                                        color: CupertinoColors.systemGrey,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                 ),
