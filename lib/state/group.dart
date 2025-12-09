@@ -53,6 +53,8 @@ class GroupAnnouncement {
   final String? picture;
   final String? mlsGroupId; // MLS group ID from 'g' tag
   final DateTime createdAt;
+  final bool isPersonal; // Whether this is a personal group
+  final String? personalPubkey; // The pubkey this is personal for (if any)
 
   GroupAnnouncement({
     required this.eventId,
@@ -62,6 +64,8 @@ class GroupAnnouncement {
     this.picture,
     this.mlsGroupId,
     required this.createdAt,
+    this.isPersonal = false,
+    this.personalPubkey,
   });
 }
 
@@ -88,6 +92,9 @@ class GroupState with ChangeNotifier {
   AppDBService? _eventDbService; // Separate DB for Nostr events
   NostrEventTable? _eventTable;
   MlsGroup? _keysGroup;
+
+  // Completer for keys group initialization (needed before checking identity)
+  final Completer<void> _keysGroupInitCompleter = Completer<void>();
 
   // Cached HPKE key pair derived from Nostr private key
   // This is used for MLS group invitations
@@ -123,6 +130,10 @@ class GroupState with ChangeNotifier {
   GroupState() {
     _initialize();
   }
+
+  /// Wait for keys group initialization to complete
+  /// This should be called before checking identity
+  Future<void> waitForKeysGroupInit() => _keysGroupInitCompleter.future;
 
   /// Set callback to ensure user profile (called by widgets with access to ProfileState)
   void setEnsureProfileCallback(
@@ -203,13 +214,12 @@ class GroupState with ChangeNotifier {
           // Ensure locally cached key is synced to relay
           await _ensureKeyIsSyncedToRelay();
 
-          // Load saved groups first (must complete before checking for personal group)
+          // Load saved groups first
           await _loadSavedGroups();
           await _startListeningForGroupEvents();
           // Sync group announcements to local DB
           _syncGroupAnnouncementsToDB();
-          // Ensure user has their own personal group
-          _ensurePersonalGroup();
+          // Note: Personal group creation is now handled in onboarding flow
           // Try to ensure user profile if callback is set
           _tryEnsureProfile();
         } else {
@@ -276,8 +286,17 @@ class GroupState with ChangeNotifier {
 
       _keysGroup = keysGroup;
       debugPrint('Keys group initialized: ${_keysGroup!.id.bytes}');
+
+      // Signal that keys group initialization is complete
+      if (!_keysGroupInitCompleter.isCompleted) {
+        _keysGroupInitCompleter.complete();
+      }
     } catch (e) {
       debugPrint('Failed to initialize keys group: $e');
+      // Complete with error so waiting code doesn't hang
+      if (!_keysGroupInitCompleter.isCompleted) {
+        _keysGroupInitCompleter.complete();
+      }
     }
   }
 
@@ -979,6 +998,8 @@ class GroupState with ChangeNotifier {
         picture: picture ?? existing.picture,
         mlsGroupId: existing.mlsGroupId,
         createdAt: existing.createdAt,
+        isPersonal: existing.isPersonal,
+        personalPubkey: existing.personalPubkey,
       );
       _discoveredGroups[index] = updatedAnnouncement;
 
@@ -1151,10 +1172,16 @@ class GroupState with ChangeNotifier {
   }
 
   /// Create a new MLS group
+  ///
+  /// [name] - The name of the group
+  /// [about] - Optional description of the group
+  /// [picture] - Optional picture URL for the group
+  /// [isPersonal] - If true, marks this as the user's personal group
   Future<void> createGroup(
     String name, {
     String? about,
     String? picture,
+    bool isPersonal = false,
   }) async {
     if (_mlsService == null) {
       throw Exception('MLS service not initialized');
@@ -1201,6 +1228,8 @@ class GroupState with ChangeNotifier {
             ['name', name],
             if (about != null && about.isNotEmpty) ['about', about],
             if (picture != null && picture.isNotEmpty) ['picture', picture],
+            if (isPersonal)
+              ['personal', creatorPubkey], // Mark as personal group
             ['public'], // Group is readable by anyone
             ['open'], // Anyone can join
           ], createdAt: createGroupCreatedAt);
@@ -1617,6 +1646,8 @@ class GroupState with ChangeNotifier {
         picture: picture ?? existing.picture,
         mlsGroupId: existing.mlsGroupId,
         createdAt: event.createdAt,
+        isPersonal: existing.isPersonal,
+        personalPubkey: existing.personalPubkey,
       );
       _discoveredGroups[index] = updatedAnnouncement;
 
@@ -2057,6 +2088,14 @@ class GroupState with ChangeNotifier {
     }
   }
 
+  /// Check if user has a stored Nostr identity
+  /// Waits for keys group initialization before checking
+  Future<bool> hasNostrIdentity() async {
+    // Wait for keys group to be initialized first
+    await waitForKeysGroupInit();
+    return await getNostrPublicKey() != null;
+  }
+
   /// Derive HPKE key pair from Nostr private key
   /// This ensures consistent keys for MLS group invitations
   Future<mls_crypto.KeyPair?> _getOrDeriveHpkeKeyPair() async {
@@ -2319,6 +2358,7 @@ class GroupState with ChangeNotifier {
     String? name;
     String? about;
     String? picture;
+    String? personalPubkey;
 
     for (final tag in event.tags) {
       if (tag.isEmpty || tag.length < 2) continue;
@@ -2336,6 +2376,9 @@ class GroupState with ChangeNotifier {
         case 'picture':
           picture = tag[1];
           break;
+        case 'personal':
+          personalPubkey = tag[1];
+          break;
       }
     }
 
@@ -2347,6 +2390,8 @@ class GroupState with ChangeNotifier {
       picture: picture,
       mlsGroupId: mlsGroupId,
       createdAt: event.createdAt,
+      isPersonal: personalPubkey != null,
+      personalPubkey: personalPubkey,
     );
   }
 
@@ -2753,16 +2798,18 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Ensure a personal MLS group exists for the user's Nostr key
-  /// This is called after connecting to the relay to ensure every user
-  /// has their own personal group that they are a member of.
+  /// Ensure a personal MLS group exists for the user's Nostr key.
+  /// This can be called for migration purposes for existing users who don't
+  /// have a personal group yet.
+  ///
+  /// Note: For new users, personal group creation is handled in the onboarding flow.
   ///
   /// The method:
   /// 1. Checks if the user already has a local MLS group they created
   /// 2. If not found locally, checks the relay for groups created by this user
   /// 3. If a relay group exists but user isn't in it locally, attempts to join it
-  /// 4. If no personal group exists anywhere, creates a new one
-  Future<void> _ensurePersonalGroup() async {
+  /// 4. If no personal group exists anywhere, creates a new one with isPersonal: true
+  Future<void> ensurePersonalGroup() async {
     if (!_isConnected || _nostrService == null || _mlsService == null) {
       return;
     }
@@ -2853,7 +2900,11 @@ class GroupState with ChangeNotifier {
 
       // Step 3: No personal group exists - create one
       debugPrint('Creating personal MLS group for pubkey: $pubkey');
-      await createGroup('Personal', about: 'My personal group');
+      await createGroup(
+        'Personal',
+        about: 'My personal group',
+        isPersonal: true,
+      );
       debugPrint('Personal group created successfully');
     } catch (e) {
       debugPrint('Failed to ensure personal group: $e');

@@ -303,8 +303,25 @@ class ProfileState with ChangeNotifier {
           await _updateLocalUsername(pubkey, realUsername);
           _profiles[pubkey] = profile;
         } else {
-          // Profile found but no real name, keep using local username
-          // tempProfile is already set
+          // Profile found but no real name - merge network profile fields
+          // (like picture, about, etc.) with the local username
+          final mergedProfile = ProfileData(
+            pubkey: pubkey,
+            name: localUsername,
+            displayName: localUsername,
+            about: profile.about,
+            picture: profile.picture,
+            banner: profile.banner,
+            website: profile.website,
+            nip05: profile.nip05,
+            mlsHpkePublicKey: profile.mlsHpkePublicKey,
+            rawData: {
+              ...profile.rawData,
+              'name': localUsername,
+              'display_name': localUsername,
+            },
+          );
+          _profiles[pubkey] = mergedProfile;
         }
       } else {
         // Profile not found on network, keep using local username
@@ -1001,6 +1018,10 @@ class ProfileState with ChangeNotifier {
       // Update our cached profile
       final newProfile = ProfileData.fromEvent(eventModel);
       _profiles[finalPubkey] = newProfile;
+
+      // Also update local_usernames table so it persists across app restarts
+      await _updateLocalUsername(finalPubkey, username);
+
       safeNotifyListeners();
     } catch (e) {
       debugPrint('Failed to update username: $e');

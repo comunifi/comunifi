@@ -24,7 +24,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       final profileState = context.read<ProfileState>();
 
       // Set callback so GroupState can trigger profile creation
-      groupState.setEnsureProfileCallback((pubkey, privateKey, hpkePublicKeyHex) async {
+      groupState.setEnsureProfileCallback((
+        pubkey,
+        privateKey,
+        hpkePublicKeyHex,
+      ) async {
         await profileState.ensureUserProfile(
           pubkey: pubkey,
           privateKey: privateKey,
@@ -57,6 +61,13 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           await profileState.ensureUserProfile(
             pubkey: pubkey,
             privateKey: privateKey,
+          );
+
+          // Create personal group for the user (marked with personal tag)
+          await groupState.createGroup(
+            'Personal',
+            about: 'My personal group',
+            isPersonal: true,
           );
         }
       }

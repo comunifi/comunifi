@@ -8,11 +8,14 @@ import 'package:provider/provider.dart';
 Widget provideAppState(
   Widget? child, {
   Widget Function(BuildContext, Widget?)? builder,
+  GroupState? groupState,
 }) => MultiProvider(
   providers: [
     ChangeNotifierProvider(create: (_) => AppState()),
     ChangeNotifierProvider(create: (_) => MlsState()),
-    ChangeNotifierProvider(create: (_) => GroupState()),
+    ChangeNotifierProvider<GroupState>(
+      create: (_) => groupState ?? GroupState(),
+    ),
     ChangeNotifierProvider(create: (_) => ProfileState()),
   ],
   builder: builder,

@@ -1,4 +1,5 @@
 import 'package:comunifi/routes/routes.dart';
+import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/state.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
@@ -7,12 +8,32 @@ import 'package:go_router/go_router.dart';
 final RouteObserver<ModalRoute<void>> routeObserver =
     RouteObserver<ModalRoute<void>>();
 
-void main() {
-  runApp(provideAppState(const Comunifi()));
+/// Global GroupState instance (created before app runs to check identity)
+late final GroupState _groupState;
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Create GroupState and wait for keys group initialization
+  _groupState = GroupState();
+  await _groupState.waitForKeysGroupInit();
+
+  // Check if user has identity to determine initial route
+  final hasIdentity = await _groupState.hasNostrIdentity();
+  final initialLocation = hasIdentity ? '/feed' : '/';
+
+  runApp(
+    provideAppState(
+      Comunifi(initialLocation: initialLocation),
+      groupState: _groupState,
+    ),
+  );
 }
 
 class Comunifi extends StatefulWidget {
-  const Comunifi({super.key});
+  final String initialLocation;
+
+  const Comunifi({super.key, required this.initialLocation});
 
   @override
   State<Comunifi> createState() => _ComunifiState();
@@ -44,6 +65,7 @@ class _ComunifiState extends State<Comunifi> {
       _appShellNavigatorKey,
       _placeShellNavigatorKey,
       observers,
+      widget.initialLocation,
     );
   }
 

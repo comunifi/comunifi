@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
+import 'package:comunifi/services/profile/profile.dart' show ProfileData;
 
 class ProfileSidebar extends StatefulWidget {
   final VoidCallback onClose;
@@ -31,6 +32,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
   String? _userNostrPubkey;
   String? _userUsername;
   bool _skipNextUsernameLoad = false;
+  bool _hasLoadedProfile = false;
 
   // Profile photo state
   String? _currentProfilePictureUrl;
@@ -281,6 +283,45 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
 
   @override
   Widget build(BuildContext context) {
+    // Watch for profile changes - when the profile updates, refresh local state
+    if (_userNostrPubkey != null) {
+      final profile = context.select<ProfileState, ProfileData?>(
+        (state) => state.profiles[_userNostrPubkey],
+      );
+
+      // Update local state if profile picture changed and we're not currently uploading
+      if (profile != null && !_isUploadingPhoto) {
+        final newPicture = profile.picture;
+        final newUsername = profile.getUsername();
+
+        // Schedule state update after build if values changed
+        if (newPicture != _currentProfilePictureUrl && !_hasLoadedProfile) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && !_isUploadingPhoto) {
+              setState(() {
+                _currentProfilePictureUrl = newPicture;
+                _hasLoadedProfile = true;
+              });
+            }
+          });
+        }
+
+        // Also update username if not currently editing
+        if (!_skipNextUsernameLoad &&
+            newUsername != _userUsername &&
+            _usernameController.text == (_userUsername ?? '')) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && !_isUpdatingUsername) {
+              setState(() {
+                _userUsername = newUsername;
+                _usernameController.text = newUsername;
+              });
+            }
+          });
+        }
+      }
+    }
+
     return SafeArea(
       child: Column(
         children: [

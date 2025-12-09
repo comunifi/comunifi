@@ -148,16 +148,15 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     final allGroups = <_GroupItem>[];
 
     // Filter groups based on NIP-29 membership (kind 9000/9001 events)
-    // Exclude the auto-created "Personal" group
+    // Exclude personal groups
     for (final announcement in groupState.discoveredGroups) {
       final groupIdHex = announcement.mlsGroupId;
       if (groupIdHex == null) continue;
 
-      // Skip the auto-created "Personal" group (created by user with name "Personal")
+      // Skip personal groups (identified by the 'personal' tag in group announcement)
       final isPersonalGroup =
-          _userNostrPubkey != null &&
-          announcement.pubkey == _userNostrPubkey &&
-          announcement.name?.toLowerCase() == 'personal';
+          announcement.isPersonal &&
+          announcement.personalPubkey == _userNostrPubkey;
 
       if (isPersonalGroup) {
         continue;

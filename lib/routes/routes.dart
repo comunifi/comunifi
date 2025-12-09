@@ -14,13 +14,12 @@ GoRouter createRouter(
   GlobalKey<NavigatorState> appShellNavigatorKey,
   GlobalKey<NavigatorState> placeShellNavigatorKey,
   List<NavigatorObserver> observers,
+  String initialLocation,
 ) => GoRouter(
-  initialLocation:
-      '/', // TODO: when we are done debugging, automatically start on feed if the user has credentials
+  initialLocation: initialLocation,
   debugLogDiagnostics: kDebugMode,
   navigatorKey: rootNavigatorKey,
   observers: observers,
-  // redirect: redirectHandler,
   routes: [
     GoRoute(
       name: 'Onboarding',
