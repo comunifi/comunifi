@@ -52,6 +52,7 @@ class GroupAnnouncement {
   final String? name;
   final String? about;
   final String? picture;
+  final String? cover; // Cover/banner photo URL
   final String? mlsGroupId; // MLS group ID from 'g' tag
   final DateTime createdAt;
   final bool isPersonal; // Whether this is a personal group
@@ -63,6 +64,7 @@ class GroupAnnouncement {
     this.name,
     this.about,
     this.picture,
+    this.cover,
     this.mlsGroupId,
     required this.createdAt,
     this.isPersonal = false,
@@ -1076,6 +1078,7 @@ class GroupState with ChangeNotifier {
     required String name,
     String? about,
     String? picture,
+    String? cover,
   }) {
     // Find and update the group in discovered groups
     final index = _discoveredGroups.indexWhere(
@@ -1090,6 +1093,7 @@ class GroupState with ChangeNotifier {
         name: name,
         about: about ?? existing.about,
         picture: picture ?? existing.picture,
+        cover: cover ?? existing.cover,
         mlsGroupId: existing.mlsGroupId,
         createdAt: existing.createdAt,
         isPersonal: existing.isPersonal,
@@ -1416,7 +1420,7 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Update group metadata (name, about, picture)
+  /// Update group metadata (name, about, picture, cover)
   /// This publishes a new NIP-29 create-group event (kind 9007) which replaces the previous one
   /// Only group admins should call this method
   Future<void> updateGroupMetadata({
@@ -1424,6 +1428,7 @@ class GroupState with ChangeNotifier {
     required String name,
     String? about,
     String? picture,
+    String? cover,
   }) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
@@ -1448,6 +1453,7 @@ class GroupState with ChangeNotifier {
         ['name', name],
         if (about != null && about.isNotEmpty) ['about', about],
         if (picture != null && picture.isNotEmpty) ['picture', picture],
+        if (cover != null && cover.isNotEmpty) ['cover', cover],
       ], createdAt: updateCreatedAt);
 
       final updateEvent = NostrEvent.fromPartialData(
@@ -1490,6 +1496,7 @@ class GroupState with ChangeNotifier {
         name: name,
         about: about,
         picture: picture,
+        cover: cover,
       );
 
       safeNotifyListeners();
@@ -1711,6 +1718,7 @@ class GroupState with ChangeNotifier {
     String? name;
     String? about;
     String? picture;
+    String? cover;
 
     for (final tag in event.tags) {
       if (tag.isEmpty || tag.length < 2) continue;
@@ -1727,6 +1735,9 @@ class GroupState with ChangeNotifier {
           break;
         case 'picture':
           picture = tag[1];
+          break;
+        case 'cover':
+          cover = tag[1];
           break;
       }
     }
@@ -1756,6 +1767,7 @@ class GroupState with ChangeNotifier {
         name: name ?? existing.name,
         about: about ?? existing.about,
         picture: picture ?? existing.picture,
+        cover: cover ?? existing.cover,
         mlsGroupId: existing.mlsGroupId,
         createdAt: event.createdAt,
         isPersonal: existing.isPersonal,
@@ -2470,6 +2482,7 @@ class GroupState with ChangeNotifier {
     String? name;
     String? about;
     String? picture;
+    String? cover;
     String? personalPubkey;
 
     for (final tag in event.tags) {
@@ -2488,6 +2501,9 @@ class GroupState with ChangeNotifier {
         case 'picture':
           picture = tag[1];
           break;
+        case 'cover':
+          cover = tag[1];
+          break;
         case 'personal':
           personalPubkey = tag[1];
           break;
@@ -2500,6 +2516,7 @@ class GroupState with ChangeNotifier {
       name: name,
       about: about,
       picture: picture,
+      cover: cover,
       mlsGroupId: mlsGroupId,
       createdAt: event.createdAt,
       isPersonal: personalPubkey != null,

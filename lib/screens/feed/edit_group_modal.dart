@@ -6,7 +6,7 @@ import 'package:provider/provider.dart';
 
 import 'package:comunifi/state/group.dart';
 
-/// Modal for editing group metadata (name, about, picture)
+/// Modal for editing group metadata (name, about, picture, cover)
 /// Shows as a bottom sheet with form fields
 class EditGroupModal extends StatefulWidget {
   final GroupAnnouncement announcement;
@@ -27,8 +27,11 @@ class _EditGroupModalState extends State<EditGroupModal> {
   late TextEditingController _aboutController;
   String? _pictureUrl;
   Uint8List? _selectedPhotoBytes;
+  String? _coverUrl;
+  Uint8List? _selectedCoverBytes;
   bool _isSaving = false;
   bool _isUploadingPhoto = false;
+  bool _isUploadingCover = false;
   String? _error;
   final ImagePicker _imagePicker = ImagePicker();
 
@@ -42,6 +45,7 @@ class _EditGroupModalState extends State<EditGroupModal> {
       text: widget.announcement.about ?? '',
     );
     _pictureUrl = widget.announcement.picture;
+    _coverUrl = widget.announcement.cover;
   }
 
   @override
@@ -67,6 +71,22 @@ class _EditGroupModalState extends State<EditGroupModal> {
     }
   }
 
+  Future<void> _pickCover() async {
+    try {
+      final XFile? pickedFile = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1920,
+        maxHeight: 600,
+        imageQuality: 85,
+      );
+      if (pickedFile == null) return;
+      final bytes = await pickedFile.readAsBytes();
+      setState(() => _selectedCoverBytes = bytes);
+    } catch (e) {
+      setState(() => _error = 'Failed to pick cover image: $e');
+    }
+  }
+
   Future<void> _save() async {
     final name = _nameController.text.trim();
     if (name.isEmpty) {
@@ -88,7 +108,9 @@ class _EditGroupModalState extends State<EditGroupModal> {
     try {
       final groupState = context.read<GroupState>();
       String? newPictureUrl = _pictureUrl;
+      String? newCoverUrl = _coverUrl;
 
+      // Upload profile picture if changed
       if (_selectedPhotoBytes != null) {
         setState(() => _isUploadingPhoto = true);
         newPictureUrl = await groupState.uploadMediaToOwnGroup(
@@ -98,12 +120,23 @@ class _EditGroupModalState extends State<EditGroupModal> {
         setState(() => _isUploadingPhoto = false);
       }
 
+      // Upload cover photo if changed
+      if (_selectedCoverBytes != null) {
+        setState(() => _isUploadingCover = true);
+        newCoverUrl = await groupState.uploadMediaToOwnGroup(
+          _selectedCoverBytes!,
+          'image/jpeg',
+        );
+        setState(() => _isUploadingCover = false);
+      }
+
       final about = _aboutController.text.trim();
       await groupState.updateGroupMetadata(
         groupIdHex: groupIdHex,
         name: name,
         about: about.isEmpty ? null : about,
         picture: newPictureUrl,
+        cover: newCoverUrl,
       );
 
       widget.onSaved?.call();
@@ -112,6 +145,7 @@ class _EditGroupModalState extends State<EditGroupModal> {
       setState(() {
         _isSaving = false;
         _isUploadingPhoto = false;
+        _isUploadingCover = false;
         _error = e.toString();
       });
     }
@@ -120,7 +154,7 @@ class _EditGroupModalState extends State<EditGroupModal> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: MediaQuery.of(context).size.height * 0.6,
+      height: MediaQuery.of(context).size.height * 0.75,
       decoration: const BoxDecoration(
         color: CupertinoColors.systemBackground,
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -289,6 +323,125 @@ class _EditGroupModalState extends State<EditGroupModal> {
                       _isUploadingPhoto
                           ? 'Uploading...'
                           : 'Tap to change photo',
+                      style: const TextStyle(
+                        color: CupertinoColors.secondaryLabel,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  // Cover photo picker
+                  const Text(
+                    'Cover Photo',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: CupertinoColors.label,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  GestureDetector(
+                    onTap: _isSaving ? null : _pickCover,
+                    child: Stack(
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          height: 120,
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemGrey5,
+                            borderRadius: BorderRadius.circular(12),
+                            image: _selectedCoverBytes != null
+                                ? DecorationImage(
+                                    image: MemoryImage(_selectedCoverBytes!),
+                                    fit: BoxFit.cover,
+                                  )
+                                : _coverUrl != null
+                                    ? DecorationImage(
+                                        image: NetworkImage(_coverUrl!),
+                                        fit: BoxFit.cover,
+                                      )
+                                    : null,
+                          ),
+                          child: (_selectedCoverBytes == null &&
+                                  _coverUrl == null)
+                              ? Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: const [
+                                    Icon(
+                                      CupertinoIcons.photo,
+                                      size: 32,
+                                      color: CupertinoColors.systemGrey,
+                                    ),
+                                    SizedBox(height: 4),
+                                    Text(
+                                      'Add cover photo',
+                                      style: TextStyle(
+                                        color: CupertinoColors.systemGrey,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : null,
+                        ),
+                        // Upload overlay
+                        if (_isUploadingCover)
+                          Container(
+                            width: double.infinity,
+                            height: 120,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              color: CupertinoColors.black.withOpacity(0.5),
+                            ),
+                            child: const CupertinoActivityIndicator(
+                              color: CupertinoColors.white,
+                            ),
+                          ),
+                        // Edit badge
+                        if (!_isSaving &&
+                            (_selectedCoverBytes != null || _coverUrl != null))
+                          Positioned(
+                            bottom: 8,
+                            right: 8,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: CupertinoColors.black.withOpacity(0.6),
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: const [
+                                  Icon(
+                                    CupertinoIcons.camera_fill,
+                                    size: 12,
+                                    color: CupertinoColors.white,
+                                  ),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'Change',
+                                    style: TextStyle(
+                                      color: CupertinoColors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Center(
+                    child: Text(
+                      _isUploadingCover
+                          ? 'Uploading cover...'
+                          : 'Recommended: 1920×600 pixels',
                       style: const TextStyle(
                         color: CupertinoColors.secondaryLabel,
                         fontSize: 12,

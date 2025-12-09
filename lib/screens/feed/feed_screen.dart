@@ -45,6 +45,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
   bool _isRightSidebarOpen = false;
   Uint8List? _selectedImageBytes;
   String? _selectedImageMimeType;
+  bool _hasFetchedDiscoveredGroups = false;
   static final Map<String, VoidCallback> _commentCountReloaders = {};
   static final Map<String, VoidCallback> _reactionDataReloaders = {};
 
@@ -79,7 +80,19 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
 
       // Load user profile for display in navigation bar
       _loadUserProfile();
+
+      // Fetch discovered groups (for group images, covers, etc.)
+      // This ensures data is available even when sidebar isn't open (mobile)
+      _fetchDiscoveredGroupsIfNeeded(groupState);
     });
+  }
+
+  /// Fetches discovered groups if connected and not yet fetched
+  void _fetchDiscoveredGroupsIfNeeded(GroupState groupState) {
+    if (groupState.isConnected && !_hasFetchedDiscoveredGroups) {
+      _hasFetchedDiscoveredGroups = true;
+      groupState.refreshDiscoveredGroups(limit: 1000);
+    }
   }
 
   @override
@@ -384,6 +397,16 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
   Widget build(BuildContext context) {
     return Consumer3<FeedState, GroupState, ProfileState>(
       builder: (context, feedState, groupState, profileState, child) {
+        // Fetch discovered groups when connection is established (for mobile where sidebar isn't always mounted)
+        if (groupState.isConnected && !_hasFetchedDiscoveredGroups) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _fetchDiscoveredGroupsIfNeeded(groupState);
+          });
+        } else if (!groupState.isConnected) {
+          // Reset flag when disconnected so we fetch again on reconnect
+          _hasFetchedDiscoveredGroups = false;
+        }
+
         final activeGroup = groupState.activeGroup;
         final screenWidth = MediaQuery.of(context).size.width;
         final isWideScreen = screenWidth > 1000;
@@ -1783,7 +1806,7 @@ class _ContentMatch {
 /// Creates a Twitter-style header that shrinks as you scroll
 class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   final MlsGroup group;
-  final GroupState groupState;
+  final GroupAnnouncement? announcement;
   final double topPadding;
   final bool isAdmin;
   final VoidCallback? onEditTap;
@@ -1798,7 +1821,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   _CollapsingGroupHeaderDelegate({
     required this.group,
-    required this.groupState,
+    this.announcement,
     required this.topPadding,
     required this.isAdmin,
     this.onEditTap,
@@ -1815,7 +1838,10 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   @override
   bool shouldRebuild(covariant _CollapsingGroupHeaderDelegate oldDelegate) {
     return group != oldDelegate.group ||
-        groupState != oldDelegate.groupState ||
+        announcement?.name != oldDelegate.announcement?.name ||
+        announcement?.picture != oldDelegate.announcement?.picture ||
+        announcement?.cover != oldDelegate.announcement?.cover ||
+        announcement?.about != oldDelegate.announcement?.about ||
         topPadding != oldDelegate.topPadding ||
         isAdmin != oldDelegate.isAdmin;
   }
@@ -1833,18 +1859,10 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
         _maxBannerHeight -
         ((_maxBannerHeight - _minBannerHeight) * clampedProgress);
 
-    final groupIdHex = group.id.bytes
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
-
-    // Find the group announcement to get the picture
-    final announcement = groupState.discoveredGroups
-        .cast<GroupAnnouncement?>()
-        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
-
     final groupName = announcement?.name ?? group.name;
     final groupPicture = announcement?.picture;
     final groupAbout = announcement?.about;
+    final groupCover = announcement?.cover;
 
     // Profile photo scales down slightly when collapsed
     final photoScale = 1.0 - (clampedProgress * 0.2);
@@ -1854,24 +1872,44 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
       color: CupertinoColors.systemBackground,
       child: Stack(
         children: [
-          // Banner gradient - extends to top of screen
+          // Banner - extends to top of screen (cover photo or gradient fallback)
           Positioned(
             top: 0,
             left: 0,
             right: 0,
             height: topPadding + currentBannerHeight,
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    CupertinoColors.systemIndigo.withOpacity(0.6),
-                    CupertinoColors.systemPurple.withOpacity(0.4),
-                  ],
-                ),
-              ),
-            ),
+            child: groupCover != null
+                ? Image.network(
+                    groupCover,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) {
+                      // Fallback to gradient if image fails to load
+                      return Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              CupertinoColors.systemIndigo.withOpacity(0.6),
+                              CupertinoColors.systemPurple.withOpacity(0.4),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  )
+                : Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          CupertinoColors.systemIndigo.withOpacity(0.6),
+                          CupertinoColors.systemPurple.withOpacity(0.4),
+                        ],
+                      ),
+                    ),
+                  ),
           ),
           // Profile photo overlapping the banner
           Positioned(
@@ -2085,11 +2123,17 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
   Widget build(BuildContext context) {
     final topPadding = MediaQuery.of(context).padding.top;
 
+    // Get the announcement for this group
+    final groupIdHex = _groupIdToHex(widget.group);
+    final announcement = widget.groupState.discoveredGroups
+        .cast<GroupAnnouncement?>()
+        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
+
     return SliverPersistentHeader(
       pinned: true,
       delegate: _CollapsingGroupHeaderDelegate(
         group: widget.group,
-        groupState: widget.groupState,
+        announcement: announcement,
         topPadding: topPadding,
         isAdmin: _isAdmin,
         onEditTap: _showEditModal,
