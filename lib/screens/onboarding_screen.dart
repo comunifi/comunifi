@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
+import 'package:comunifi/screens/onboarding/profile_setup_modal.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -69,6 +70,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             about: 'My personal group',
             isPersonal: true,
           );
+
+          // Show profile setup modal
+          if (mounted) {
+            await showCupertinoModalPopup<bool>(
+              context: context,
+              builder: (context) =>
+                  ProfileSetupModal(pubkey: pubkey, privateKey: privateKey),
+            );
+          }
         }
       }
 

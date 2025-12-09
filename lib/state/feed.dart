@@ -59,6 +59,9 @@ class FeedState with ChangeNotifier {
 
       _nostrService = NostrService(relayUrl, useTor: false);
 
+      // Load cached events immediately (before connecting) so UI shows content right away
+      await _loadCachedEvents();
+
       // Connect to relay
       await _nostrService!.connect((connected) {
         if (connected) {
@@ -76,6 +79,38 @@ class FeedState with ChangeNotifier {
     } catch (e) {
       _errorMessage = 'Failed to initialize: $e';
       safeNotifyListeners();
+    }
+  }
+
+  /// Load cached events immediately to show content before relay connection
+  Future<void> _loadCachedEvents() async {
+    if (_nostrService == null) return;
+
+    try {
+      // Query cached kind 1 events (text notes)
+      final cachedEvents = await _nostrService!.queryCachedEvents(
+        kind: 1,
+        limit: _pageSize,
+      );
+
+      if (cachedEvents.isNotEmpty) {
+        // Filter out comments (events with 'e' tags are replies/comments)
+        _events = cachedEvents.where((event) {
+          for (final tag in event.tags) {
+            if (tag.isNotEmpty && tag[0] == 'e') {
+              return false; // This is a comment, exclude it
+            }
+          }
+          return true; // This is a top-level post, include it
+        }).toList();
+
+        _sortAndDeduplicateEvents();
+        debugPrint('Loaded ${_events.length} cached events');
+        safeNotifyListeners();
+      }
+    } catch (e) {
+      debugPrint('Failed to load cached events: $e');
+      // Continue without cached events - not critical
     }
   }
 
@@ -357,17 +392,23 @@ class FeedState with ChangeNotifier {
     if (_nostrService == null || !_isConnected) return;
 
     try {
-      _isLoading = true;
-      safeNotifyListeners();
+      // Only show loading indicator if we don't have any cached events yet
+      final showLoading = _events.isEmpty;
+      if (showLoading) {
+        _isLoading = true;
+        safeNotifyListeners();
+      }
 
       // Request initial batch of events (kind 1 = text notes)
+      // Skip cache since we already loaded from cache in _loadCachedEvents
       final pastEvents = await _nostrService!.requestPastEvents(
         kind: 1,
         limit: _pageSize,
+        useCache: false, // Force relay query to get fresh events
       );
 
       // Filter out comments (events with 'e' tags are replies/comments)
-      _events = pastEvents.where((event) {
+      final topLevelPosts = pastEvents.where((event) {
         // Check if event has 'e' tag (which means it's a comment/reply)
         for (final tag in event.tags) {
           if (tag.isNotEmpty && tag[0] == 'e') {
@@ -376,6 +417,13 @@ class FeedState with ChangeNotifier {
         }
         return true; // This is a top-level post, include it
       }).toList();
+
+      // Merge with existing events (from cache) instead of replacing
+      for (final event in topLevelPosts) {
+        if (!_events.any((e) => e.id == event.id)) {
+          _events.add(event);
+        }
+      }
 
       // Sort and deduplicate
       _sortAndDeduplicateEvents();

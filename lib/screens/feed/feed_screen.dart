@@ -774,11 +774,52 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
           feedState.hashtagFilter,
         );
 
+        // Check if user is a member of any non-personal groups (for welcome card)
+        // Don't show welcome card while groups/announcements are still loading
+        final isGroupsLoading =
+            !groupState.isConnected ||
+            groupState.isLoading ||
+            groupState.isLoadingGroups ||
+            (groupState.groups.isNotEmpty &&
+                groupState.discoveredGroups.isEmpty);
+
+        bool hasNonPersonalGroups = false;
+        if (!isGroupsLoading) {
+          for (final mlsGroup in groupState.groups) {
+            final groupIdHex = mlsGroup.id.bytes
+                .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                .join();
+            final announcement = groupState.getGroupAnnouncementByHexId(
+              groupIdHex,
+            );
+            if (announcement != null && !announcement.isPersonal) {
+              hasNonPersonalGroups = true;
+              break;
+            }
+          }
+        }
+
         return GestureDetector(
           onTap: () => FocusScope.of(context).unfocus(),
           behavior: HitTestBehavior.translucent,
           child: Column(
             children: [
+              // Welcome card for new users without groups
+              // Only show after groups have loaded to avoid flicker
+              if (!hasNonPersonalGroups &&
+                  !isGroupsLoading &&
+                  feedState.hashtagFilter == null)
+                _WelcomeCard(
+                  onCreateGroup: () {
+                    // Open left sidebar to show create group option
+                    setState(() {
+                      _isLeftSidebarOpen = true;
+                    });
+                  },
+                  onExploreGroups: () {
+                    groupState.setExploreMode(true);
+                  },
+                ),
               // Hashtag filter indicator
               if (feedState.hashtagFilter != null)
                 _HashtagFilterIndicator(
@@ -3180,6 +3221,135 @@ class _ExploreGroupListItem extends StatelessWidget {
                           : CupertinoColors.white,
                     ),
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Welcome card shown to new users who haven't joined any groups yet
+class _WelcomeCard extends StatelessWidget {
+  final VoidCallback onCreateGroup;
+  final VoidCallback onExploreGroups;
+
+  const _WelcomeCard({
+    required this.onCreateGroup,
+    required this.onExploreGroups,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            CupertinoColors.activeBlue.withOpacity(0.1),
+            CupertinoColors.systemIndigo.withOpacity(0.1),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: CupertinoColors.activeBlue.withOpacity(0.3),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: CupertinoColors.activeBlue.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  CupertinoIcons.sparkles,
+                  color: CupertinoColors.activeBlue,
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Welcome to Comunifi!',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'Create your first group or explore existing ones to get started. Groups are private spaces where you can share posts with members.',
+            style: TextStyle(
+              fontSize: 15,
+              color: CupertinoColors.secondaryLabel,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: CupertinoButton(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  color: CupertinoColors.activeBlue,
+                  borderRadius: BorderRadius.circular(10),
+                  onPressed: onCreateGroup,
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        CupertinoIcons.plus_circle_fill,
+                        size: 18,
+                        color: CupertinoColors.white,
+                      ),
+                      SizedBox(width: 6),
+                      Text(
+                        'Create Group',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: CupertinoColors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: CupertinoButton(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  color: CupertinoColors.systemGrey5,
+                  borderRadius: BorderRadius.circular(10),
+                  onPressed: onExploreGroups,
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        CupertinoIcons.search,
+                        size: 18,
+                        color: CupertinoColors.activeBlue,
+                      ),
+                      SizedBox(width: 6),
+                      Text(
+                        'Explore',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: CupertinoColors.activeBlue,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),

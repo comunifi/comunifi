@@ -1336,8 +1336,8 @@ class GroupState with ChangeNotifier {
       // Add to groups list
       _groups.insert(0, mlsGroup);
 
-      // Refresh the reaction listener to include the new group
-      refreshReactionListener();
+      // Refresh the event listener to include the new group
+      refreshGroupEventListener();
 
       safeNotifyListeners();
 
@@ -1728,23 +1728,23 @@ class GroupState with ChangeNotifier {
             },
           );
 
-      // Listen for ALL encrypted envelopes (kind 1059) to receive reactions from all groups
-      // This ensures reactions are received in real-time regardless of which group is active
-      _startListeningForAllGroupReactions();
+      // Listen for ALL encrypted envelopes (kind 1059) to receive posts and reactions from all groups
+      // This ensures events are received in real-time regardless of which group is active
+      _startListeningForAllGroupEvents();
     } catch (e) {
       debugPrint('Failed to start listening for group events: $e');
     }
   }
 
-  /// Start listening for encrypted reactions from ALL groups the user is a member of
+  /// Start listening for encrypted events (posts and reactions) from ALL groups the user is a member of
   /// This runs independently of the active group selection
-  void _startListeningForAllGroupReactions() {
+  void _startListeningForAllGroupEvents() {
     if (_nostrService == null || !_isConnected) return;
 
     // Get the list of group IDs we're a member of
     final groupIds = _mlsGroups.keys.toList();
     if (groupIds.isEmpty) {
-      debugPrint('No groups to listen for reactions');
+      debugPrint('No groups to listen for events');
       return;
     }
 
@@ -1769,24 +1769,26 @@ class GroupState with ChangeNotifier {
                 'Received decrypted event from envelope: kind=${event.kind}, id=${event.id.substring(0, 8)}...',
               );
 
-              // Only kind 7 (reactions) are processed here
-              // Kind 1 (messages) are handled by _startListeningForGroupMessages
+              // Extract group ID from event
+              String? groupIdHex;
+              for (final tag in event.tags) {
+                if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+                  groupIdHex = tag[1];
+                  break;
+                }
+              }
+
+              if (groupIdHex == null) return;
+
+              // Handle kind 7 (reactions)
               if (event.kind == 7) {
-                // Extract group ID to verify we're a member
-                String? groupIdHex;
-                for (final tag in event.tags) {
-                  if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
-                    groupIdHex = tag[1];
-                    break;
-                  }
-                }
-
                 debugPrint('Received kind 7 reaction for group $groupIdHex');
-
-                // Process the reaction
-                if (groupIdHex != null) {
-                  handleDecryptedReaction(event);
-                }
+                handleDecryptedReaction(event);
+              }
+              // Handle kind 1 (posts/messages)
+              else if (event.kind == 1) {
+                debugPrint('Received kind 1 post for group $groupIdHex');
+                _handleDecryptedPost(event, groupIdHex);
               }
             },
             onError: (error) {
@@ -1795,17 +1797,51 @@ class GroupState with ChangeNotifier {
           );
 
       debugPrint(
-        'Started listening for group reactions (${groupIds.length} groups)',
+        'Started listening for group events (${groupIds.length} groups)',
       );
     } catch (e) {
-      debugPrint('Failed to start listening for group reactions: $e');
+      debugPrint('Failed to start listening for group events: $e');
     }
   }
 
-  /// Restart the reaction listener when groups change
+  /// Handle a decrypted kind 1 post from any group
+  void _handleDecryptedPost(NostrEventModel post, String groupIdHex) {
+    // Cache to database
+    if (_eventTable != null) {
+      _eventTable!.insert(post).catchError((e) {
+        debugPrint('Failed to cache decrypted post: $e');
+      });
+    }
+
+    // Add to unified messages list (all groups)
+    if (!_allDecryptedMessages.any((e) => e.id == post.id)) {
+      _allDecryptedMessages.insert(0, post);
+      debugPrint(
+        'Added new post to allDecryptedMessages: ${post.id.substring(0, 8)}...',
+      );
+    }
+
+    // If this post belongs to the active group, add to _groupMessages too
+    if (_activeGroup != null) {
+      final activeGroupIdHex = _groupIdToHex(_activeGroup!.id);
+      if (groupIdHex == activeGroupIdHex) {
+        if (!_groupMessages.any((e) => e.id == post.id)) {
+          _groupMessages.insert(0, post);
+          debugPrint(
+            'Added new post to groupMessages: ${post.id.substring(0, 8)}...',
+          );
+        }
+      }
+    }
+
+    // Notify listeners so UI updates
+    safeNotifyListeners();
+  }
+
+  /// Restart the event listener when groups change
   /// Call this after joining or leaving a group
-  void refreshReactionListener() {
-    _startListeningForAllGroupReactions();
+  void refreshGroupEventListener() {
+    _startListeningForAllGroupEvents();
   }
 
   /// Handle incoming kind 9002 (edit-metadata) events
@@ -1883,7 +1919,7 @@ class GroupState with ChangeNotifier {
   }
 
   /// Start listening for new messages in the active group
-  /// Note: Kind 7 reactions are handled globally by _startListeningForAllGroupReactions()
+  /// Note: Kind 7 reactions are handled globally by _startListeningForAllGroupEvents()
   void _startListeningForGroupMessages(MlsGroup group) {
     if (_nostrService == null || !_isConnected || _activeGroup == null) return;
 
@@ -1906,7 +1942,7 @@ class GroupState with ChangeNotifier {
 
               if (!hasGroupTag) return;
 
-              // Skip kind 7 reactions - they are handled by _startListeningForAllGroupReactions()
+              // Skip kind 7 reactions - they are handled by _startListeningForAllGroupEvents()
               if (event.kind == 7) return;
 
               // Handle kind 1 messages
@@ -3124,8 +3160,8 @@ class GroupState with ChangeNotifier {
       // Pass notify: true to trigger sidebar rebuild and reload.
       invalidateMembershipCache(notify: true);
 
-      // Refresh the reaction listener to include the new group
-      refreshReactionListener();
+      // Refresh the event listener to include the new group
+      refreshGroupEventListener();
 
       // Note: When a user is invited via MLS Welcome, the inviter publishes
       // kind 9000 (put-user) to add them to the group per NIP-29.
