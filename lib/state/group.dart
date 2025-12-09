@@ -1561,19 +1561,73 @@ class GroupState with ChangeNotifier {
   }
 
   /// Refresh messages for the active group (pull-to-refresh)
-  /// Reloads all messages to ensure we have the latest
+  /// Strategy: Keep existing messages, fetch latest from relay and merge
+  /// 1. Immediately display existing cached messages (already shown)
+  /// 2. Fetch latest events from relay (full fetch to catch any missed events)
+  /// 3. Merge all events into existing list (deduplication handles overlaps)
   Future<void> refreshActiveGroupMessages() async {
-    if (_activeGroup != null) {
-      await _loadGroupMessages(_activeGroup!);
+    if (_activeGroup == null || _nostrService == null) return;
+
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+    debugPrint('Refreshing messages for group: $groupIdHex');
+
+    try {
+      // STEP 1: Load any new cached events first (immediate display)
+      final cachedDecrypted = await _nostrService!.queryCachedEvents(
+        kind: 1,
+        tagKey: 'g',
+        tagValue: groupIdHex,
+        limit: _groupMessagesPageSize,
+      );
+
+      if (cachedDecrypted.isNotEmpty) {
+        final cachedCount = _mergeGroupMessages(cachedDecrypted, groupIdHex);
+        if (cachedCount > 0) {
+          debugPrint('Found $cachedCount new cached messages');
+          safeNotifyListeners();
+        }
+      }
+
+      // STEP 2: Fetch latest events from relay (full fetch, no 'since' constraint)
+      // This catches any events we might have missed due to timing, failed decryption, etc.
+      // The merge logic deduplicates, so fetching events we already have is fine
+      if (!_isConnected) {
+        debugPrint('Not connected to relay, using cache only');
+        return;
+      }
+
+      // Request latest events from relay - NO 'since' constraint to catch missed events
+      final latestEvents = await _nostrService!.requestPastEvents(
+        kind: kindEncryptedEnvelope,
+        tags: [groupIdHex],
+        limit: _groupMessagesPageSize,
+        useCache: false, // Force relay query
+      );
+
+      debugPrint('Refresh received ${latestEvents.length} events from relay');
+
+      if (latestEvents.isNotEmpty) {
+        // Merge all events into existing list (deduplication is handled by _mergeGroupMessages)
+        final addedCount = _mergeGroupMessages(latestEvents, groupIdHex);
+        debugPrint('Added $addedCount new messages from refresh');
+        if (addedCount > 0) {
+          safeNotifyListeners();
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to refresh group messages: $e');
     }
   }
 
   /// Load more older messages for infinite scroll
-  /// Fetches messages older than the oldest one we currently have
+  /// Strategy: Cache-first, then relay
+  /// 1. First query cache for older events
+  /// 2. Display cached older events immediately
+  /// 3. Then query relay for older events
+  /// 4. Merge relay events into list
   Future<void> loadMoreGroupMessages() async {
     if (_activeGroup == null ||
         _nostrService == null ||
-        !_isConnected ||
         _isLoadingMoreGroupMessages ||
         !_hasMoreGroupMessages ||
         _oldestGroupMessageTime == null) {
@@ -1585,71 +1639,64 @@ class GroupState with ChangeNotifier {
       safeNotifyListeners();
 
       final groupIdHex = _groupIdToHex(_activeGroup!.id);
+      final untilTime = _oldestGroupMessageTime!.subtract(
+        const Duration(seconds: 1),
+      );
       debugPrint(
-        'Loading more messages for group: $groupIdHex (before ${_oldestGroupMessageTime!.toIso8601String()})',
+        'Loading more messages for group: $groupIdHex (before ${untilTime.toIso8601String()})',
       );
 
-      // Request older encrypted envelopes (before our oldest message)
-      final olderEvents = await _nostrService!.requestPastEvents(
-        kind: kindEncryptedEnvelope,
-        tags: [groupIdHex],
-        until: _oldestGroupMessageTime!.subtract(const Duration(seconds: 1)),
-        limit: _groupMessagesPageSize,
-        useCache: false,
+      // STEP 1: Query cache for older events first
+      // Note: We query kind 1 directly since cached events are already decrypted
+      final cachedOlderEvents = await _nostrService!.queryCachedEvents(
+        kind: 1,
+        tagKey: 'g',
+        tagValue: groupIdHex,
+        limit: _groupMessagesPageSize * 2, // Get more to filter by date
       );
 
-      debugPrint('Load more received ${olderEvents.length} older events');
+      // Filter to only events older than our current oldest
+      final filteredCached = cachedOlderEvents.where((event) {
+        return event.createdAt.isBefore(untilTime) &&
+            !_groupMessages.any((e) => e.id == event.id);
+      }).toList();
 
-      if (olderEvents.isEmpty) {
-        // No more events available
-        _hasMoreGroupMessages = false;
+      if (filteredCached.isNotEmpty) {
+        debugPrint(
+          'Found ${filteredCached.length} older cached messages - displaying immediately',
+        );
+        final cachedCount = _mergeGroupMessages(filteredCached, groupIdHex);
+        if (cachedCount > 0) {
+          debugPrint('Added $cachedCount older cached messages');
+          safeNotifyListeners();
+        }
+      }
+
+      // STEP 2: Query relay for older events (only if connected)
+      if (!_isConnected) {
+        debugPrint('Not connected to relay, using cache only');
+        _hasMoreGroupMessages = filteredCached.length >= _groupMessagesPageSize;
         _isLoadingMoreGroupMessages = false;
         safeNotifyListeners();
         return;
       }
 
-      // Add older messages that we don't already have
-      int addedCount = 0;
-      DateTime? newOldestTime;
+      // Request older encrypted envelopes from relay
+      final olderEvents = await _nostrService!.requestPastEvents(
+        kind: kindEncryptedEnvelope,
+        tags: [groupIdHex],
+        until: untilTime,
+        limit: _groupMessagesPageSize,
+        useCache: false, // Force relay query
+      );
 
-      for (final event in olderEvents) {
-        // Only include kind 1 (text notes/messages)
-        if (event.kind != 1) continue;
+      debugPrint(
+        'Load more received ${olderEvents.length} older events from relay',
+      );
 
-        // Check if event has 'g' tag with matching group ID
-        final hasGroupTag = event.tags.any(
-          (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
-        );
-        if (!hasGroupTag) continue;
-
-        // Track oldest time for next pagination
-        if (newOldestTime == null || event.createdAt.isBefore(newOldestTime)) {
-          newOldestTime = event.createdAt;
-        }
-
-        // Add if we don't already have it
-        if (!_groupMessages.any((e) => e.id == event.id)) {
-          _groupMessages.add(event);
-          addedCount++;
-          // Also add to unified messages list
-          if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
-            _allDecryptedMessages.add(event);
-          }
-        }
-      }
-
-      if (addedCount > 0) {
-        // Re-sort to ensure proper order
-        _groupMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-        _allDecryptedMessages.sort(
-          (a, b) => b.createdAt.compareTo(a.createdAt),
-        );
-        debugPrint('Added $addedCount older messages from load more');
-
-        // Update oldest time for next pagination
-        if (newOldestTime != null) {
-          _oldestGroupMessageTime = newOldestTime;
-        }
+      if (olderEvents.isNotEmpty) {
+        final addedCount = _mergeGroupMessages(olderEvents, groupIdHex);
+        debugPrint('Added $addedCount older messages from relay');
       }
 
       // If we got fewer events than page size, there are no more to load
@@ -1665,15 +1712,17 @@ class GroupState with ChangeNotifier {
   }
 
   /// Load messages for a specific group
+  /// Strategy: Cache-first display, then merge from relay
+  /// 1. Immediately load and display cached events
+  /// 2. Then fetch from relay and merge new events
   Future<void> _loadGroupMessages(MlsGroup group) async {
-    if (_nostrService == null || !_isConnected) return;
+    if (_nostrService == null) return;
+
+    final groupIdHex = _groupIdToHex(group.id);
+    debugPrint('Loading messages for group: $groupIdHex');
 
     try {
-      final groupIdHex = _groupIdToHex(group.id);
-      debugPrint('Loading messages for group: $groupIdHex');
-
-      // First, try to get decrypted messages from cache (kind 1 with 'g' tag)
-      // These are messages that were already decrypted and cached
+      // STEP 1: Immediately load cached events and display
       final cachedDecrypted = await _nostrService!.queryCachedEvents(
         kind: 1, // Text notes (decrypted messages)
         tagKey: 'g',
@@ -1681,74 +1730,50 @@ class GroupState with ChangeNotifier {
         limit: _groupMessagesPageSize,
       );
 
-      debugPrint('Found ${cachedDecrypted.length} cached decrypted messages');
+      if (cachedDecrypted.isNotEmpty) {
+        debugPrint(
+          'Found ${cachedDecrypted.length} cached decrypted messages - displaying immediately',
+        );
+        // Merge cached events into (possibly empty) list
+        final cachedCount = _mergeGroupMessages(cachedDecrypted, groupIdHex);
+        debugPrint('Added $cachedCount cached messages');
 
-      // Also request past encrypted envelopes (kind 1059) for this group
-      // Note: requestPastEvents will automatically decrypt envelopes if possible
-      // Events that can't be decrypted will be silently skipped
+        // Notify immediately so UI shows cached content
+        _isLoading = false;
+        safeNotifyListeners();
+      }
+
+      // STEP 2: Fetch from relay and merge (only if connected)
+      if (!_isConnected) {
+        debugPrint('Not connected to relay, using cache only');
+        _isLoading = false;
+        safeNotifyListeners();
+        return;
+      }
+
+      // Request past encrypted envelopes (kind 1059) for this group
+      // NostrService will automatically decrypt envelopes if possible
       final pastEvents = await _nostrService!.requestPastEvents(
         kind: kindEncryptedEnvelope,
         tags: [groupIdHex], // Filter by 'g' tag
         limit: _groupMessagesPageSize,
-        useCache: false, // We already checked cache for decrypted events
+        useCache: false, // Force relay query to get fresh events
       );
 
       debugPrint('Received ${pastEvents.length} events from relay');
 
-      // Combine cached decrypted messages and newly decrypted events
-      // Use a map to deduplicate by event ID
-      final allEvents = <String, NostrEventModel>{};
-
-      // Add cached decrypted messages (kind 1 only)
-      for (final event in cachedDecrypted) {
-        if (event.kind == 1) {
-          allEvents[event.id] = event;
-        }
+      if (pastEvents.isNotEmpty) {
+        // Merge relay events into existing list
+        final addedCount = _mergeGroupMessages(pastEvents, groupIdHex);
+        debugPrint('Added $addedCount new messages from relay');
       }
 
-      // Add newly decrypted events from relay (kind 1 messages only)
-      // Skip kind 7 reactions - they are handled separately
-      for (final event in pastEvents) {
-        // Only include kind 1 (text notes/messages)
-        if (event.kind != 1) continue;
-
-        // Check if event has 'g' tag with matching group ID
-        final hasGroupTag = event.tags.any(
-          (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
-        );
-        if (hasGroupTag) {
-          allEvents[event.id] = event;
-        }
-      }
-
-      _groupMessages = allEvents.values.toList();
-
-      // Also add to unified messages list (for main feed view)
-      for (final event in _groupMessages) {
-        if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
-          _allDecryptedMessages.add(event);
-        }
-      }
-      // Sort unified list by date (newest first)
-      _allDecryptedMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      // Update pagination state based on relay response
+      _hasMoreGroupMessages = pastEvents.length >= _groupMessagesPageSize;
 
       debugPrint(
         'Total ${_groupMessages.length} messages for group $groupIdHex',
       );
-
-      _groupMessages.sort(
-        (a, b) => b.createdAt.compareTo(a.createdAt),
-      ); // Newest first
-
-      // Update pagination state
-      if (_groupMessages.isNotEmpty) {
-        _oldestGroupMessageTime = _groupMessages.last.createdAt;
-        // If we got fewer events than page size, there are no more to load
-        _hasMoreGroupMessages = pastEvents.length >= _groupMessagesPageSize;
-      } else {
-        _oldestGroupMessageTime = null;
-        _hasMoreGroupMessages = false;
-      }
 
       _isLoading = false;
       safeNotifyListeners();
@@ -1757,6 +1782,48 @@ class GroupState with ChangeNotifier {
       debugPrint('Failed to load group messages: $e');
       safeNotifyListeners();
     }
+  }
+
+  /// Merge new events into _groupMessages, deduplicating and sorting
+  /// Returns the number of events added
+  /// Also updates _allDecryptedMessages for the unified feed
+  int _mergeGroupMessages(List<NostrEventModel> newEvents, String groupIdHex) {
+    int addedCount = 0;
+
+    for (final event in newEvents) {
+      // Only include kind 1 (text notes/messages)
+      if (event.kind != 1) continue;
+
+      // Check if event has 'g' tag with matching group ID
+      final hasGroupTag = event.tags.any(
+        (tag) => tag.length >= 2 && tag[0] == 'g' && tag[1] == groupIdHex,
+      );
+      if (!hasGroupTag) continue;
+
+      // Add if we don't already have it
+      if (!_groupMessages.any((e) => e.id == event.id)) {
+        _groupMessages.add(event);
+        addedCount++;
+      }
+
+      // Also add to unified messages list
+      if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
+        _allDecryptedMessages.add(event);
+      }
+    }
+
+    if (addedCount > 0 || _groupMessages.isNotEmpty) {
+      // Sort by creation date (newest first)
+      _groupMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _allDecryptedMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+      // Update pagination state
+      if (_groupMessages.isNotEmpty) {
+        _oldestGroupMessageTime = _groupMessages.last.createdAt;
+      }
+    }
+
+    return addedCount;
   }
 
   /// Start listening for new group events
@@ -2177,6 +2244,15 @@ class GroupState with ChangeNotifier {
         recipientPubkey: recipientPubkey,
         keyPairs: keyPair,
       );
+
+      // Cache the decrypted event to database immediately
+      // This ensures the event is available even if the app closes before
+      // receiving confirmation from the relay
+      if (_eventTable != null) {
+        _eventTable!.insert(eventModel).catchError((e) {
+          debugPrint('Failed to cache posted message: $e');
+        });
+      }
 
       // Add to local messages immediately (the decrypted version)
       _groupMessages.insert(0, eventModel);

@@ -32,6 +32,7 @@ class NostrService {
   bool _isConnected = false;
   final Map<String, StreamController<NostrEventModel>> _subscriptions = {};
   final Map<String, VoidCallback> _eoseCompleters = {};
+  final Map<String, List<Future<void>>> _pendingDecryptions = {};
   final Random _random = Random();
 
   // Database caching
@@ -372,6 +373,9 @@ class NostrService {
 
     // Clear EOSE completers
     _eoseCompleters.clear();
+
+    // Clear pending decryptions
+    _pendingDecryptions.clear();
   }
 
   /// Get an event from cache by ID
@@ -461,7 +465,10 @@ class NostrService {
 
       // If this is an encrypted envelope (kind 1059), decrypt it
       if (event.isEncryptedEnvelope) {
-        _handleEncryptedEnvelope(event, subscriptionId);
+        // Track the decryption future so we can wait for it before completing EOSE
+        final decryptionFuture = _handleEncryptedEnvelope(event, subscriptionId);
+        _pendingDecryptions.putIfAbsent(subscriptionId, () => []);
+        _pendingDecryptions[subscriptionId]!.add(decryptionFuture);
         return;
       }
 
@@ -618,9 +625,22 @@ class NostrService {
   }
 
   /// Handle EOSE (End of Stored Events) messages
-  void _handleEoseMessage(List<dynamic> data) {
+  /// Waits for any pending decryptions to complete before calling the completer
+  void _handleEoseMessage(List<dynamic> data) async {
     if (data.length < 2) return;
     final String subscriptionId = data[1];
+
+    // Wait for any pending decryptions to complete
+    // This ensures all encrypted envelopes are decrypted before we signal completion
+    final pending = _pendingDecryptions[subscriptionId];
+    if (pending != null && pending.isNotEmpty) {
+      debugPrint(
+        'EOSE received, waiting for ${pending.length} pending decryptions...',
+      );
+      await Future.wait(pending);
+      _pendingDecryptions.remove(subscriptionId);
+      debugPrint('All decryptions complete for subscription $subscriptionId');
+    }
 
     // Call the EOSE completer if it exists
     final completer = _eoseCompleters[subscriptionId];
@@ -1187,6 +1207,9 @@ class NostrService {
       controller.close();
       _subscriptions.remove(subscriptionId);
     }
+
+    // Clean up pending decryptions
+    _pendingDecryptions.remove(subscriptionId);
   }
 
   /// Get Nostr key pair from SecureService
