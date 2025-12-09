@@ -437,6 +437,7 @@ class GroupState with ChangeNotifier {
         groupId: _keysGroup!.id,
         epoch: encryptedJson['epoch'] as int,
         senderIndex: encryptedJson['senderIndex'] as int,
+        generation: encryptedJson['generation'] as int? ?? 0,
         nonce: Uint8List.fromList(
           List<int>.from(encryptedJson['nonce'] as List),
         ),
@@ -650,10 +651,14 @@ class GroupState with ChangeNotifier {
       final nonceBytes = row['nonce'] as Uint8List;
       final ciphertextBytes = row['ciphertext'] as Uint8List;
 
+      // Read generation if present (default to 0 for backward compatibility)
+      final generation = row['generation'] as int? ?? 0;
+
       return MlsCiphertext(
         groupId: _keysGroup!.id,
         epoch: epoch,
         senderIndex: senderIndex,
+        generation: generation,
         nonce: nonceBytes,
         ciphertext: ciphertextBytes,
         contentType: MlsContentType.application,
@@ -670,20 +675,32 @@ class GroupState with ChangeNotifier {
     try {
       if (_dbService?.database == null) return;
 
+      // Create table with generation column
       await _dbService!.database!.execute('''
         CREATE TABLE IF NOT EXISTS nostr_key_storage (
           group_id TEXT PRIMARY KEY,
           epoch INTEGER NOT NULL,
           sender_index INTEGER NOT NULL,
+          generation INTEGER NOT NULL DEFAULT 0,
           nonce BLOB NOT NULL,
           ciphertext BLOB NOT NULL
         )
       ''');
 
+      // Add generation column to existing tables (migration)
+      try {
+        await _dbService!.database!.execute('''
+          ALTER TABLE nostr_key_storage ADD COLUMN generation INTEGER NOT NULL DEFAULT 0
+        ''');
+      } catch (_) {
+        // Column already exists, ignore
+      }
+
       await _dbService!.database!.insert('nostr_key_storage', {
         'group_id': groupIdHex,
         'epoch': ciphertext.epoch,
         'sender_index': ciphertext.senderIndex,
+        'generation': ciphertext.generation,
         'nonce': ciphertext.nonce,
         'ciphertext': ciphertext.ciphertext,
       }, conflictAlgorithm: ConflictAlgorithm.replace);
@@ -2273,6 +2290,110 @@ class GroupState with ChangeNotifier {
       }
     } catch (e) {
       debugPrint('Failed to post message: $e');
+      rethrow;
+    }
+  }
+
+  /// Publish a quote post to the active group
+  /// Quote post is a kind 1 event with 'q' tag referencing the quoted event
+  /// The post will be encrypted with MLS and sent as kind 1059 envelope
+  Future<void> publishQuotePost(
+    String content,
+    NostrEventModel quotedEvent,
+  ) async {
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    if (_activeGroup == null) {
+      throw Exception('No active group selected. Please select a group first.');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception(
+          'No Nostr key found. Please ensure keys are initialized.',
+        );
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Get group ID as hex
+      final groupIdHex = _groupIdToHex(_activeGroup!.id);
+
+      // Extract URLs and generate 'r' tags (Nostr convention for URL references)
+      final urlTags = _linkPreviewService.generateUrlTags(content);
+
+      // Extract hashtags and generate 't' tags (NIP-12)
+      final hashtagTags = NostrEventModel.generateHashtagTags(content);
+
+      // Build tags list with 'q' tag for quote (NIP-18)
+      // Format: ['q', '<event_id>', '<relay_url>', '<pubkey>']
+      final baseTags = <List<String>>[
+        ['g', groupIdHex], // Add group ID tag
+        ['q', quotedEvent.id, '', quotedEvent.pubkey], // Quote tag
+        ...urlTags, // Add URL reference tags
+        ...hashtagTags, // Add hashtag tags
+      ];
+
+      // Create a normal Nostr event (kind 1 = text note)
+      final messageCreatedAt = DateTime.now();
+      final messageTags = await addClientTagsWithSignature(
+        baseTags,
+        createdAt: messageCreatedAt,
+      );
+
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 1, // Text note
+        content: content,
+        keyPairs: keyPair,
+        tags: messageTags,
+        createdAt: messageCreatedAt,
+      );
+
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      // Get recipient pubkey (for now, use our own pubkey)
+      final recipientPubkey = eventModel.pubkey;
+
+      // Publish to the relay - will be automatically encrypted and wrapped in kind 1059
+      await _nostrService!.publishEvent(
+        eventModel.toJson(),
+        mlsGroupId: groupIdHex,
+        recipientPubkey: recipientPubkey,
+        keyPairs: keyPair,
+      );
+
+      // Cache the decrypted event to database immediately
+      if (_eventTable != null) {
+        _eventTable!.insert(eventModel).catchError((e) {
+          debugPrint('Failed to cache quote post: $e');
+        });
+      }
+
+      // Add to local messages immediately (the decrypted version)
+      _groupMessages.insert(0, eventModel);
+      // Also add to unified messages list (for main feed view)
+      if (!_allDecryptedMessages.any((e) => e.id == eventModel.id)) {
+        _allDecryptedMessages.insert(0, eventModel);
+      }
+      safeNotifyListeners();
+
+      debugPrint(
+        'Posted encrypted quote post to group ${_activeGroup!.name}: ${eventModel.id}',
+      );
+      debugPrint('Quoting event: ${quotedEvent.id}');
+    } catch (e) {
+      debugPrint('Failed to publish quote post: $e');
       rethrow;
     }
   }

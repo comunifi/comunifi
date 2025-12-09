@@ -208,17 +208,24 @@ class MlsCryptoIsolate {
       final keySchedule = KeySchedule(crypto.kdf);
       final aad = Uint8List(0);
 
-      // Try decrypting with expected generation and nearby generations
-      final generationsToTry = [
-        params.expectedGeneration,
-        params.expectedGeneration + 1,
-        params.expectedGeneration + 2,
-        params.expectedGeneration - 1,
-        params.expectedGeneration - 2,
-      ].where((g) => g >= 0).toSet().toList()
-        ..sort();
+      // Try decrypting with expected generation and a wider range of nearby generations
+      // We use a larger window (±50) to handle cases where generation counters
+      // have drifted apart due to missed messages or sync issues
+      final generationsToTry = <int>[];
+      
+      // First try the expected generation and immediate neighbors (most likely to succeed)
+      generationsToTry.add(params.expectedGeneration);
+      for (int i = 1; i <= 50; i++) {
+        generationsToTry.add(params.expectedGeneration + i);
+        if (params.expectedGeneration - i >= 0) {
+          generationsToTry.add(params.expectedGeneration - i);
+        }
+      }
+      
+      // Remove duplicates and negative values
+      final uniqueGenerations = generationsToTry.where((g) => g >= 0).toSet().toList();
 
-      for (final generation in generationsToTry) {
+      for (final generation in uniqueGenerations) {
         try {
           // Derive application keys for this generation
           final keyMaterial = await keySchedule.deriveApplicationKeys(

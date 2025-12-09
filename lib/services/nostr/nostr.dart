@@ -33,6 +33,7 @@ class NostrService {
   final Map<String, StreamController<NostrEventModel>> _subscriptions = {};
   final Map<String, VoidCallback> _eoseCompleters = {};
   final Map<String, List<Future<void>>> _pendingDecryptions = {};
+  final Set<String> _processedEnvelopes = {}; // Track processed envelope IDs to prevent duplicate decryption
   final Random _random = Random();
 
   // Database caching
@@ -376,6 +377,9 @@ class NostrService {
 
     // Clear pending decryptions
     _pendingDecryptions.clear();
+
+    // Clear processed envelopes cache
+    _processedEnvelopes.clear();
   }
 
   /// Get an event from cache by ID
@@ -491,24 +495,46 @@ class NostrService {
     String subscriptionId,
   ) async {
     try {
+      // Skip if we've already processed this envelope (prevents duplicate decryption)
+      if (_processedEnvelopes.contains(envelope.id)) {
+        return;
+      }
+      _processedEnvelopes.add(envelope.id);
+
+      // Limit the cache size to prevent memory bloat (keep last 1000 envelopes)
+      if (_processedEnvelopes.length > 1000) {
+        final toRemove = _processedEnvelopes.take(500).toList();
+        for (final id in toRemove) {
+          _processedEnvelopes.remove(id);
+        }
+      }
+
       // Get MLS group ID from envelope
       final groupIdHex = envelope.encryptedEnvelopeMlsGroupId;
       if (groupIdHex == null || _mlsGroupResolver == null) {
-        // Silently skip if we can't decrypt - this is expected for envelopes we're not part of
+        debugPrint(
+          'Skipping envelope ${envelope.id.substring(0, 8)}...: no group ID or resolver',
+        );
         return;
       }
+
+      debugPrint(
+        'Decrypting envelope ${envelope.id.substring(0, 8)}... for group ${groupIdHex.substring(0, 8)}...',
+      );
 
       // Resolve MLS group
       final mlsGroup = await _mlsGroupResolver!(groupIdHex);
       if (mlsGroup == null) {
-        // Silently skip if we don't have the group - this is expected for envelopes we're not part of
+        debugPrint(
+          'Skipping envelope: MLS group not found for ${groupIdHex.substring(0, 8)}...',
+        );
         return;
       }
 
       // Get encrypted content
       final encryptedContent = envelope.getEncryptedContent();
       if (encryptedContent == null) {
-        // Silently skip if no encrypted content
+        debugPrint('Skipping envelope: no encrypted content');
         return;
       }
 
@@ -528,7 +554,9 @@ class NostrService {
       );
 
       if (decryptedBytes == null) {
-        // Silently skip if decryption fails - this is expected for envelopes we can't decrypt
+        debugPrint(
+          'Decryption failed for envelope ${envelope.id.substring(0, 8)}... (MLS decrypt returned null)',
+        );
         return;
       }
 
@@ -537,6 +565,10 @@ class NostrService {
       // We don't modify it here as events are immutable once signed
       final decryptedContent = utf8.decode(decryptedBytes);
       final decryptedEvent = envelope.decryptEvent(decryptedContent);
+
+      debugPrint(
+        'Successfully decrypted envelope -> event ${decryptedEvent.id.substring(0, 8)}... kind=${decryptedEvent.kind}',
+      );
 
       // Cache the decrypted event (but not the envelope)
       _cacheEvent(decryptedEvent);
@@ -547,13 +579,10 @@ class NostrService {
         controller.add(decryptedEvent);
       }
     } catch (e) {
-      // Silently skip decryption errors - these are expected for envelopes we can't decrypt
-      // Only log if it's an unexpected error type
-      if (e.toString().contains('MlsError')) {
-        // This is expected - we can't decrypt envelopes we're not part of
-        return;
-      }
-      debugPrint('Unexpected error decrypting envelope: $e');
+      debugPrint(
+        'Error decrypting envelope ${envelope.id.substring(0, 8)}...: $e',
+      );
+      // Continue without throwing - some envelopes we can't decrypt
     }
   }
 
@@ -571,10 +600,20 @@ class NostrService {
       // Parse as JSON first to extract MLS ciphertext components
       try {
         final json = jsonDecode(utf8.decode(encryptedBytes));
+        final epoch = json['epoch'] as int;
+        final senderIndex = json['senderIndex'] as int;
+        // Read generation from message (default to 0 for old messages without generation)
+        final generation = json['generation'] as int? ?? 0;
+
+        debugPrint(
+          'MLS decrypt: epoch=$epoch, senderIndex=$senderIndex, generation=$generation',
+        );
+
         final ciphertext = MlsCiphertext(
           groupId: mlsGroup.id,
-          epoch: json['epoch'] as int,
-          senderIndex: json['senderIndex'] as int,
+          epoch: epoch,
+          senderIndex: senderIndex,
+          generation: generation,
           nonce: Uint8List.fromList(List<int>.from(json['nonce'] as List)),
           ciphertext: Uint8List.fromList(
             List<int>.from(json['ciphertext'] as List),
@@ -582,10 +621,12 @@ class NostrService {
           contentType: MlsContentType.application,
         );
 
-        return await mlsGroup.decryptApplicationMessage(ciphertext);
+        final result = await mlsGroup.decryptApplicationMessage(ciphertext);
+        debugPrint('MLS decrypt successful');
+        return result;
       } catch (e) {
-        // If JSON parsing or decryption fails, return null silently
-        // This is expected for envelopes we can't decrypt
+        // Log the specific error for debugging
+        debugPrint('MLS decryption error: $e');
         return null;
       }
     } catch (e) {
@@ -874,9 +915,11 @@ class NostrService {
     final mlsCiphertext = await mlsGroup.encryptApplicationMessage(eventBytes);
 
     // Serialize MlsCiphertext to JSON for storage in envelope
+    // Include generation so receivers can decrypt without guessing
     final ciphertextJson = {
       'epoch': mlsCiphertext.epoch,
       'senderIndex': mlsCiphertext.senderIndex,
+      'generation': mlsCiphertext.generation,
       'nonce': mlsCiphertext.nonce.toList(),
       'ciphertext': mlsCiphertext.ciphertext.toList(),
     };

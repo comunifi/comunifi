@@ -285,10 +285,11 @@ class EncryptedMediaService {
   /// - N bytes: nonce
   /// - 4 bytes: ciphertext length
   /// - N bytes: ciphertext
+  /// - 4 bytes: generation (added for sync)
   Uint8List _serializeCiphertext(MlsCiphertext ciphertext) {
     final groupIdBytes = ciphertext.groupId.bytes;
 
-    // Calculate total length
+    // Calculate total length (added 4 bytes for generation)
     final totalLength = 4 +
         groupIdBytes.length +
         4 +
@@ -296,7 +297,8 @@ class EncryptedMediaService {
         4 +
         ciphertext.nonce.length +
         4 +
-        ciphertext.ciphertext.length;
+        ciphertext.ciphertext.length +
+        4; // generation
 
     final result = Uint8List(totalLength);
     int offset = 0;
@@ -333,6 +335,10 @@ class EncryptedMediaService {
       offset + ciphertext.ciphertext.length,
       ciphertext.ciphertext,
     );
+    offset += ciphertext.ciphertext.length;
+
+    // Generation
+    _writeInt32(result, offset, ciphertext.generation);
 
     return result;
   }
@@ -367,11 +373,19 @@ class EncryptedMediaService {
     final ciphertext = Uint8List.fromList(
       bytes.sublist(offset, offset + ciphertextLength),
     );
+    offset += ciphertextLength;
+
+    // Generation (default to 0 for backward compatibility with old format)
+    int generation = 0;
+    if (offset + 4 <= bytes.length) {
+      generation = _readInt32(bytes, offset);
+    }
 
     return MlsCiphertext(
       groupId: groupId,
       epoch: epoch,
       senderIndex: senderIndex,
+      generation: generation,
       nonce: nonce,
       ciphertext: ciphertext,
       contentType: MlsContentType.application,

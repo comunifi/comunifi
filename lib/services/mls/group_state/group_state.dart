@@ -142,6 +142,8 @@ class GroupState {
   final EpochSecrets secrets;
   final mls_crypto.PrivateKey? identityPrivateKey;
   final mls_crypto.PrivateKey? leafHpkePrivateKey;
+  // Track which leaf index belongs to the local member (this device)
+  final LeafIndex localLeafIndex;
   // Track generation counter per sender (LeafIndex -> generation)
   final Map<LeafIndex, int> _generations;
 
@@ -152,8 +154,10 @@ class GroupState {
     required this.secrets,
     required this.identityPrivateKey,
     required this.leafHpkePrivateKey,
+    LeafIndex? localLeafIndex,
     Map<LeafIndex, int>? generations,
-  }) : _generations = generations ?? {};
+  }) : localLeafIndex = localLeafIndex ?? LeafIndex(0),
+       _generations = generations ?? {};
 
   /// Get the current generation for a sender
   int getGeneration(LeafIndex senderIndex) {
@@ -187,6 +191,7 @@ class GroupState {
     EpochSecrets? secrets,
     mls_crypto.PrivateKey? identityPrivateKey,
     mls_crypto.PrivateKey? leafHpkePrivateKey,
+    LeafIndex? localLeafIndex,
     Map<LeafIndex, int>? generations,
   }) {
     return GroupState(
@@ -196,13 +201,14 @@ class GroupState {
       secrets: secrets ?? this.secrets,
       identityPrivateKey: identityPrivateKey ?? this.identityPrivateKey,
       leafHpkePrivateKey: leafHpkePrivateKey ?? this.leafHpkePrivateKey,
+      localLeafIndex: localLeafIndex ?? this.localLeafIndex,
       generations: generations ?? Map.from(_generations),
     );
   }
 
   /// Serialize group state to bytes
   Uint8List serialize() {
-    // Format: group_context + ratchet_tree + members + epoch_secrets + identity_private_key + leaf_hpke_private_key + generations
+    // Format: group_context + ratchet_tree + members + epoch_secrets + identity_private_key + leaf_hpke_private_key + localLeafIndex + generations
     final contextBytes = context.serialize();
     final treeBytes = tree.serialize();
     final membersBytes = _serializeMembers(members);
@@ -218,6 +224,7 @@ class GroupState {
         4 + secretsBytes.length +
         4 + (identityPrivateKeyBytes?.length ?? 0) +
         4 + (leafHpkePrivateKeyBytes?.length ?? 0) +
+        4 + // localLeafIndex
         4 + generationsBytes.length;
 
     final result = Uint8List(totalLength);
@@ -260,6 +267,12 @@ class GroupState {
       result[offset++] = 0;
       result[offset++] = 0;
     }
+
+    // Write localLeafIndex
+    result[offset++] = (localLeafIndex.value >> 24) & 0xFF;
+    result[offset++] = (localLeafIndex.value >> 16) & 0xFF;
+    result[offset++] = (localLeafIndex.value >> 8) & 0xFF;
+    result[offset++] = localLeafIndex.value & 0xFF;
 
     // Write generations map
     _writeUint8List(result, offset, generationsBytes);
@@ -419,18 +432,34 @@ class GroupState {
       offset += leafHpkePrivateKeyLength;
     }
 
-    // Read generations map (if present, for backward compatibility)
+    // Read localLeafIndex (if present, for backward compatibility)
+    LeafIndex? localLeafIndex;
     Map<LeafIndex, int>? generations;
+    
     if (offset < data.length) {
-      try {
-        final generationsBytes = _readUint8List(data, offset);
-        generations = _deserializeGenerations(generationsBytes);
-      } catch (e) {
-        // Backward compatibility: if deserialization fails, use empty map
+      // Read localLeafIndex (4 bytes)
+      final localLeafIndexValue = (data[offset] << 24) |
+          (data[offset + 1] << 16) |
+          (data[offset + 2] << 8) |
+          data[offset + 3];
+      offset += 4;
+      localLeafIndex = LeafIndex(localLeafIndexValue);
+      
+      // Read generations map (if present)
+      if (offset < data.length) {
+        try {
+          final generationsBytes = _readUint8List(data, offset);
+          generations = _deserializeGenerations(generationsBytes);
+        } catch (e) {
+          // Backward compatibility: if deserialization fails, use empty map
+          generations = {};
+        }
+      } else {
         generations = {};
       }
     } else {
-      // No generations data (old format), use empty map
+      // Old format without localLeafIndex
+      localLeafIndex = LeafIndex(0);
       generations = {};
     }
 
@@ -441,6 +470,7 @@ class GroupState {
       secrets: secrets,
       identityPrivateKey: identityPrivateKey,
       leafHpkePrivateKey: leafHpkePrivateKey,
+      localLeafIndex: localLeafIndex,
       generations: generations,
     );
   }

@@ -1276,14 +1276,25 @@ class _EventItemContentState extends State<_EventItemContent> {
 
   void _openQuoteModal(BuildContext context) {
     final feedState = context.read<FeedState>();
+    final groupState = context.read<GroupState>();
+
+    // Use group's publishQuotePost if a group is active, otherwise use feed's
+    final isConnected = groupState.activeGroup != null
+        ? groupState.isConnected
+        : feedState.isConnected;
+
+    final publishQuotePost = groupState.activeGroup != null
+        ? groupState.publishQuotePost
+        : feedState.publishQuotePost;
+
     showCupertinoModalPopup(
       context: context,
       builder: (modalContext) => SizedBox(
         height: MediaQuery.of(context).size.height * 0.9,
         child: QuotePostModal(
           quotedEvent: widget.event,
-          isConnected: feedState.isConnected,
-          onPublishQuotePost: feedState.publishQuotePost,
+          isConnected: isConnected,
+          onPublishQuotePost: publishQuotePost,
         ),
       ),
     );

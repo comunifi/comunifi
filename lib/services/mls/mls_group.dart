@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'crypto/crypto.dart' as mls_crypto;
 import 'crypto/crypto_isolate.dart';
 import 'crypto/default_crypto.dart';
@@ -43,8 +44,8 @@ class MlsGroup {
   /// Get application secret for background crypto operations
   Uint8List get applicationSecret => _state.secrets.applicationSecret;
 
-  /// Get sender leaf index value
-  int get senderLeafIndexValue => _state.members.keys.first.value;
+  /// Get sender leaf index value (this device's leaf index)
+  int get senderLeafIndexValue => _state.localLeafIndex.value;
 
   /// Get expected generation for a sender
   int getExpectedGeneration(int senderIndex) {
@@ -58,17 +59,35 @@ class MlsGroup {
 
   /// Increment and get generation for encryption
   int incrementAndGetGeneration() {
-    final senderLeafIndex = _state.members.keys.first;
-    return _state.incrementGeneration(senderLeafIndex);
+    return _state.incrementGeneration(_state.localLeafIndex);
   }
 
   /// Encrypt an application message (runs crypto in background isolate)
   Future<MlsCiphertext> encryptApplicationMessage(Uint8List plaintext) async {
-    // Get sender leaf index
-    final senderLeafIndex = _state.members.keys.first;
+    // Get sender leaf index (this device's leaf index)
+    final senderLeafIndex = _state.localLeafIndex;
+    
+    // Log current state before increment
+    final prevGeneration = _state.getGeneration(senderLeafIndex);
+    final genStr = _state.generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
+    final groupIdHex = id.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    debugPrint(
+      '>>> MLS ENCRYPT: group=${groupIdHex.substring(0, 8)}... localLeaf=${senderLeafIndex.value}, prevGen=$prevGeneration, gens={$genStr}',
+    );
 
     // Get and increment generation for this sender (prevents nonce reuse)
     final generation = _state.incrementGeneration(senderLeafIndex);
+    
+    final appSecretPrefix = _state.secrets.applicationSecret.length >= 8
+        ? _state.secrets.applicationSecret.sublist(0, 8).map((b) => b.toRadixString(16).padLeft(2, '0')).join()
+        : 'too short';
+    debugPrint(
+      '>>> MLS ENCRYPT: gen=$generation, epoch=${_state.context.epoch}, appSecret=$appSecretPrefix',
+    );
+
+    // Save state immediately to persist the incremented generation
+    // This ensures the generation survives app restarts
+    await _storage.saveGroupState(_state);
 
     // Run encryption in background isolate to keep UI smooth
     final result = await MlsCryptoBackground.encrypt(
@@ -86,6 +105,7 @@ class MlsGroup {
       groupId: id,
       epoch: _state.context.epoch,
       senderIndex: senderLeafIndex.value,
+      generation: generation,
       nonce: result.nonce!,
       ciphertext: result.ciphertext!,
       contentType: MlsContentType.application,
@@ -100,22 +120,39 @@ class MlsGroup {
     }
 
     if (ciphertext.epoch != _state.context.epoch) {
-      throw MlsError('Epoch mismatch - message from different epoch');
+      throw MlsError(
+        'Epoch mismatch - message epoch ${ciphertext.epoch}, our epoch ${_state.context.epoch}',
+      );
     }
 
     final senderLeafIndex = LeafIndex(ciphertext.senderIndex);
+    
+    // Use the generation from the message itself (if provided), otherwise fall back to expected
+    final messageGeneration = ciphertext.generation;
+    final trackedGeneration = _state.getGeneration(senderLeafIndex);
 
-    // Get expected generation (what we think the sender should be at)
-    final expectedGeneration = _state.getGeneration(senderLeafIndex);
+    // Log state for debugging
+    final appSecretPrefix = _state.secrets.applicationSecret.length >= 8
+        ? _state.secrets.applicationSecret.sublist(0, 8).map((b) => b.toRadixString(16).padLeft(2, '0')).join()
+        : 'too short';
+    final genStr = _state.generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
+    final groupIdHex = id.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    debugPrint(
+      '>>> MLS DECRYPT: group=${groupIdHex.substring(0, 8)}... localLeaf=${_state.localLeafIndex.value}, senderIdx=${senderLeafIndex.value}',
+    );
+    debugPrint(
+      '>>> MLS DECRYPT: epoch=${_state.context.epoch}, msgGen=$messageGeneration, trackedGen=$trackedGeneration, appSecret=$appSecretPrefix, gens={$genStr}',
+    );
 
     // Run decryption in background isolate to keep UI smooth
+    // Use the generation from the message directly instead of guessing
     final result = await MlsCryptoBackground.decrypt(
       epoch: ciphertext.epoch,
       senderIndex: ciphertext.senderIndex,
       nonce: ciphertext.nonce,
       ciphertext: ciphertext.ciphertext,
       applicationSecret: _state.secrets.applicationSecret,
-      expectedGeneration: expectedGeneration,
+      expectedGeneration: messageGeneration, // Use message's generation directly
     );
 
     if (!result.success) {
@@ -124,9 +161,15 @@ class MlsGroup {
       );
     }
 
-    // Update our generation tracking
+    // Update our generation tracking and persist state
     if (result.usedGeneration != null) {
+      debugPrint(
+        '>>> MLS DECRYPT SUCCESS: usedGen=${result.usedGeneration}, trackedGen=$trackedGeneration, updating tracking',
+      );
       _state.setGeneration(senderLeafIndex, result.usedGeneration!);
+      // Save state to persist the updated generation
+      // This ensures the generation survives app restarts
+      await _storage.saveGroupState(_state);
     }
 
     return result.plaintext!;
@@ -142,7 +185,7 @@ class MlsGroup {
     }
 
     // Get local member's leaf index
-    final localLeafIndex = _state.members.keys.first;
+    final localLeafIndex = _state.localLeafIndex;
 
     // Create new tree with added leaves
     final newTree = RatchetTree(List.from(_state.tree.nodes));
@@ -277,7 +320,7 @@ class MlsGroup {
     }
 
     // Get local member's leaf index
-    final localLeafIndex = _state.members.keys.first;
+    final localLeafIndex = _state.localLeafIndex;
 
     // Create new tree with removed leaves blanked
     final newTree = RatchetTree(List.from(_state.tree.nodes));
@@ -354,7 +397,7 @@ class MlsGroup {
     UpdateProposal update,
   ) async {
     // Get local member's leaf index
-    final localLeafIndex = _state.members.keys.first;
+    final localLeafIndex = _state.localLeafIndex;
     final localMember = _state.members[localLeafIndex]!;
 
     // Create new tree with updated leaf
@@ -565,7 +608,11 @@ class MlsGroup {
     );
     
     // Deserialize group secrets
-    final (initSecret, secrets, leafIndex) = _deserializeGroupSecrets(decryptedSecrets);
+    final (initSecret, secrets, localLeafIndex) = _deserializeGroupSecrets(decryptedSecrets);
+    
+    debugPrint(
+      'MLS joinFromWelcome: localLeafIndex=${localLeafIndex.value}',
+    );
     
     // Deserialize group info
     final (context, tree, members) = _deserializeGroupInfo(decryptedGroupInfo);
@@ -573,7 +620,7 @@ class MlsGroup {
     // Generate identity key pair for this member (if not provided)
     final identityKeyPair = await cryptoProvider.signatureScheme.generateKeyPair();
     
-    // Create group state
+    // Create group state with the local leaf index from the Welcome message
     final state = GroupState(
       context: context,
       tree: tree,
@@ -581,6 +628,7 @@ class MlsGroup {
       secrets: secrets,
       identityPrivateKey: identityKeyPair.privateKey,
       leafHpkePrivateKey: hpkePrivateKey,
+      localLeafIndex: localLeafIndex,
     );
     
     // Save state
@@ -810,7 +858,7 @@ class MlsGroup {
     EpochSecrets secrets,
   ) async {
     final keySchedule = KeySchedule(_crypto.kdf);
-    final senderLeafIndex = _state.members.keys.first.value;
+    final senderLeafIndex = _state.localLeafIndex.value;
 
     // Use handshake secret for commit encryption
     final keyMaterial = await keySchedule.deriveApplicationKeys(
@@ -832,6 +880,7 @@ class MlsGroup {
       groupId: id,
       epoch: _state.context.epoch + 1,
       senderIndex: senderLeafIndex,
+      generation: 0, // Commits always use generation 0
       nonce: nonce,
       ciphertext: ciphertext,
       contentType: MlsContentType.commit,

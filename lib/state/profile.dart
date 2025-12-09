@@ -465,10 +465,14 @@ class ProfileState with ChangeNotifier {
       final nonceBytes = row['nonce'] as Uint8List;
       final ciphertextBytes = row['ciphertext'] as Uint8List;
 
+      // Read generation if present (default to 0 for backward compatibility)
+      final generation = row['generation'] as int? ?? 0;
+
       return MlsCiphertext(
         groupId: _keysGroup!.id,
         epoch: epoch,
         senderIndex: senderIndex,
+        generation: generation,
         nonce: nonceBytes,
         ciphertext: ciphertextBytes,
         contentType: MlsContentType.application,

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sqflite_common/sqflite.dart';
 import '../group_state/group_state.dart';
@@ -322,6 +323,12 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
   @override
   Future<void> saveGroupState(GroupState state) async {
+    final groupIdHex = state.context.groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final genStr = state.generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
+    debugPrint(
+      '>>> MLS SAVE: group=${groupIdHex.substring(0, 8)}... epoch=${state.context.epoch}, localLeaf=${state.localLeafIndex.value}, gens={$genStr}',
+    );
+
     // Separate sensitive from non-sensitive data
     final publicState = _serializePublicState(state);
     final epochSecretsBytes = state.secrets.serialize();
@@ -345,9 +352,16 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
   @override
   Future<GroupState?> loadGroupState(GroupId groupId) async {
+    final groupIdHex = groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    debugPrint('>>> MLS LOAD START: group=${groupIdHex.substring(0, 8)}...');
+    
     // Load public state from database
     final publicStateBytes = await _table.loadPublicState(groupId);
-    if (publicStateBytes == null) return null;
+    if (publicStateBytes == null) {
+      debugPrint('>>> MLS LOAD: No public state found in database');
+      return null;
+    }
+    debugPrint('>>> MLS LOAD: Loaded ${publicStateBytes.length} bytes of public state');
 
     // Load private keys from secure storage
     final (identityPrivateKey, leafHpkePrivateKey) = await _secureStorage
@@ -355,7 +369,10 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
     // Load epoch secrets from secure storage
     final epochSecretsBytes = await _secureStorage.loadEpochSecrets(groupId);
-    if (epochSecretsBytes == null) return null;
+    if (epochSecretsBytes == null) {
+      debugPrint('MLS storage: No epoch secrets found in secure storage');
+      return null;
+    }
 
     // Deserialize and reconstruct GroupState
     return _deserializeGroupState(
@@ -378,7 +395,7 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
   /// Serialize public state (everything except private keys and epoch secrets)
   Uint8List _serializePublicState(GroupState state) {
-    // Serialize: context + tree + members + generations
+    // Serialize: context + tree + members + localLeafIndex + generations
     final contextBytes = state.context.serialize();
     final treeBytes = state.tree.serialize();
     final membersBytes = _serializeMembers(state.members);
@@ -391,6 +408,7 @@ class SecurePersistentMlsStorage implements MlsStorage {
         treeBytes.length +
         4 +
         membersBytes.length +
+        4 + // localLeafIndex (4 bytes)
         4 +
         generationsBytes.length;
 
@@ -405,6 +423,12 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
     _writeUint8List(result, offset, membersBytes);
     offset += 4 + membersBytes.length;
+
+    // Write localLeafIndex (4 bytes)
+    result[offset++] = (state.localLeafIndex.value >> 24) & 0xFF;
+    result[offset++] = (state.localLeafIndex.value >> 16) & 0xFF;
+    result[offset++] = (state.localLeafIndex.value >> 8) & 0xFF;
+    result[offset++] = state.localLeafIndex.value & 0xFF;
 
     _writeUint8List(result, offset, generationsBytes);
 
@@ -466,23 +490,94 @@ class SecurePersistentMlsStorage implements MlsStorage {
     offset += 4 + membersBytes.length;
     final members = _deserializeMembers(membersBytes, _cryptoProvider);
 
-    // Read generations (if present, for backward compatibility)
+    // Read localLeafIndex and generations (if present, for backward compatibility)
+    // 
+    // Format detection:
+    // - Old format: [4 bytes: generations length][generations data]
+    // - New format: [4 bytes: localLeafIndex][4 bytes: generations length][generations data]
+    //
+    // Detection strategy: In old format, the first 4 bytes is a length (e.g., 12 for 1 entry).
+    // We check if interpreting it as a length produces valid data that fits.
+    // In new format, localLeafIndex is typically 0 or 1, so if we see a small value
+    // followed by another length prefix that works, it's new format.
+    LeafIndex? localLeafIndex;
     Map<LeafIndex, int>? generations;
+    
     if (offset < publicStateBytes.length) {
       try {
-        final generationsBytes = _readUint8List(publicStateBytes, offset);
-        generations = _deserializeGenerations(generationsBytes);
-      } catch (e) {
-        // Backward compatibility: if deserialization fails, use empty map
+        final remainingBytes = publicStateBytes.length - offset;
+        debugPrint('>>> MLS LOAD: $remainingBytes bytes remaining after members');
+        
+        // Read first 4 bytes
+        final firstValue = (publicStateBytes[offset] << 24) |
+            (publicStateBytes[offset + 1] << 16) |
+            (publicStateBytes[offset + 2] << 8) |
+            publicStateBytes[offset + 3];
+        
+        debugPrint('>>> MLS LOAD: First 4 bytes value = $firstValue');
+        
+        // Check if this looks like old format (firstValue is a length prefix)
+        // In old format: firstValue is length of generations blob, and we should have
+        // exactly firstValue bytes remaining after the 4-byte length prefix
+        final bytesAfterFirst = remainingBytes - 4;
+        final looksLikeOldFormat = (firstValue == bytesAfterFirst) && 
+            _isValidGenerationsLength(firstValue);
+        
+        debugPrint('>>> MLS LOAD: bytesAfterFirst=$bytesAfterFirst, looksLikeOldFormat=$looksLikeOldFormat');
+        
+        if (looksLikeOldFormat) {
+          // Old format: no localLeafIndex, generations starts here
+          debugPrint('>>> MLS LOAD: Detected OLD format (no localLeafIndex)');
+          localLeafIndex = LeafIndex(0); // Default to 0 for old data
+          final generationsBytes = _readUint8List(publicStateBytes, offset);
+          generations = _deserializeGenerations(generationsBytes);
+        } else {
+          // New format: localLeafIndex followed by generations
+          debugPrint('>>> MLS LOAD: Detected NEW format (has localLeafIndex)');
+          localLeafIndex = LeafIndex(firstValue);
+          offset += 4;
+          debugPrint('>>> MLS LOAD: localLeafIndex=${localLeafIndex.value}');
+          
+          // Read generations if there's more data
+          if (offset < publicStateBytes.length) {
+            final generationsBytes = _readUint8List(publicStateBytes, offset);
+            generations = _deserializeGenerations(generationsBytes);
+          }
+        }
+        
+        if (generations != null) {
+          final genStr = generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
+          debugPrint(
+            '>>> MLS LOAD: Loaded generations: {$genStr} (${generations.length} entries)',
+          );
+        }
+      } catch (e, stackTrace) {
+        // Backward compatibility: if deserialization fails, use defaults
+        debugPrint(
+          '>>> MLS LOAD ERROR: Failed to deserialize localLeafIndex/generations. Error: $e',
+        );
+        debugPrint('>>> MLS LOAD ERROR: Stack trace: $stackTrace');
         generations = {};
       }
     } else {
-      // No generations data (old format), use empty map
-      generations = {};
+      // No extra data, use defaults
+      debugPrint(
+        '>>> MLS LOAD: No localLeafIndex/generations data found, using defaults',
+      );
     }
+    
+    // Default localLeafIndex to 0 if not found (backward compatibility)
+    localLeafIndex ??= LeafIndex(0);
+    generations ??= {};
 
     // Deserialize epoch secrets
     final secrets = EpochSecrets.deserialize(epochSecretsBytes);
+
+    final genStr = generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
+    final groupIdHex = context.groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    debugPrint(
+      '>>> MLS LOAD: group=${groupIdHex.substring(0, 8)}... epoch=${context.epoch}, localLeaf=${localLeafIndex.value}, gens={$genStr}',
+    );
 
     return GroupState(
       context: context,
@@ -491,8 +586,17 @@ class SecurePersistentMlsStorage implements MlsStorage {
       secrets: secrets,
       identityPrivateKey: identityPrivateKey,
       leafHpkePrivateKey: leafHpkePrivateKey,
+      localLeafIndex: localLeafIndex,
       generations: generations,
     );
+  }
+
+  /// Check if a value looks like a valid generations blob length
+  /// Generations format: 4 bytes count + (count * 8 bytes per entry)
+  /// So valid lengths are: 4, 12, 20, 28, 36, ... (4 + 8*n)
+  bool _isValidGenerationsLength(int length) {
+    if (length < 4) return false;
+    return (length - 4) % 8 == 0;
   }
 
   /// Deserialize generations map

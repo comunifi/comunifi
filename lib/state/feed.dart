@@ -269,10 +269,14 @@ class FeedState with ChangeNotifier {
       final nonceBytes = row['nonce'] as Uint8List;
       final ciphertextBytes = row['ciphertext'] as Uint8List;
 
+      // Read generation if present (default to 0 for backward compatibility)
+      final generation = row['generation'] as int? ?? 0;
+
       return MlsCiphertext(
         groupId: _keysGroup!.id,
         epoch: epoch,
         senderIndex: senderIndex,
+        generation: generation,
         nonce: nonceBytes,
         ciphertext: ciphertextBytes,
         contentType: MlsContentType.application,
@@ -290,22 +294,33 @@ class FeedState with ChangeNotifier {
     try {
       if (_dbService?.database == null) return;
 
-      // Create table if it doesn't exist
+      // Create table if it doesn't exist (with generation column)
       await _dbService!.database!.execute('''
         CREATE TABLE IF NOT EXISTS nostr_key_storage (
           group_id TEXT PRIMARY KEY,
           epoch INTEGER NOT NULL,
           sender_index INTEGER NOT NULL,
+          generation INTEGER NOT NULL DEFAULT 0,
           nonce BLOB NOT NULL,
           ciphertext BLOB NOT NULL
         )
       ''');
+
+      // Add generation column to existing tables (migration)
+      try {
+        await _dbService!.database!.execute('''
+          ALTER TABLE nostr_key_storage ADD COLUMN generation INTEGER NOT NULL DEFAULT 0
+        ''');
+      } catch (_) {
+        // Column already exists, ignore
+      }
 
       // Store the ciphertext
       await _dbService!.database!.insert('nostr_key_storage', {
         'group_id': groupIdHex,
         'epoch': ciphertext.epoch,
         'sender_index': ciphertext.senderIndex,
+        'generation': ciphertext.generation,
         'nonce': ciphertext.nonce,
         'ciphertext': ciphertext.ciphertext,
       }, conflictAlgorithm: ConflictAlgorithm.replace);

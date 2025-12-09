@@ -76,23 +76,24 @@ class MlsService {
       groupContextHash: groupContextHash,
     );
 
-    // Create initial member
-    final leafIndex = LeafIndex(0);
+    // Create initial member (creator is at leaf index 0)
+    final localLeafIndex = LeafIndex(0);
     final member = GroupMember(
       userId: creatorUserId,
-      leafIndex: leafIndex,
+      leafIndex: localLeafIndex,
       identityKey: identityKeyPair.publicKey,
       hpkePublicKey: hpkeKeyPair.publicKey,
     );
 
-    // Create group state
+    // Create group state with creator's leaf index
     final state = GroupState(
       context: context,
       tree: tree,
-      members: {leafIndex: member},
+      members: {localLeafIndex: member},
       secrets: secrets,
       identityPrivateKey: identityKeyPair.privateKey,
       leafHpkePrivateKey: hpkeKeyPair.privateKey,
+      localLeafIndex: localLeafIndex,
     );
 
     // Save state and group name

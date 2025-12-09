@@ -15,6 +15,7 @@ class MlsCiphertext {
   final GroupId groupId;
   final int epoch;
   final int senderIndex; // leaf index
+  final int generation; // generation counter for this message
   final Uint8List nonce;
   final Uint8List ciphertext;
   final MlsContentType contentType;
@@ -23,6 +24,7 @@ class MlsCiphertext {
     required this.groupId,
     required this.epoch,
     required this.senderIndex,
+    required this.generation,
     required this.nonce,
     required this.ciphertext,
     required this.contentType,
