@@ -164,7 +164,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
 
   /// Get the display name for a group, preferring the name from relay announcements
   String _getGroupDisplayName(GroupState groupState, MlsGroup? group) {
-    if (group == null) return 'Feed';
+    if (group == null) return 'Comunifi';
 
     // First try to get the name from relay announcements (group name cache)
     final groupIdHex = group.id.bytes
@@ -402,19 +402,32 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
               ),
               // Main feed content
               Expanded(
-                child: CupertinoPageScaffold(
-                  navigationBar: CupertinoNavigationBar(
-                    middle: Text(_getGroupDisplayName(groupState, activeGroup)),
-                    trailing: _UsernameButton(),
-                  ),
-                  child: SafeArea(
-                    child: _buildFeedContent(
-                      feedState,
-                      groupState,
-                      activeGroup,
-                    ),
-                  ),
-                ),
+                child: activeGroup != null
+                    // Group view: no navigation bar, banner reaches top
+                    ? ColoredBox(
+                        color: CupertinoColors.systemBackground,
+                        child: _buildFeedContent(
+                          feedState,
+                          groupState,
+                          activeGroup,
+                        ),
+                      )
+                    // Main feed: show navigation bar with "Comunifi"
+                    : CupertinoPageScaffold(
+                        navigationBar: CupertinoNavigationBar(
+                          middle: Text(
+                            _getGroupDisplayName(groupState, activeGroup),
+                          ),
+                          trailing: _UsernameButton(),
+                        ),
+                        child: SafeArea(
+                          child: _buildFeedContent(
+                            feedState,
+                            groupState,
+                            activeGroup,
+                          ),
+                        ),
+                      ),
               ),
               // Right sidebar - shows Profile (global feed) or Members (group)
               Container(
@@ -439,34 +452,74 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
         // For narrow screens, use overlay sidebars
         return Stack(
           children: [
-            CupertinoPageScaffold(
-              navigationBar: CupertinoNavigationBar(
-                leading: CupertinoButton(
-                  padding: EdgeInsets.zero,
-                  onPressed: () {
-                    setState(() {
-                      _isLeftSidebarOpen = true;
-                    });
-                  },
-                  child: const Icon(CupertinoIcons.bars),
+            // Group view: no navigation bar, content reaches top with floating buttons
+            if (activeGroup != null)
+              ColoredBox(
+                color: CupertinoColors.systemBackground,
+                child: Stack(
+                  children: [
+                    _buildFeedContent(feedState, groupState, activeGroup),
+                    // Floating menu button (left)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 8,
+                      left: 8,
+                      child: CupertinoButton(
+                        padding: const EdgeInsets.all(8),
+                        color: CupertinoColors.systemBackground.withOpacity(
+                          0.8,
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        minSize: 36,
+                        onPressed: () {
+                          setState(() {
+                            _isLeftSidebarOpen = true;
+                          });
+                        },
+                        child: const Icon(CupertinoIcons.bars, size: 20),
+                      ),
+                    ),
+                    // Floating members button (right)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 8,
+                      right: 8,
+                      child: CupertinoButton(
+                        padding: const EdgeInsets.all(8),
+                        color: CupertinoColors.systemBackground.withOpacity(
+                          0.8,
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        minSize: 36,
+                        onPressed: () {
+                          setState(() {
+                            _isRightSidebarOpen = true;
+                          });
+                        },
+                        child: const Icon(CupertinoIcons.person_2, size: 20),
+                      ),
+                    ),
+                  ],
                 ),
-                middle: Text(_getGroupDisplayName(groupState, activeGroup)),
-                trailing: CupertinoButton(
-                  padding: EdgeInsets.zero,
-                  onPressed: () {
-                    setState(() {
-                      _isRightSidebarOpen = true;
-                    });
-                  },
-                  child: activeGroup != null
-                      ? const Icon(CupertinoIcons.person_2)
-                      : _UsernameButton(),
+              )
+            // Main feed: show navigation bar with "Comunifi"
+            else
+              CupertinoPageScaffold(
+                navigationBar: CupertinoNavigationBar(
+                  leading: CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: () {
+                      setState(() {
+                        _isLeftSidebarOpen = true;
+                      });
+                    },
+                    child: const Icon(CupertinoIcons.bars),
+                  ),
+                  middle: Text(_getGroupDisplayName(groupState, activeGroup)),
+                  trailing: _UsernameButton(),
+                ),
+                child: SafeArea(
+                  child: _buildFeedContent(feedState, groupState, activeGroup),
                 ),
               ),
-              child: SafeArea(
-                child: _buildFeedContent(feedState, groupState, activeGroup),
-              ),
-            ),
             // Left sidebar (Groups) - overlay on narrow screens
             SlideInSidebar(
               isOpen: _isLeftSidebarOpen,
@@ -476,7 +529,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                 });
               },
               position: SlideInSidebarPosition.left,
-              width: 68,
+              width: 108,
               child: GroupsSidebar(
                 onClose: () {
                   setState(() {
@@ -574,17 +627,15 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                           controller: _scrollController,
                           physics: const AlwaysScrollableScrollPhysics(),
                           slivers: [
+                            // Collapsing group header - pinned at top, shrinks on scroll
+                            _GroupHeaderSliver(
+                              group: groupState.activeGroup!,
+                              groupState: groupState,
+                            ),
                             CupertinoSliverRefreshControl(
                               onRefresh: () async {
                                 await groupState.refreshActiveGroupMessages();
                               },
-                            ),
-                            // Group header with banner, photo, and name
-                            SliverToBoxAdapter(
-                              child: _GroupHeader(
-                                group: groupState.activeGroup!,
-                                groupState: groupState,
-                              ),
                             ),
                             SliverList(
                               delegate: SliverChildBuilderDelegate((
@@ -1687,21 +1738,258 @@ class _ContentMatch {
   _ContentMatch(this.start, this.end, this.type, this.text, [this.captured]);
 }
 
-/// Group header with banner, profile photo, and name (Twitter-style)
-/// Admins can tap on the photo/name to edit group metadata
-class _GroupHeader extends StatefulWidget {
+/// Collapsing group header delegate for SliverPersistentHeader
+/// Creates a Twitter-style header that shrinks as you scroll
+class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final MlsGroup group;
+  final GroupState groupState;
+  final double topPadding;
+  final bool isAdmin;
+  final VoidCallback? onEditTap;
+
+  // Banner heights
+  static const double _maxBannerHeight = 200.0;
+  static const double _minBannerHeight = 100.0;
+  // Profile photo and info section
+  static const double _profilePhotoSize = 80.0;
+  static const double _profileOverlap = 40.0;
+  static const double _infoSectionHeight = 80.0;
+
+  _CollapsingGroupHeaderDelegate({
+    required this.group,
+    required this.groupState,
+    required this.topPadding,
+    required this.isAdmin,
+    this.onEditTap,
+  });
+
+  @override
+  double get maxExtent =>
+      topPadding + _maxBannerHeight + _profileOverlap + _infoSectionHeight;
+
+  @override
+  double get minExtent =>
+      topPadding + _minBannerHeight + _profileOverlap + _infoSectionHeight;
+
+  @override
+  bool shouldRebuild(covariant _CollapsingGroupHeaderDelegate oldDelegate) {
+    return group != oldDelegate.group ||
+        groupState != oldDelegate.groupState ||
+        topPadding != oldDelegate.topPadding ||
+        isAdmin != oldDelegate.isAdmin;
+  }
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
+    // Calculate the current banner height based on scroll
+    final shrinkProgress = shrinkOffset / (maxExtent - minExtent);
+    final clampedProgress = shrinkProgress.clamp(0.0, 1.0);
+    final currentBannerHeight =
+        _maxBannerHeight -
+        ((_maxBannerHeight - _minBannerHeight) * clampedProgress);
+
+    final groupIdHex = group.id.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+
+    // Find the group announcement to get the picture
+    final announcement = groupState.discoveredGroups
+        .cast<GroupAnnouncement?>()
+        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
+
+    final groupName = announcement?.name ?? group.name;
+    final groupPicture = announcement?.picture;
+    final groupAbout = announcement?.about;
+
+    // Profile photo scales down slightly when collapsed
+    final photoScale = 1.0 - (clampedProgress * 0.2);
+    final scaledPhotoSize = _profilePhotoSize * photoScale;
+
+    return Container(
+      color: CupertinoColors.systemBackground,
+      child: Stack(
+        children: [
+          // Banner gradient - extends to top of screen
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: topPadding + currentBannerHeight,
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    CupertinoColors.systemIndigo.withOpacity(0.6),
+                    CupertinoColors.systemPurple.withOpacity(0.4),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // Profile photo overlapping the banner
+          Positioned(
+            left: 16,
+            top: topPadding + currentBannerHeight - _profileOverlap,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: isAdmin ? onEditTap : null,
+              child: Container(
+                width: scaledPhotoSize,
+                height: scaledPhotoSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CupertinoColors.systemBackground,
+                  border: Border.all(
+                    color: CupertinoColors.systemBackground,
+                    width: 4,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: CupertinoColors.black.withOpacity(0.15),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: CupertinoColors.systemGrey4,
+                          image: groupPicture != null
+                              ? DecorationImage(
+                                  image: NetworkImage(groupPicture),
+                                  fit: BoxFit.cover,
+                                )
+                              : null,
+                        ),
+                        child: groupPicture == null
+                            ? Center(
+                                child: Icon(
+                                  CupertinoIcons.person_2_fill,
+                                  size: 36 * photoScale,
+                                  color: CupertinoColors.systemGrey,
+                                ),
+                              )
+                            : null,
+                      ),
+                    ),
+                    // Edit badge for admins
+                    if (isAdmin)
+                      Positioned(
+                        bottom: 0,
+                        right: 0,
+                        child: Container(
+                          width: 24 * photoScale,
+                          height: 24 * photoScale,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: CupertinoColors.activeBlue,
+                            border: Border.all(
+                              color: CupertinoColors.systemBackground,
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            CupertinoIcons.pencil,
+                            size: 12 * photoScale,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // Group name and about - positioned below the profile photo
+          Positioned(
+            left: 16,
+            right: 16,
+            top:
+                topPadding +
+                currentBannerHeight +
+                _profileOverlap +
+                8, // 8px spacing
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                GestureDetector(
+                  onTap: isAdmin ? onEditTap : null,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          groupName,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      if (isAdmin) ...[
+                        const SizedBox(width: 8),
+                        Icon(
+                          CupertinoIcons.pencil,
+                          size: 16,
+                          color: CupertinoColors.activeBlue.resolveFrom(
+                            context,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (groupAbout != null && groupAbout.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    groupAbout,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      color: CupertinoColors.secondaryLabel,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          // Bottom divider
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Container(height: 0.5, color: CupertinoColors.separator),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Stateful wrapper for the collapsing group header to manage admin status
+class _GroupHeaderSliver extends StatefulWidget {
   final MlsGroup group;
   final GroupState groupState;
 
-  const _GroupHeader({required this.group, required this.groupState});
+  const _GroupHeaderSliver({required this.group, required this.groupState});
 
   @override
-  State<_GroupHeader> createState() => _GroupHeaderState();
+  State<_GroupHeaderSliver> createState() => _GroupHeaderSliverState();
 }
 
-class _GroupHeaderState extends State<_GroupHeader> {
+class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
   bool _isAdmin = false;
-  bool _checkedAdmin = false;
 
   String _groupIdToHex(MlsGroup group) {
     return group.id.bytes
@@ -1716,9 +2004,8 @@ class _GroupHeaderState extends State<_GroupHeader> {
   }
 
   @override
-  void didUpdateWidget(_GroupHeader oldWidget) {
+  void didUpdateWidget(_GroupHeaderSliver oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Recheck admin status if group changes
     if (_groupIdToHex(oldWidget.group) != _groupIdToHex(widget.group)) {
       _checkAdminStatus();
     }
@@ -1727,39 +2014,19 @@ class _GroupHeaderState extends State<_GroupHeader> {
   Future<void> _checkAdminStatus() async {
     final groupIdHex = _groupIdToHex(widget.group);
     final isAdmin = await widget.groupState.isGroupAdmin(groupIdHex);
-    // Verify the group hasn't changed since the check started before updating state
     if (mounted && _groupIdToHex(widget.group) == groupIdHex) {
       setState(() {
         _isAdmin = isAdmin;
-        _checkedAdmin = true;
       });
     }
   }
 
-  void _showEditModal(GroupAnnouncement announcement) {
-    showEditGroupModal(
-      context,
-      announcement,
-      onSaved: () {
-        // Refresh will happen automatically via GroupState notifyListeners
-      },
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
+  void _showEditModal() {
     final groupIdHex = _groupIdToHex(widget.group);
-
-    // Find the group announcement to get the picture
     final announcement = widget.groupState.discoveredGroups
         .cast<GroupAnnouncement?>()
         .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
 
-    final groupName = announcement?.name ?? widget.group.name;
-    final groupPicture = announcement?.picture;
-    final groupAbout = announcement?.about;
-
-    // Create a placeholder announcement if none exists (for newly created groups)
     final effectiveAnnouncement =
         announcement ??
         GroupAnnouncement(
@@ -1770,171 +2037,22 @@ class _GroupHeaderState extends State<_GroupHeader> {
           createdAt: DateTime.now(),
         );
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Banner area with profile photo
-        SizedBox(
-          height: 160, // 120 banner + 40 overflow for profile photo
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              // Banner placeholder
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: 120,
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        CupertinoColors.systemIndigo.withOpacity(0.6),
-                        CupertinoColors.systemPurple.withOpacity(0.4),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              // Profile photo overlapping the banner
-              Positioned(
-                left: 16,
-                top: 80, // 120 - 40 = starts 40px from bottom of banner
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: _isAdmin
-                      ? () => _showEditModal(effectiveAnnouncement)
-                      : null,
-                  child: Container(
-                    width: 80,
-                    height: 80,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: CupertinoColors.systemBackground,
-                      border: Border.all(
-                        color: CupertinoColors.systemBackground,
-                        width: 4,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: CupertinoColors.black.withOpacity(0.15),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          child: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: CupertinoColors.systemGrey4,
-                              image: groupPicture != null
-                                  ? DecorationImage(
-                                      image: NetworkImage(groupPicture),
-                                      fit: BoxFit.cover,
-                                    )
-                                  : null,
-                            ),
-                            child: groupPicture == null
-                                ? const Center(
-                                    child: Icon(
-                                      CupertinoIcons.person_2_fill,
-                                      size: 36,
-                                      color: CupertinoColors.systemGrey,
-                                    ),
-                                  )
-                                : null,
-                          ),
-                        ),
-                        // Edit badge for admins
-                        if (_isAdmin && _checkedAdmin)
-                          Positioned(
-                            bottom: 0,
-                            right: 0,
-                            child: Container(
-                              width: 24,
-                              height: 24,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: CupertinoColors.activeBlue,
-                                border: Border.all(
-                                  color: CupertinoColors.systemBackground,
-                                  width: 2,
-                                ),
-                              ),
-                              child: const Icon(
-                                CupertinoIcons.pencil,
-                                size: 12,
-                                color: CupertinoColors.white,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        // Space between photo and group name
-        const SizedBox(height: 8),
-        // Group name and about
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              GestureDetector(
-                onTap: _isAdmin
-                    ? () => _showEditModal(effectiveAnnouncement)
-                    : null,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Flexible(
-                      child: Text(
-                        groupName,
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    if (_isAdmin && _checkedAdmin) ...[
-                      const SizedBox(width: 8),
-                      Icon(
-                        CupertinoIcons.pencil,
-                        size: 16,
-                        color: CupertinoColors.activeBlue.resolveFrom(context),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (groupAbout != null && groupAbout.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(
-                  groupAbout,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: CupertinoColors.secondaryLabel,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        // Divider
-        Container(height: 0.5, color: CupertinoColors.separator),
-      ],
+    showEditGroupModal(context, effectiveAnnouncement, onSaved: () {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final topPadding = MediaQuery.of(context).padding.top;
+
+    return SliverPersistentHeader(
+      pinned: true,
+      delegate: _CollapsingGroupHeaderDelegate(
+        group: widget.group,
+        groupState: widget.groupState,
+        topPadding: topPadding,
+        isAdmin: _isAdmin,
+        onEditTap: _showEditModal,
+      ),
     );
   }
 }

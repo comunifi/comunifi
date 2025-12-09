@@ -239,7 +239,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
 
         return SafeArea(
           child: Container(
-            width: 68,
+            width: 108,
             color: CupertinoColors.systemBackground,
             child: Column(
               children: [
@@ -252,23 +252,23 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Container(
-                          width: 40,
-                          height: 40,
+                          width: 56,
+                          height: 56,
                           decoration: BoxDecoration(
                             color: CupertinoColors.systemGrey5,
-                            borderRadius: BorderRadius.circular(20),
+                            borderRadius: BorderRadius.circular(28),
                           ),
                           child: const Icon(
                             CupertinoIcons.plus,
                             color: CupertinoColors.systemGreen,
-                            size: 20,
+                            size: 28,
                           ),
                         ),
                         const SizedBox(height: 2),
                         const Text(
                           'New',
                           style: TextStyle(
-                            fontSize: 9,
+                            fontSize: 10,
                             color: CupertinoColors.secondaryLabel,
                           ),
                         ),
@@ -287,7 +287,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                 const SizedBox(height: 4),
                 // Divider
                 Container(
-                  width: 28,
+                  width: 40,
                   height: 2,
                   decoration: BoxDecoration(
                     color: CupertinoColors.separator,
@@ -375,13 +375,13 @@ class _GlobalFeedIcon extends StatelessWidget {
       children: [
         AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          width: 40,
-          height: 40,
+          width: 56,
+          height: 56,
           decoration: BoxDecoration(
             color: isActive
                 ? CupertinoColors.activeBlue
                 : CupertinoColors.systemGrey5,
-            borderRadius: BorderRadius.circular(isActive ? 12 : 20),
+            borderRadius: BorderRadius.circular(isActive ? 16 : 28),
             boxShadow: isActive
                 ? [
                     BoxShadow(
@@ -397,14 +397,14 @@ class _GlobalFeedIcon extends StatelessWidget {
             color: isActive
                 ? CupertinoColors.white
                 : CupertinoColors.systemGrey,
-            size: 20,
+            size: 28,
           ),
         ),
         const SizedBox(height: 2),
         Text(
           'Feed',
           style: TextStyle(
-            fontSize: 9,
+            fontSize: 10,
             fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
             color: isActive
                 ? CupertinoColors.label
@@ -495,13 +495,13 @@ class _GroupAvatar extends StatelessWidget {
       children: [
         AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          width: 40,
-          height: 40,
+          width: 56,
+          height: 56,
           decoration: BoxDecoration(
             color: isMember
                 ? CupertinoColors.systemIndigo
                 : CupertinoColors.systemGrey4,
-            borderRadius: BorderRadius.circular(isActive ? 12 : 20),
+            borderRadius: BorderRadius.circular(isActive ? 16 : 28),
             image: pictureUrl != null
                 ? DecorationImage(
                     image: NetworkImage(pictureUrl!),
@@ -527,7 +527,7 @@ class _GroupAvatar extends StatelessWidget {
                           ? CupertinoColors.white
                           : CupertinoColors.systemGrey,
                       fontWeight: FontWeight.w600,
-                      fontSize: 14,
+                      fontSize: 18,
                     ),
                   ),
                 )
@@ -536,11 +536,11 @@ class _GroupAvatar extends StatelessWidget {
         if (showLabel) ...[
           const SizedBox(height: 2),
           SizedBox(
-            width: 56,
+            width: 72,
             child: Text(
               name,
               style: TextStyle(
-                fontSize: 9,
+                fontSize: 10,
                 fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
                 color: isActive
                     ? CupertinoColors.label
