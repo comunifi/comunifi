@@ -127,6 +127,11 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     );
   }
 
+  void _toggleExploreMode() {
+    final groupState = context.read<GroupState>();
+    groupState.setExploreMode(!groupState.isExploreMode);
+  }
+
   void _selectGroup(MlsGroup? group) {
     final groupState = context.read<GroupState>();
     if (group == null) {
@@ -231,7 +236,9 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
         }
 
         final allGroups = _buildGroupList(groupState);
-        final isGlobalFeed = groupState.activeGroup == null;
+        final isGlobalFeed =
+            groupState.activeGroup == null && !groupState.isExploreMode;
+        final isExploreMode = groupState.isExploreMode;
 
         // Extra top padding for macOS to account for hidden title bar
         final isMacOS = !kIsWeb && Platform.isMacOS;
@@ -260,7 +267,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                           ),
                           child: const Icon(
                             CupertinoIcons.plus,
-                            color: CupertinoColors.systemGreen,
+                            color: CupertinoColors.activeBlue,
                             size: 28,
                           ),
                         ),
@@ -274,6 +281,14 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                         ),
                       ],
                     ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // Explore button
+                Center(
+                  child: GestureDetector(
+                    onTap: _toggleExploreMode,
+                    child: _ExploreIcon(isActive: isExploreMode),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -362,6 +377,60 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   }
 }
 
+/// Explore icon (search) with label
+class _ExploreIcon extends StatelessWidget {
+  final bool isActive;
+
+  const _ExploreIcon({required this.isActive});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            color: isActive
+                ? CupertinoColors.activeBlue
+                : CupertinoColors.systemGrey5,
+            borderRadius: BorderRadius.circular(isActive ? 16 : 28),
+            boxShadow: isActive
+                ? [
+                    BoxShadow(
+                      color: CupertinoColors.activeBlue.withOpacity(0.4),
+                      blurRadius: 8,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : null,
+          ),
+          child: Icon(
+            CupertinoIcons.search,
+            color: isActive
+                ? CupertinoColors.white
+                : CupertinoColors.activeBlue,
+            size: 28,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'Explore',
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+            color: isActive
+                ? CupertinoColors.label
+                : CupertinoColors.secondaryLabel,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Global feed icon (globe) with label
 class _GlobalFeedIcon extends StatelessWidget {
   final bool isActive;
@@ -396,7 +465,7 @@ class _GlobalFeedIcon extends StatelessWidget {
             CupertinoIcons.globe,
             color: isActive
                 ? CupertinoColors.white
-                : CupertinoColors.systemGrey,
+                : CupertinoColors.activeBlue,
             size: 28,
           ),
         ),

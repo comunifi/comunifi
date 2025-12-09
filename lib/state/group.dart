@@ -29,6 +29,7 @@ import 'package:comunifi/models/nostr_event.dart'
         kindEncryptedIdentity,
         kindGroupAdmins,
         kindGroupMembers,
+        kindJoinRequest,
         kindMlsWelcome,
         kindPutUser,
         kindRemoveUser,
@@ -1050,6 +1051,9 @@ class GroupState with ChangeNotifier {
   // Hashtag filtering
   String? _hashtagFilter;
 
+  // Explore mode (shows discoverable groups in feed area)
+  bool _isExploreMode = false;
+
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
@@ -1057,6 +1061,20 @@ class GroupState with ChangeNotifier {
   MlsGroup? get activeGroup => _activeGroup;
   List<GroupAnnouncement> get discoveredGroups => _discoveredGroups;
   bool get isLoadingGroups => _isLoadingGroups;
+  bool get isExploreMode => _isExploreMode;
+
+  /// Set explore mode (shows discoverable groups in feed area)
+  void setExploreMode(bool value) {
+    if (_isExploreMode != value) {
+      _isExploreMode = value;
+      if (value) {
+        // Clear active group when entering explore mode
+        _activeGroup = null;
+      }
+      // Use direct notify for immediate UI update (called from user gesture)
+      notifyListeners();
+    }
+  }
 
   /// Current hashtag filter (null = no filter)
   String? get hashtagFilter => _hashtagFilter;
@@ -1397,6 +1415,7 @@ class GroupState with ChangeNotifier {
     _activeGroup = group;
     _groupMessages = [];
     _hashtagFilter = null; // Clear hashtag filter when switching groups
+    _isExploreMode = false; // Exit explore mode when selecting a group
 
     if (group == null) {
       // Stop listening for messages
@@ -3101,6 +3120,57 @@ class GroupState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to get user group memberships: $e');
       return {};
+    }
+  }
+
+  /// Request to join a group (publishes kind 9021 per NIP-29)
+  /// [groupIdHex] - The hex-encoded group ID
+  /// [reason] - Optional reason for joining (included in content field)
+  Future<void> requestToJoinGroup(String groupIdHex, {String? reason}) async {
+    if (_nostrService == null || !_isConnected) {
+      throw Exception('Not connected to relay');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Create kind 9021 (join-request) event per NIP-29
+      // Tags: ['h', groupId]
+      // Content: optional reason
+      final createdAt = DateTime.now();
+      final tags = await addClientTagsWithSignature([
+        ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
+      ], createdAt: createdAt);
+
+      final joinRequestEvent = NostrEvent.fromPartialData(
+        kind: kindJoinRequest,
+        content: reason ?? '',
+        keyPairs: keyPair,
+        tags: tags,
+        createdAt: createdAt,
+      );
+
+      final joinRequestModel = NostrEventModel(
+        id: joinRequestEvent.id,
+        pubkey: joinRequestEvent.pubkey,
+        kind: joinRequestEvent.kind,
+        content: joinRequestEvent.content,
+        tags: joinRequestEvent.tags,
+        sig: joinRequestEvent.sig,
+        createdAt: joinRequestEvent.createdAt,
+      );
+
+      await _nostrService!.publishEvent(joinRequestModel.toJson());
+
+      debugPrint('Published join request for group $groupIdHex');
+    } catch (e) {
+      debugPrint('Failed to request to join group: $e');
+      rethrow;
     }
   }
 
