@@ -226,12 +226,13 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
           _membershipsLoaded = false;
         }
 
-        // Reload memberships when cache is invalidated (e.g., after joining a group)
+        // Reload memberships and groups when cache is invalidated (e.g., after joining a group)
         if (groupState.membershipCacheVersion != _lastMembershipVersion) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _lastMembershipVersion = groupState.membershipCacheVersion;
             _membershipsLoaded = false;
-            _loadMemberships();
+            // Refresh both memberships and discovered groups to show newly joined groups
+            _fetchGroupsFromRelay();
           });
         }
 

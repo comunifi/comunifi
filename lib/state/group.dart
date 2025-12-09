@@ -82,6 +82,23 @@ class NIP29GroupMember {
   bool get isModerator => role == 'moderator';
 }
 
+/// Represents a join request from a user (kind 9021 per NIP-29)
+class JoinRequest {
+  final String pubkey;
+  final String groupIdHex;
+  final String? reason;
+  final DateTime createdAt;
+  final String eventId;
+
+  JoinRequest({
+    required this.pubkey,
+    required this.groupIdHex,
+    this.reason,
+    required this.createdAt,
+    required this.eventId,
+  });
+}
+
 class GroupState with ChangeNotifier {
   // instantiate services here
   NostrService? _nostrService;
@@ -972,6 +989,82 @@ class GroupState with ChangeNotifier {
       return memberList;
     } catch (e) {
       debugPrint('Failed to get group members: $e');
+      return [];
+    }
+  }
+
+  /// Get pending join requests for a group (kind 9021 per NIP-29)
+  /// Returns only requests from users who are not already members
+  Future<List<JoinRequest>> getJoinRequests(String groupIdHex) async {
+    if (_nostrService == null || !_isConnected) {
+      return [];
+    }
+
+    try {
+      // Query kind 9021 (join-request) events for this group
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindJoinRequest,
+        tags: [groupIdHex],
+        tagKey: 'h',
+        limit: 100,
+        useCache: true,
+      );
+
+      if (events.isEmpty) {
+        return [];
+      }
+
+      // Get current members to filter out already-approved requests
+      final members = await getGroupMembers(groupIdHex);
+      final memberPubkeys = members.map((m) => m.pubkey).toSet();
+
+      final requests = <JoinRequest>[];
+      final seenPubkeys =
+          <String>{}; // Track to get only latest request per user
+
+      // Sort by creation date descending (newest first)
+      events.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+      for (final event in events) {
+        // Skip if already a member
+        if (memberPubkeys.contains(event.pubkey)) {
+          continue;
+        }
+
+        // Skip duplicate requests from same user (keep only newest)
+        if (seenPubkeys.contains(event.pubkey)) {
+          continue;
+        }
+        seenPubkeys.add(event.pubkey);
+
+        // Extract group ID from 'h' tag to verify
+        String? eventGroupId;
+        for (final tag in event.tags) {
+          if (tag.isNotEmpty && tag[0] == 'h' && tag.length >= 2) {
+            eventGroupId = tag[1];
+            break;
+          }
+        }
+
+        // Only include if group ID matches
+        if (eventGroupId != groupIdHex) {
+          continue;
+        }
+
+        requests.add(
+          JoinRequest(
+            pubkey: event.pubkey,
+            groupIdHex: groupIdHex,
+            reason: event.content.isNotEmpty ? event.content : null,
+            createdAt: event.createdAt,
+            eventId: event.id,
+          ),
+        );
+      }
+
+      return requests;
+    } catch (e) {
+      debugPrint('Failed to get join requests: $e');
       return [];
     }
   }
@@ -2541,6 +2634,9 @@ class GroupState with ChangeNotifier {
 
       // Update groups list to reflect new member
       await _loadSavedGroups();
+
+      // Invalidate membership cache so UIs update (explore view, members sidebar)
+      invalidateMembershipCache(notify: true);
     } catch (e) {
       debugPrint('Failed to invite member: $e');
       rethrow;
@@ -2653,6 +2749,104 @@ class GroupState with ChangeNotifier {
       );
     } catch (e) {
       debugPrint('Failed to invite member by username: $e');
+      rethrow;
+    }
+  }
+
+  /// Approve a join request by inviting the user via their pubkey
+  ///
+  /// [pubkey] - The Nostr public key of the user who requested to join
+  ///
+  /// This will:
+  /// 1. Look up the user's profile to get their HPKE public key
+  /// 2. Generate MLS keys and create an AddProposal
+  /// 3. Send Welcome message via Nostr (kind 1060)
+  /// 4. Publish NIP-29 put-user event (kind 9000)
+  ///
+  /// This follows the same flow as inviteMemberByUsername but starts with a pubkey.
+  Future<void> approveJoinRequest(String pubkey) async {
+    if (_activeGroup == null) {
+      throw Exception('No active group selected. Please select a group first.');
+    }
+
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    if (_mlsService == null) {
+      throw Exception('MLS service not initialized');
+    }
+
+    try {
+      // Prevent approving yourself
+      final currentUserPubkey = await getNostrPublicKey();
+      if (currentUserPubkey != null && pubkey == currentUserPubkey) {
+        throw Exception('You cannot approve yourself');
+      }
+
+      // Get the user's profile to retrieve their HPKE public key
+      final profileService = ProfileService(_nostrService!);
+      var profile = await profileService.getProfile(pubkey);
+
+      if (profile == null) {
+        throw Exception('User profile not found');
+      }
+
+      // If no HPKE key in cached profile, force refresh from relay
+      if (profile.mlsHpkePublicKey == null ||
+          profile.mlsHpkePublicKey!.isEmpty) {
+        debugPrint('No HPKE key in cached profile, refreshing from relay...');
+        final freshProfile = await profileService.getProfileFresh(pubkey);
+        if (freshProfile != null) {
+          profile = freshProfile;
+        }
+      }
+
+      // Check for HPKE public key
+      final inviteeHpkePublicKeyHex = profile.mlsHpkePublicKey;
+      if (inviteeHpkePublicKeyHex == null || inviteeHpkePublicKeyHex.isEmpty) {
+        throw Exception(
+          'User has not published their MLS keys. '
+          'They need to update their profile first.',
+        );
+      }
+
+      debugPrint(
+        'Approving join request with HPKE public key: ${inviteeHpkePublicKeyHex.substring(0, 16)}...',
+      );
+
+      // Convert hex to bytes for the HPKE public key
+      final hpkePublicKeyBytes = Uint8List.fromList(
+        List.generate(
+          inviteeHpkePublicKeyHex.length ~/ 2,
+          (i) => int.parse(
+            inviteeHpkePublicKeyHex.substring(i * 2, i * 2 + 2),
+            radix: 16,
+          ),
+        ),
+      );
+
+      // Generate identity key (still needed for MLS)
+      final cryptoProvider = DefaultMlsCryptoProvider();
+      final identityKeyPair = await cryptoProvider.signatureScheme
+          .generateKeyPair();
+
+      // Create public key from the invitee's published HPKE public key
+      final inviteeHpkePublicKey = DefaultPublicKey(hpkePublicKeyBytes);
+
+      // Invite the member with their actual HPKE public key
+      await inviteMember(
+        inviteeNostrPubkey: pubkey,
+        inviteeIdentityKey: identityKeyPair.publicKey,
+        inviteeHpkePublicKey: inviteeHpkePublicKey,
+        inviteeUserId: pubkey,
+      );
+
+      debugPrint(
+        'Approved join request for ${pubkey.substring(0, 8)}... to group',
+      );
+    } catch (e) {
+      debugPrint('Failed to approve join request: $e');
       rethrow;
     }
   }

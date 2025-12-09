@@ -2588,12 +2588,43 @@ class _ExploreGroupsViewState extends State<_ExploreGroupsView> {
   bool _isLoadingGroups = false;
   bool _isSearching = false;
   Timer? _debounceTimer;
+  int _lastMembershipCacheVersion = -1;
 
   @override
   void initState() {
     super.initState();
     _searchController.addListener(_onSearchChanged);
     _loadInitialData();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Check if membership cache was invalidated (e.g., user joined a group)
+    final groupState = context.read<GroupState>();
+    if (_lastMembershipCacheVersion != groupState.membershipCacheVersion) {
+      _lastMembershipCacheVersion = groupState.membershipCacheVersion;
+      // Reload memberships to update which groups the user is a member of
+      if (_membershipsLoaded) {
+        _refreshMemberships();
+      }
+    }
+  }
+
+  Future<void> _refreshMemberships() async {
+    final groupState = context.read<GroupState>();
+    if (!groupState.isConnected) return;
+
+    try {
+      final memberships = await groupState.getUserGroupMemberships();
+      if (mounted) {
+        setState(() {
+          _memberships = memberships;
+        });
+      }
+    } catch (e) {
+      // Silently fail
+    }
   }
 
   @override
@@ -2806,97 +2837,112 @@ class _ExploreGroupsViewState extends State<_ExploreGroupsView> {
 
   @override
   Widget build(BuildContext context) {
-    final explorableGroups = _getExplorableGroups();
-    final isLoading = _isLoadingGroups || !_membershipsLoaded;
+    // Consumer ensures rebuild when GroupState notifies (e.g., membership changes)
+    return Consumer<GroupState>(
+      builder: (context, groupState, child) {
+        // Check for membership updates
+        if (_lastMembershipCacheVersion != groupState.membershipCacheVersion) {
+          _lastMembershipCacheVersion = groupState.membershipCacheVersion;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _refreshMemberships();
+          });
+        }
 
-    return Column(
-      children: [
-        // Search field
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: CupertinoSearchTextField(
-            controller: _searchController,
-            placeholder: 'Search groups on relay...',
-          ),
-        ),
-        // Loading indicator for search
-        if (_isSearching)
-          const Padding(
-            padding: EdgeInsets.only(bottom: 8),
-            child: CupertinoActivityIndicator(radius: 10),
-          ),
-        // Groups list
-        Expanded(
-          child: isLoading
-              ? const Center(child: CupertinoActivityIndicator())
-              : explorableGroups.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _searchQuery.isNotEmpty
-                            ? CupertinoIcons.search
-                            : CupertinoIcons.person_3,
-                        size: 48,
-                        color: CupertinoColors.systemGrey3,
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        _searchQuery.isNotEmpty
-                            ? 'No groups match your search'
-                            : 'No groups to explore',
-                        style: const TextStyle(
-                          color: CupertinoColors.secondaryLabel,
-                          fontSize: 16,
-                        ),
-                      ),
-                      if (_searchQuery.isEmpty) ...[
-                        const SizedBox(height: 4),
-                        const Text(
-                          'You\'re already a member of all groups',
-                          style: TextStyle(
-                            color: CupertinoColors.tertiaryLabel,
-                            fontSize: 14,
+        final explorableGroups = _getExplorableGroups();
+        final isLoading = _isLoadingGroups || !_membershipsLoaded;
+
+        return Column(
+          children: [
+            // Search field
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: CupertinoSearchTextField(
+                controller: _searchController,
+                placeholder: 'Search groups on relay...',
+              ),
+            ),
+            // Loading indicator for search
+            if (_isSearching)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: CupertinoActivityIndicator(radius: 10),
+              ),
+            // Groups list
+            Expanded(
+              child: isLoading
+                  ? const Center(child: CupertinoActivityIndicator())
+                  : explorableGroups.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _searchQuery.isNotEmpty
+                                ? CupertinoIcons.search
+                                : CupertinoIcons.person_3,
+                            size: 48,
+                            color: CupertinoColors.systemGrey3,
                           ),
-                        ),
-                      ],
-                    ],
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  itemCount: explorableGroups.length,
-                  itemBuilder: (context, index) {
-                    final announcement = explorableGroups[index];
-                    final groupIdHex = announcement.mlsGroupId;
-                    final isRequesting =
-                        groupIdHex != null &&
-                        _requestingGroups.contains(groupIdHex);
-                    final hasRequested =
-                        groupIdHex != null &&
-                        _requestedGroups.contains(groupIdHex);
-                    final memberCount = groupIdHex != null
-                        ? _memberCounts[groupIdHex]
-                        : null;
+                          const SizedBox(height: 12),
+                          Text(
+                            _searchQuery.isNotEmpty
+                                ? 'No groups match your search'
+                                : 'No groups to explore',
+                            style: const TextStyle(
+                              color: CupertinoColors.secondaryLabel,
+                              fontSize: 16,
+                            ),
+                          ),
+                          if (_searchQuery.isEmpty) ...[
+                            const SizedBox(height: 4),
+                            const Text(
+                              'You\'re already a member of all groups',
+                              style: TextStyle(
+                                color: CupertinoColors.tertiaryLabel,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      itemCount: explorableGroups.length,
+                      itemBuilder: (context, index) {
+                        final announcement = explorableGroups[index];
+                        final groupIdHex = announcement.mlsGroupId;
+                        final isRequesting =
+                            groupIdHex != null &&
+                            _requestingGroups.contains(groupIdHex);
+                        final hasRequested =
+                            groupIdHex != null &&
+                            _requestedGroups.contains(groupIdHex);
+                        final memberCount = groupIdHex != null
+                            ? _memberCounts[groupIdHex]
+                            : null;
 
-                    return _ExploreGroupListItem(
-                      announcement: announcement,
-                      initials: _getInitials(announcement.name ?? 'Unknown'),
-                      memberCount: memberCount,
-                      isRequesting: isRequesting,
-                      hasRequested: hasRequested,
-                      onRequestJoin: () => _requestToJoin(announcement),
-                    );
-                  },
-                ),
-        ),
-        if (_isLoadingMemberCounts)
-          const Padding(
-            padding: EdgeInsets.all(8),
-            child: CupertinoActivityIndicator(radius: 8),
-          ),
-      ],
+                        return _ExploreGroupListItem(
+                          announcement: announcement,
+                          initials: _getInitials(
+                            announcement.name ?? 'Unknown',
+                          ),
+                          memberCount: memberCount,
+                          isRequesting: isRequesting,
+                          hasRequested: hasRequested,
+                          onRequestJoin: () => _requestToJoin(announcement),
+                        );
+                      },
+                    ),
+            ),
+            if (_isLoadingMemberCounts)
+              const Padding(
+                padding: EdgeInsets.all(8),
+                child: CupertinoActivityIndicator(radius: 8),
+              ),
+          ],
+        );
+      },
     );
   }
 }

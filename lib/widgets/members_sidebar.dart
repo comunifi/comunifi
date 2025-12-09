@@ -38,6 +38,16 @@ class _MembersSidebarState extends State<MembersSidebar> {
   bool _isLoadingMembers = true;
   String? _lastGroupIdHex;
 
+  // Join requests section state (admin only)
+  bool _isAdmin = false;
+  List<JoinRequest> _joinRequests = [];
+  bool _isLoadingJoinRequests = false;
+  bool _isJoinRequestsExpanded = false;
+  Set<String> _approvingPubkeys = {}; // Track which requests are being approved
+
+  // Track membership cache version to detect changes
+  int _lastMembershipCacheVersion = -1;
+
   @override
   void initState() {
     super.initState();
@@ -79,17 +89,113 @@ class _MembersSidebarState extends State<MembersSidebar> {
 
     try {
       final members = await groupState.getGroupMembers(groupIdHex);
+      final isAdmin = await groupState.isGroupAdmin(groupIdHex);
+      
       if (mounted) {
         setState(() {
           _members = members;
           _isLoadingMembers = false;
+          _isAdmin = isAdmin;
         });
+        
+        // Load join requests if user is admin
+        if (isAdmin) {
+          _loadJoinRequests(groupState, groupIdHex);
+        }
       }
     } catch (e) {
       if (mounted) {
         setState(() {
           _isLoadingMembers = false;
         });
+      }
+    }
+  }
+
+  Future<void> _loadJoinRequests(GroupState groupState, String groupIdHex) async {
+    if (!_isAdmin) return;
+
+    if (mounted) {
+      setState(() {
+        _isLoadingJoinRequests = true;
+      });
+    }
+
+    try {
+      final requests = await groupState.getJoinRequests(groupIdHex);
+      if (mounted) {
+        setState(() {
+          _joinRequests = requests;
+          _isLoadingJoinRequests = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoadingJoinRequests = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _approveJoinRequest(String pubkey) async {
+    if (_approvingPubkeys.contains(pubkey)) return;
+
+    setState(() {
+      _approvingPubkeys.add(pubkey);
+    });
+
+    try {
+      final groupState = context.read<GroupState>();
+      await groupState.approveJoinRequest(pubkey);
+
+      if (mounted) {
+        setState(() {
+          _approvingPubkeys.remove(pubkey);
+          // Remove from requests list
+          _joinRequests.removeWhere((r) => r.pubkey == pubkey);
+        });
+
+        // Reload members to show the new member
+        if (_lastGroupIdHex != null) {
+          _loadMembers(groupState, _lastGroupIdHex!);
+        }
+
+        // Show success message
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Request Approved'),
+            content: const Text('The user has been added to the group.'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _approvingPubkeys.remove(pubkey);
+        });
+
+        // Show error message
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Error'),
+            content: Text('Failed to approve request: $e'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        );
       }
     }
   }
@@ -236,8 +342,27 @@ class _MembersSidebarState extends State<MembersSidebar> {
         // Get group ID hex
         final groupIdHex = _groupIdToHex(activeGroup.id);
 
-        // Load members if not already loading
+        // Check if membership cache was invalidated (e.g., new member joined)
+        final currentCacheVersion = groupState.membershipCacheVersion;
+        final shouldReloadForCacheChange = 
+            _lastMembershipCacheVersion != currentCacheVersion &&
+            _lastMembershipCacheVersion != -1 &&
+            _lastGroupIdHex == groupIdHex;
+        
+        if (shouldReloadForCacheChange) {
+          _lastMembershipCacheVersion = currentCacheVersion;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            // Force reload members by resetting the loading state
+            setState(() {
+              _isLoadingMembers = true;
+            });
+            _loadMembers(groupState, groupIdHex);
+          });
+        }
+
+        // Load members if group changed
         if (_lastGroupIdHex != groupIdHex) {
+          _lastMembershipCacheVersion = currentCacheVersion;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _loadMembers(groupState, groupIdHex);
           });
@@ -286,6 +411,11 @@ class _MembersSidebarState extends State<MembersSidebar> {
                 child: ListView(
                   padding: const EdgeInsets.all(16),
                   children: [
+                    // Join requests section (admin only)
+                    if (_isAdmin) ...[
+                      _buildJoinRequestsSection(groupState, profileState),
+                      const SizedBox(height: 12),
+                    ],
                     // Invite section
                     _buildInviteSection(),
                     const SizedBox(height: 16),
@@ -314,6 +444,106 @@ class _MembersSidebarState extends State<MembersSidebar> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildJoinRequestsSection(GroupState groupState, ProfileState profileState) {
+    final hasRequests = _joinRequests.isNotEmpty;
+    
+    return Container(
+      decoration: BoxDecoration(
+        color: hasRequests 
+            ? CupertinoColors.systemYellow.withOpacity(0.15)
+            : CupertinoColors.systemGrey6,
+        borderRadius: BorderRadius.circular(12),
+        border: hasRequests
+            ? Border.all(
+                color: CupertinoColors.systemYellow.withOpacity(0.5),
+                width: 1,
+              )
+            : null,
+      ),
+      child: Column(
+        children: [
+          // Header - tappable to expand/collapse
+          CupertinoButton(
+            padding: EdgeInsets.zero,
+            onPressed: () {
+              setState(() {
+                _isJoinRequestsExpanded = !_isJoinRequestsExpanded;
+              });
+            },
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Icon(
+                    CupertinoIcons.person_badge_plus,
+                    color: hasRequests 
+                        ? CupertinoColors.systemOrange
+                        : CupertinoColors.secondaryLabel,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Join Requests${_joinRequests.isNotEmpty ? ' (${_joinRequests.length})' : ''}',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: hasRequests 
+                            ? CupertinoColors.label
+                            : CupertinoColors.secondaryLabel,
+                      ),
+                    ),
+                  ),
+                  if (_isLoadingJoinRequests)
+                    const CupertinoActivityIndicator(radius: 8)
+                  else
+                    Icon(
+                      _isJoinRequestsExpanded
+                          ? CupertinoIcons.chevron_up
+                          : CupertinoIcons.chevron_down,
+                      color: CupertinoColors.secondaryLabel,
+                      size: 16,
+                    ),
+                ],
+              ),
+            ),
+          ),
+          // Expandable content
+          if (_isJoinRequestsExpanded) ...[
+            Container(
+              height: 0.5,
+              color: CupertinoColors.separator,
+            ),
+            if (_joinRequests.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'No pending requests',
+                  style: TextStyle(
+                    color: CupertinoColors.secondaryLabel,
+                    fontSize: 14,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  children: _joinRequests.map((request) => _JoinRequestTile(
+                    request: request,
+                    profileState: profileState,
+                    isApproving: _approvingPubkeys.contains(request.pubkey),
+                    onApprove: () => _approveJoinRequest(request.pubkey),
+                  )).toList(),
+                ),
+              ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -657,6 +887,202 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
           // Loading indicator
           if (_isLoading)
             const CupertinoActivityIndicator(radius: 8),
+        ],
+      ),
+    );
+  }
+}
+
+/// Tile that displays a join request with approve button
+class _JoinRequestTile extends StatefulWidget {
+  final JoinRequest request;
+  final ProfileState profileState;
+  final bool isApproving;
+  final VoidCallback onApprove;
+
+  const _JoinRequestTile({
+    required this.request,
+    required this.profileState,
+    required this.isApproving,
+    required this.onApprove,
+  });
+
+  @override
+  State<_JoinRequestTile> createState() => _JoinRequestTileState();
+}
+
+class _JoinRequestTileState extends State<_JoinRequestTile> {
+  String? _username;
+  String? _profilePicture;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    try {
+      final profile = await widget.profileState.getProfile(widget.request.pubkey);
+      if (mounted) {
+        setState(() {
+          _username = profile?.getUsername();
+          _profilePicture = profile?.picture;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  String _formatPubkey(String pubkey) {
+    if (pubkey.length <= 16) return pubkey;
+    return '${pubkey.substring(0, 8)}...';
+  }
+
+  String _formatTimeAgo(DateTime dateTime) {
+    final now = DateTime.now();
+    final difference = now.difference(dateTime);
+
+    if (difference.inDays > 0) {
+      return '${difference.inDays}d ago';
+    } else if (difference.inHours > 0) {
+      return '${difference.inHours}h ago';
+    } else if (difference.inMinutes > 0) {
+      return '${difference.inMinutes}m ago';
+    } else {
+      return 'Just now';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final displayName = _username ?? _formatPubkey(widget.request.pubkey);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: CupertinoColors.systemBackground,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: CupertinoColors.separator,
+          width: 0.5,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              // Avatar
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CupertinoColors.systemGrey4,
+                  image: _profilePicture != null
+                      ? DecorationImage(
+                          image: NetworkImage(_profilePicture!),
+                          fit: BoxFit.cover,
+                        )
+                      : null,
+                ),
+                child: _profilePicture == null
+                    ? const Icon(
+                        CupertinoIcons.person_fill,
+                        size: 18,
+                        color: CupertinoColors.systemGrey,
+                      )
+                    : null,
+              ),
+              const SizedBox(width: 10),
+              // Name and time
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            displayName,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (_isLoading)
+                          const CupertinoActivityIndicator(radius: 6),
+                      ],
+                    ),
+                    Text(
+                      _formatTimeAgo(widget.request.createdAt),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: CupertinoColors.secondaryLabel,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          // Reason (if any)
+          if (widget.request.reason != null && widget.request.reason!.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemGrey6,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                widget.request.reason!,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: CupertinoColors.secondaryLabel,
+                  fontStyle: FontStyle.italic,
+                ),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+          // Approve button
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: CupertinoButton(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              color: CupertinoColors.systemGreen,
+              borderRadius: BorderRadius.circular(8),
+              minSize: 0,
+              onPressed: widget.isApproving ? null : widget.onApprove,
+              child: widget.isApproving
+                  ? const CupertinoActivityIndicator(
+                      color: CupertinoColors.white,
+                      radius: 10,
+                    )
+                  : const Text(
+                      'Approve',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: CupertinoColors.white,
+                      ),
+                    ),
+            ),
+          ),
         ],
       ),
     );
