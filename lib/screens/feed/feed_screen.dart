@@ -14,6 +14,7 @@ import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:comunifi/screens/feed/edit_group_modal.dart';
+import 'package:comunifi/screens/feed/group_settings_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
 import 'package:comunifi/widgets/members_sidebar.dart';
@@ -2030,6 +2031,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   final double topPadding;
   final bool isAdmin;
   final VoidCallback? onEditTap;
+  final VoidCallback? onSettingsTap;
 
   // Banner heights
   static const double _maxBannerHeight = 200.0;
@@ -2045,6 +2047,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
     required this.topPadding,
     required this.isAdmin,
     this.onEditTap,
+    this.onSettingsTap,
   });
 
   @override
@@ -2131,6 +2134,29 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
                     ),
                   ),
           ),
+          // Settings button in top-right corner (admin only)
+          if (isAdmin && onSettingsTap != null)
+            Positioned(
+              top: topPadding + 8,
+              right: 8,
+              child: CupertinoButton(
+                padding: EdgeInsets.zero,
+                onPressed: onSettingsTap,
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.black.withOpacity(0.4),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    CupertinoIcons.gear_alt_fill,
+                    size: 20,
+                    color: CupertinoColors.white,
+                  ),
+                ),
+              ),
+            ),
           // Profile photo overlapping the banner
           Positioned(
             left: 16,
@@ -2339,6 +2365,25 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
     showEditGroupModal(context, effectiveAnnouncement, onSaved: () {});
   }
 
+  void _showSettingsModal() {
+    final groupIdHex = _groupIdToHex(widget.group);
+    final announcement = widget.groupState.discoveredGroups
+        .cast<GroupAnnouncement?>()
+        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
+
+    final effectiveAnnouncement =
+        announcement ??
+        GroupAnnouncement(
+          eventId: '',
+          pubkey: '',
+          name: widget.group.name,
+          mlsGroupId: groupIdHex,
+          createdAt: DateTime.now(),
+        );
+
+    showGroupSettingsModal(context, effectiveAnnouncement);
+  }
+
   @override
   Widget build(BuildContext context) {
     final topPadding = MediaQuery.of(context).padding.top;
@@ -2357,6 +2402,7 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
         topPadding: topPadding,
         isAdmin: _isAdmin,
         onEditTap: _showEditModal,
+        onSettingsTap: _isAdmin ? _showSettingsModal : null,
       ),
     );
   }
