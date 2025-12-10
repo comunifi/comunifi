@@ -102,7 +102,7 @@ jobs:
           IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
           echo "Using identity: $IDENTITY"
 
-          # 1. Sign all Mach-O binaries inside Frameworks ONLY (not the main app binary yet)
+          # 1. Sign all Mach-O binaries inside Frameworks ONLY
           echo "=== Signing binaries inside Frameworks ==="
           find "$APP_PATH/Contents/Frameworks" -type f | while read -r binary; do
             if file "$binary" | grep -q "Mach-O"; then
@@ -113,24 +113,24 @@ jobs:
 
           # 2. Sign XPC services
           echo "=== Signing XPC services ==="
-          find "$APP_PATH" -type d -name "*.xpc" -print0 | xargs -0 -I {} sh -c '
-            echo "Signing XPC service: {}"
-            codesign --force --timestamp --options=runtime --sign "'"$IDENTITY"'" "{}"
-          '
+          find "$APP_PATH" -type d -name "*.xpc" | while read -r xpc; do
+            echo "Signing XPC service: $xpc"
+            codesign --force --timestamp --options=runtime --sign "$IDENTITY" "$xpc"
+          done
 
           # 3. Sign nested .app bundles (like Sparkle's Updater.app)
           echo "=== Signing nested apps ==="
-          find "$APP_PATH/Contents/Frameworks" -type d -name "*.app" -print0 | xargs -0 -I {} sh -c '
-            echo "Signing nested app: {}"
-            codesign --force --timestamp --options=runtime --sign "'"$IDENTITY"'" "{}"
-          '
+          find "$APP_PATH/Contents/Frameworks" -type d -name "*.app" | while read -r app; do
+            echo "Signing nested app: $app"
+            codesign --force --timestamp --options=runtime --sign "$IDENTITY" "$app"
+          done
 
           # 4. Sign all frameworks
           echo "=== Signing frameworks ==="
-          find "$APP_PATH/Contents/Frameworks" -type d -name "*.framework" -print0 | xargs -0 -I {} sh -c '
-            echo "Signing framework: {}"
-            codesign --force --timestamp --options=runtime --sign "'"$IDENTITY"'" "{}"
-          '
+          find "$APP_PATH/Contents/Frameworks" -maxdepth 1 -type d -name "*.framework" | while read -r framework; do
+            echo "Signing framework: $framework"
+            codesign --force --timestamp --options=runtime --sign "$IDENTITY" "$framework"
+          done
 
           # 5. Sign the main app bundle (this signs the main executable too)
           echo "=== Signing main app ==="
