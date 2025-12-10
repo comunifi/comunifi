@@ -1,3 +1,6 @@
+import 'dart:io' show Platform;
+
+import 'package:auto_updater/auto_updater.dart';
 import 'package:comunifi/routes/routes.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/state.dart';
@@ -13,6 +16,15 @@ late final GroupState _groupState;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Configure auto-updater (macOS only)
+  if (Platform.isMacOS) {
+    await autoUpdater.setFeedURL(
+      'https://github.com/comunifi/comunifi/releases/latest/download/appcast.xml',
+    );
+    await autoUpdater.setScheduledCheckInterval(3600); // Check hourly
+    await autoUpdater.checkForUpdates(inBackground: true);
+  }
 
   // Create GroupState and wait for keys group initialization
   _groupState = GroupState();

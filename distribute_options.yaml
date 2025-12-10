@@ -1,0 +1,18 @@
+variables:
+  GITHUB_TOKEN: ${GITHUB_TOKEN}
+output: dist/
+releases:
+  - name: macos
+    jobs:
+      - name: release-macos-dmg
+        package:
+          platform: macos
+          target: dmg
+          build_args:
+            dart-define:
+              APP_ENV: production
+        publish:
+          target: github
+          args:
+            repo_owner: comunifi
+            repo_name: comunifi

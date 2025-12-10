@@ -28,5 +28,11 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/comunifi/comunifi/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>fLAOVNd4l6aE8F4dWMdpsZvw8xwGeJlVbVefDcZaBBs=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 </dict>
 </plist>

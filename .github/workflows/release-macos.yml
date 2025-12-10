@@ -1,0 +1,129 @@
+name: Release macOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract version from pubspec.yaml
+        id: version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Extracted version: ${VERSION}"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install CocoaPods
+        run: |
+          cd macos
+          pod install
+
+      - name: Install fastforge
+        run: dart pub global activate fastforge
+
+      - name: Setup Sparkle private key
+        run: |
+          # Import the Sparkle private key for signing updates
+          echo "${{ secrets.SPARKLE_PRIVATE_KEY }}" | ./macos/Pods/Sparkle/bin/generate_keys -f /dev/stdin
+
+      - name: Build macOS DMG
+        run: |
+          flutter pub get
+          flutter build macos --release
+
+      - name: Create DMG
+        run: |
+          # Create output directory
+          mkdir -p dist
+
+          # Get app name and create DMG
+          APP_NAME="Comunifi"
+          APP_PATH="build/macos/Build/Products/Release/${APP_NAME}.app"
+          DMG_NAME="comunifi-${{ steps.version.outputs.version }}.dmg"
+
+          # Create DMG using hdiutil
+          hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_PATH}" -ov -format UDZO "dist/${DMG_NAME}"
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG_PATH="dist/comunifi-${{ steps.version.outputs.version }}.dmg"
+
+          # Submit for notarization
+          xcrun notarytool submit "${DMG_PATH}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_APP_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+
+          # Staple the notarization ticket
+          xcrun stapler staple "${DMG_PATH}"
+
+      - name: Sign update for Sparkle
+        id: sign
+        run: |
+          DMG_PATH="dist/comunifi-${{ steps.version.outputs.version }}.dmg"
+
+          # Sign the DMG and capture the signature
+          SIGNATURE=$(./macos/Pods/Sparkle/bin/sign_update "${DMG_PATH}" | grep "sparkle:edSignature" | sed 's/.*sparkle:edSignature="\([^"]*\)".*/\1/')
+          DMG_SIZE=$(stat -f%z "${DMG_PATH}")
+
+          echo "signature=${SIGNATURE}" >> $GITHUB_OUTPUT
+          echo "size=${DMG_SIZE}" >> $GITHUB_OUTPUT
+
+      - name: Generate appcast.xml
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SIGNATURE="${{ steps.sign.outputs.signature }}"
+          SIZE="${{ steps.sign.outputs.size }}"
+          PUB_DATE=$(date -R)
+
+          cat > dist/appcast.xml << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0"
+              xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+              xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <channel>
+                  <title>Comunifi Updates</title>
+                  <link>https://github.com/comunifi/comunifi/releases</link>
+                  <description>Most recent updates to Comunifi</description>
+                  <language>en</language>
+                  <item>
+                      <title>Version ${VERSION}</title>
+                      <sparkle:version>${VERSION}</sparkle:version>
+                      <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+                      <pubDate>${PUB_DATE}</pubDate>
+                      <sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+                      <enclosure url="https://github.com/comunifi/comunifi/releases/download/v${VERSION}/comunifi-${VERSION}.dmg" sparkle:edSignature="${SIGNATURE}" length="${SIZE}" type="application/octet-stream"/>
+                      <sparkle:releaseNotesLink>https://github.com/comunifi/comunifi/releases/tag/v${VERSION}</sparkle:releaseNotesLink>
+                  </item>
+              </channel>
+          </rss>
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/comunifi-${{ steps.version.outputs.version }}.dmg
+            dist/appcast.xml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
