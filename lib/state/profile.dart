@@ -341,6 +341,49 @@ class ProfileState with ChangeNotifier {
     }
   }
 
+  /// Get profile fresh from relay, bypassing cache
+  /// Use this when you need the most up-to-date profile (e.g., after recovery)
+  Future<ProfileData?> getProfileFresh(String pubkey) async {
+    if (_profileService == null) {
+      debugPrint('Profile service not initialized');
+      return null;
+    }
+
+    try {
+      debugPrint('Fetching fresh profile for ${pubkey.substring(0, 8)}...');
+      final profile = await _profileService!.getProfileFresh(pubkey);
+
+      if (profile != null) {
+        // Check if profile has a real name
+        final hasRealName =
+            (profile.name != null && profile.name!.isNotEmpty) ||
+            (profile.displayName != null && profile.displayName!.isNotEmpty);
+
+        if (hasRealName) {
+          debugPrint(
+            'Fresh profile found: ${profile.getUsername()}, picture: ${profile.picture != null}',
+          );
+          // Update local username and cache
+          await _updateLocalUsername(pubkey, profile.getUsername());
+          _profiles[pubkey] = profile;
+          safeNotifyListeners();
+        } else if (profile.picture != null) {
+          // Profile has picture but no name - still useful
+          debugPrint('Fresh profile has picture but no name');
+          _profiles[pubkey] = profile;
+          safeNotifyListeners();
+        }
+        return profile;
+      }
+
+      debugPrint('No fresh profile found for ${pubkey.substring(0, 8)}...');
+      return null;
+    } catch (e) {
+      debugPrint('Error fetching fresh profile: $e');
+      return null;
+    }
+  }
+
   /// Get multiple profiles at once
   Future<Map<String, ProfileData?>> getProfiles(List<String> pubkeys) async {
     if (_profileService == null) {

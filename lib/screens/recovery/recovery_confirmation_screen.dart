@@ -38,23 +38,57 @@ class _RecoveryConfirmationScreenState
 
       // Get public key
       final pubkey = await groupState.getNostrPublicKey();
-      if (pubkey != null) {
-        // Load profile from relay
-        final profile = await profileState.getProfile(pubkey);
+      if (pubkey == null) {
+        setState(() {
+          _isLoading = false;
+        });
+        return;
+      }
+
+      debugPrint(
+        'RecoveryConfirmation: Loading profile for ${pubkey.substring(0, 8)}...',
+      );
+
+      // Try to fetch profile fresh from relay with retries
+      // This is important after recovery since local cache is empty
+      for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          debugPrint('RecoveryConfirmation: Retry attempt $attempt');
+          await Future.delayed(const Duration(seconds: 1));
+        }
+
+        // Force fresh fetch from relay
+        final profile = await profileState.getProfileFresh(pubkey);
         if (profile != null) {
-          setState(() {
-            _username = profile.getUsername();
-            _profilePicture = profile.picture;
-            _isLoading = false;
-          });
-          return;
+          final username = profile.getUsername();
+          debugPrint(
+            'RecoveryConfirmation: Found profile with username: $username',
+          );
+
+          // Check if we got a real username (not just pubkey prefix)
+          if (profile.name != null ||
+              profile.displayName != null ||
+              profile.picture != null) {
+            setState(() {
+              _username = username;
+              _profilePicture = profile.picture;
+              _isLoading = false;
+            });
+            return;
+          }
         }
       }
 
+      // Fallback to cached profile if fresh fetch failed
+      debugPrint('RecoveryConfirmation: Fresh fetch failed, trying cached');
+      final cachedProfile = await profileState.getProfile(pubkey);
       setState(() {
+        _username = cachedProfile?.getUsername();
+        _profilePicture = cachedProfile?.picture;
         _isLoading = false;
       });
     } catch (e) {
+      debugPrint('RecoveryConfirmation: Error loading profile: $e');
       setState(() {
         _error = 'Failed to load profile: $e';
         _isLoading = false;
