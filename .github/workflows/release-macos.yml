@@ -135,9 +135,10 @@ jobs:
             codesign --force --timestamp --options=runtime --sign "$IDENTITY" "$framework"
           done
 
-          # 5. Sign the main app bundle (this signs the main executable too)
-          echo "=== Signing main app ==="
-          codesign --force --timestamp --options=runtime --sign "$IDENTITY" "$APP_PATH"
+          # 5. Sign the main app bundle with entitlements (this signs the main executable too)
+          echo "=== Signing main app with entitlements ==="
+          ENTITLEMENTS_PATH="macos/Runner/Release.entitlements"
+          codesign --force --timestamp --options=runtime --entitlements "$ENTITLEMENTS_PATH" --sign "$IDENTITY" "$APP_PATH"
 
           # 6. Verify the signature
           echo "=== Verifying signature ==="
