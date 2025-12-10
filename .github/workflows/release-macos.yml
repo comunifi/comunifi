@@ -74,7 +74,23 @@ jobs:
           echo "${{ secrets.SPARKLE_PRIVATE_KEY }}" | ./macos/Pods/Sparkle/bin/generate_keys -f /dev/stdin
 
       - name: Build macOS app
-        run: flutter build macos --release
+        run: |
+          # Build the app with manual signing for Developer ID distribution
+          flutter build macos --release \
+            --config-only
+
+          # Build using xcodebuild with Developer ID signing
+          xcodebuild -workspace macos/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -derivedDataPath build/macos \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
+            -allowProvisioningUpdates
 
       - name: Create DMG
         run: |
@@ -85,6 +101,13 @@ jobs:
           APP_NAME="Comunifi"
           APP_PATH="build/macos/Build/Products/Release/${APP_NAME}.app"
           DMG_NAME="comunifi-${{ steps.version.outputs.version }}.dmg"
+
+          # Verify app exists
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "App not found at ${APP_PATH}, checking alternative location..."
+            APP_PATH=$(find build/macos -name "*.app" -type d | head -1)
+            echo "Found app at: ${APP_PATH}"
+          fi
 
           # Create DMG using hdiutil
           hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_PATH}" -ov -format UDZO "dist/${DMG_NAME}"
