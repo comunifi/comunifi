@@ -73,27 +73,48 @@ jobs:
           # Import the Sparkle private key for signing updates
           echo "${{ secrets.SPARKLE_PRIVATE_KEY }}" | ./macos/Pods/Sparkle/bin/generate_keys -f /dev/stdin
 
-      - name: Build macOS app
-        env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Build macOS app (unsigned)
         run: |
-          # Build the app with manual signing for Developer ID distribution
+          # Build the app without code signing first
           flutter build macos --release \
             --config-only
 
-          # Build using xcodebuild with Developer ID signing
+          # Build using xcodebuild without signing
           xcodebuild -workspace macos/Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -derivedDataPath build/macos \
-            DEVELOPMENT_TEAM="${APPLE_TEAM_ID}" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Developer ID Application" \
-            CODE_SIGNING_REQUIRED=YES \
-            CODE_SIGNING_ALLOWED=YES \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
-            -allowProvisioningUpdates
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="-"
+
+      - name: Sign app with Developer ID
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          APP_PATH="build/macos/Build/Products/Release/Comunifi.app"
+
+          # Find the signing identity
+          IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "Using identity: $IDENTITY"
+
+          # Sign all frameworks and dylibs inside the app first (deep signing)
+          find "$APP_PATH" -type f \( -name "*.framework" -o -name "*.dylib" \) -exec \
+            codesign --force --timestamp --options=runtime --sign "$IDENTITY" {} \;
+
+          # Sign all .app bundles inside (like Sparkle's updater)
+          find "$APP_PATH" -type d -name "*.app" -exec \
+            codesign --force --timestamp --options=runtime --sign "$IDENTITY" {} \;
+
+          # Sign all frameworks directories
+          find "$APP_PATH/Contents/Frameworks" -type d -name "*.framework" -exec \
+            codesign --force --timestamp --options=runtime --sign "$IDENTITY" {} \;
+
+          # Sign the main app bundle
+          codesign --force --timestamp --options=runtime --sign "$IDENTITY" "$APP_PATH"
+
+          # Verify the signature
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
       - name: Create DMG
         run: |
