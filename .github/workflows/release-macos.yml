@@ -3,6 +3,9 @@ name: Release macOS
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release:
     runs-on: macos-latest
