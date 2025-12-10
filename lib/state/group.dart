@@ -320,18 +320,16 @@ class GroupState with ChangeNotifier {
         }
       }
 
-      if (personalGroup == null) {
-        // Create new personal group
-        personalGroup = await _mlsService!.createGroup(
-          creatorUserId: 'self',
-          groupName: 'Personal',
-        );
+      // Only set if we found an existing personal group
+      // New accounts are created explicitly via createNewAccount()
+      if (personalGroup != null) {
+        _personalGroup = personalGroup;
+        debugPrint('Personal group loaded: ${_personalGroup!.id.bytes}');
+      } else {
+        debugPrint('No existing personal group found (new user)');
       }
 
-      _personalGroup = personalGroup;
-      debugPrint('Personal group initialized: ${_personalGroup!.id.bytes}');
-
-      // Signal that personal group initialization is complete
+      // Signal that personal group initialization check is complete
       if (!_personalGroupInitCompleter.isCompleted) {
         _personalGroupInitCompleter.complete();
       }
@@ -341,6 +339,47 @@ class GroupState with ChangeNotifier {
       if (!_personalGroupInitCompleter.isCompleted) {
         _personalGroupInitCompleter.complete();
       }
+    }
+  }
+
+  /// Create a new account (personal group + Nostr identity)
+  /// This should only be called when user explicitly creates a new account
+  Future<void> createNewAccount() async {
+    if (_personalGroup != null) {
+      debugPrint('Account already exists');
+      return;
+    }
+
+    if (_mlsService == null) {
+      throw Exception('MLS service not initialized');
+    }
+
+    if (_nostrService == null || !_isConnected) {
+      throw Exception('Not connected to relay');
+    }
+
+    try {
+      // Create new personal group
+      final personalGroup = await _mlsService!.createGroup(
+        creatorUserId: 'self',
+        groupName: 'Personal',
+      );
+
+      _personalGroup = personalGroup;
+      debugPrint('New personal group created: ${_personalGroup!.id.bytes}');
+
+      // Generate Nostr key for this new account
+      final groupIdHex = _personalGroup!.id.bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      // For new accounts, directly generate and publish the key
+      await _generateAndPublishNostrKey(groupIdHex);
+
+      safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Failed to create new account: $e');
+      rethrow;
     }
   }
 
@@ -4779,6 +4818,14 @@ class GroupState with ChangeNotifier {
 
   /// Generate recovery payload for the personal group
   Future<RecoveryPayload?> generateRecoveryPayload() async {
+    // Wait for personal group initialization to complete (with timeout)
+    try {
+      await waitForKeysGroupInit().timeout(const Duration(seconds: 10));
+    } catch (e) {
+      debugPrint('Timeout waiting for personal group initialization: $e');
+      return null;
+    }
+
     final personalGroup = await _getPersonalGroup();
     if (personalGroup == null) {
       debugPrint('Cannot generate recovery: no personal group');

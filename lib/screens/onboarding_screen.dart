@@ -3,7 +3,6 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
-import 'package:comunifi/screens/onboarding/profile_setup_modal.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -48,39 +47,40 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       final groupState = context.read<GroupState>();
       final profileState = context.read<ProfileState>();
 
+      // Wait for MLS infrastructure to be ready
+      await groupState.waitForKeysGroupInit();
+
       // Wait for connection if not connected
       if (!groupState.isConnected) {
         // Wait a bit for connection
         await Future.delayed(const Duration(milliseconds: 1000));
       }
 
-      // Ensure user has keys and profile
+      // Create the new account (personal group + Nostr identity)
+      await groupState.createNewAccount();
+
+      // Get the newly created keys
       final pubkey = await groupState.getNostrPublicKey();
-      if (pubkey != null) {
-        final privateKey = await groupState.getNostrPrivateKey();
-        if (privateKey != null) {
-          await profileState.ensureUserProfile(
-            pubkey: pubkey,
-            privateKey: privateKey,
-          );
-
-          // Announce the personal group (already created at startup)
-          await groupState.ensurePersonalGroup();
-
-          // Show profile setup modal
-          if (mounted) {
-            await showCupertinoModalPopup<bool>(
-              context: context,
-              builder: (context) =>
-                  ProfileSetupModal(pubkey: pubkey, privateKey: privateKey),
-            );
-          }
-        }
+      if (pubkey == null) {
+        throw Exception('Failed to initialize account keys');
       }
 
-      // Navigate to backup prompt screen (new flow)
+      final privateKey = await groupState.getNostrPrivateKey();
+      if (privateKey == null) {
+        throw Exception('Failed to initialize account keys');
+      }
+
+      await profileState.ensureUserProfile(
+        pubkey: pubkey,
+        privateKey: privateKey,
+      );
+
+      // Announce the personal group to the relay
+      await groupState.ensurePersonalGroup();
+
+      // Navigate to profile setup screen
       if (mounted) {
-        context.go('/onboarding/backup');
+        context.go('/onboarding/profile');
       }
     } catch (e) {
       if (mounted) {

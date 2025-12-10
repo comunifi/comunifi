@@ -573,7 +573,37 @@ class ProfileState with ChangeNotifier {
         return;
       }
 
-      // Check if we already have a profile
+      // First check if we already have a cached profile - don't overwrite with
+      // potentially stale data from the relay
+      final cachedProfile = _profiles[finalPubkey];
+      if (cachedProfile != null &&
+          (cachedProfile.name != null || cachedProfile.displayName != null)) {
+        // Check if we need to update the cached profile with HPKE key
+        final needsHpkeUpdate =
+            hpkePublicKeyHex != null &&
+            hpkePublicKeyHex.isNotEmpty &&
+            cachedProfile.mlsHpkePublicKey != hpkePublicKeyHex;
+
+        if (!needsHpkeUpdate) {
+          debugPrint('Using cached profile: ${cachedProfile.getUsername()}');
+          return;
+        }
+
+        // Need to update cached profile with HPKE key
+        debugPrint('Updating cached profile with HPKE public key');
+        final finalPrivateKey = privateKey ?? await _getNostrPrivateKey();
+        if (finalPrivateKey != null) {
+          await _updateProfileWithHpkeKey(
+            finalPubkey,
+            finalPrivateKey,
+            cachedProfile,
+            hpkePublicKeyHex,
+          );
+        }
+        return;
+      }
+
+      // No cached profile, check the relay
       debugPrint(
         'Checking for existing profile for pubkey: ${finalPubkey.substring(0, 8)}...',
       );

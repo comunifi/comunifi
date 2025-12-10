@@ -99,7 +99,7 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
 
                   // Title
                   const Text(
-                    'Save Your Recovery Link',
+                    'Your Account',
                     style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                     textAlign: TextAlign.center,
                   ),
@@ -107,8 +107,7 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
 
                   // Description
                   Text(
-                    'Your recovery link lets you restore your account on another device. '
-                    'Save it somewhere safe, like a password manager or secure note.',
+                    'Your personal recovery link lets you restore all your data on a new device. Save it somewhere safe.',
                     style: TextStyle(
                       fontSize: 16,
                       color: CupertinoColors.secondaryLabel.resolveFrom(
@@ -142,7 +141,7 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Without this link, you won\'t be able to recover your account if you lose access to this device.',
+                            'We do not store your credentials. This link is the only way to recover your account and your data.',
                             style: TextStyle(
                               fontSize: 14,
                               color: CupertinoColors.systemOrange.resolveFrom(
@@ -189,26 +188,13 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
                           ? const CupertinoActivityIndicator(
                               color: CupertinoColors.white,
                             )
-                          : Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  _hasSaved
-                                      ? CupertinoIcons.checkmark
-                                      : CupertinoIcons.share,
-                                  size: 18,
-                                  color: CupertinoColors.white,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  _hasSaved ? 'Continue' : 'Save Recovery Link',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 16,
-                                    color: CupertinoColors.white,
-                                  ),
-                                ),
-                              ],
+                          : Text(
+                              _hasSaved ? 'Continue' : 'Save Recovery Link',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 16,
+                                color: CupertinoColors.white,
+                              ),
                             ),
                     ),
                   ),

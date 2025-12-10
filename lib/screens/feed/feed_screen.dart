@@ -566,7 +566,13 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     child: const Icon(CupertinoIcons.bars),
                   ),
                   middle: const Text('Explore Groups'),
-                  trailing: _UsernameButton(),
+                  trailing: _UsernameButton(
+                    onTap: () {
+                      setState(() {
+                        _isRightSidebarOpen = true;
+                      });
+                    },
+                  ),
                 ),
                 child: SafeArea(
                   child: _ExploreGroupsView(
@@ -590,7 +596,13 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     child: const Icon(CupertinoIcons.bars),
                   ),
                   middle: Text(_getGroupDisplayName(groupState, activeGroup)),
-                  trailing: _UsernameButton(),
+                  trailing: _UsernameButton(
+                    onTap: () {
+                      setState(() {
+                        _isRightSidebarOpen = true;
+                      });
+                    },
+                  ),
                 ),
                 child: SafeArea(
                   child: _buildFeedContent(feedState, groupState, activeGroup),
@@ -954,7 +966,9 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
 }
 
 class _UsernameButton extends StatefulWidget {
-  const _UsernameButton();
+  final VoidCallback? onTap;
+
+  const _UsernameButton({this.onTap});
 
   @override
   State<_UsernameButton> createState() => _UsernameButtonState();
@@ -996,10 +1010,45 @@ class _UsernameButtonState extends State<_UsernameButton> {
             ? '${_pubkey!.substring(0, 6)}...${_pubkey!.substring(_pubkey!.length - 6)}'
             : _pubkey!);
 
-    return Text(
-      username,
-      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+    final profilePicture = profile?.picture;
+
+    final content = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          username,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(width: 8),
+        Container(
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: CupertinoColors.systemGrey4,
+            image: profilePicture != null
+                ? DecorationImage(
+                    image: NetworkImage(profilePicture),
+                    fit: BoxFit.cover,
+                  )
+                : null,
+          ),
+          child: profilePicture == null
+              ? const Icon(
+                  CupertinoIcons.person_fill,
+                  size: 16,
+                  color: CupertinoColors.systemGrey,
+                )
+              : null,
+        ),
+      ],
     );
+
+    if (widget.onTap != null) {
+      return GestureDetector(onTap: widget.onTap, child: content);
+    }
+
+    return content;
   }
 }
 

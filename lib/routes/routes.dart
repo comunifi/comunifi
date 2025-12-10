@@ -1,6 +1,7 @@
 import 'package:comunifi/screens/feed/feed_screen.dart';
 import 'package:comunifi/screens/onboarding_screen.dart';
 import 'package:comunifi/screens/onboarding/backup_prompt_screen.dart';
+import 'package:comunifi/screens/onboarding/profile_setup_screen.dart';
 import 'package:comunifi/screens/post/post_detail_screen.dart';
 import 'package:comunifi/screens/profile_screen.dart';
 import 'package:comunifi/screens/recovery/receive_recovery_screen.dart';
@@ -30,6 +31,14 @@ GoRouter createRouter(
       parentNavigatorKey: rootNavigatorKey,
       builder: (context, state) {
         return const OnboardingScreen();
+      },
+    ),
+    GoRoute(
+      name: 'ProfileSetup',
+      path: '/onboarding/profile',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return const ProfileSetupScreen();
       },
     ),
     GoRoute(
