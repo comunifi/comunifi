@@ -33,7 +33,8 @@ class NostrService {
   final Map<String, StreamController<NostrEventModel>> _subscriptions = {};
   final Map<String, VoidCallback> _eoseCompleters = {};
   final Map<String, List<Future<void>>> _pendingDecryptions = {};
-  final Set<String> _processedEnvelopes = {}; // Track processed envelope IDs to prevent duplicate decryption
+  final Set<String> _processedEnvelopes =
+      {}; // Track processed envelope IDs to prevent duplicate decryption
   final Random _random = Random();
 
   // Database caching
@@ -304,8 +305,7 @@ class NostrService {
     // Calculate delay with exponential backoff
     final delay = Duration(
       milliseconds: min(
-        _initialReconnectDelay.inMilliseconds *
-            (1 << (_reconnectAttempts - 1)),
+        _initialReconnectDelay.inMilliseconds * (1 << (_reconnectAttempts - 1)),
         _maxReconnectDelay.inMilliseconds,
       ),
     );
@@ -470,7 +470,10 @@ class NostrService {
       // If this is an encrypted envelope (kind 1059), decrypt it
       if (event.isEncryptedEnvelope) {
         // Track the decryption future so we can wait for it before completing EOSE
-        final decryptionFuture = _handleEncryptedEnvelope(event, subscriptionId);
+        final decryptionFuture = _handleEncryptedEnvelope(
+          event,
+          subscriptionId,
+        );
         _pendingDecryptions.putIfAbsent(subscriptionId, () => []);
         _pendingDecryptions[subscriptionId]!.add(decryptionFuture);
         return;
@@ -512,9 +515,15 @@ class NostrService {
       // Get MLS group ID from envelope
       final groupIdHex = envelope.encryptedEnvelopeMlsGroupId;
       if (groupIdHex == null || _mlsGroupResolver == null) {
+        // No MLS group ID - this might be a NIP-44 encrypted event (e.g., device transfer)
+        // Emit the raw envelope to subscriptions so they can handle it with their own decryption
         debugPrint(
-          'Skipping envelope ${envelope.id.substring(0, 8)}...: no group ID or resolver',
+          'Envelope ${envelope.id.substring(0, 8)}... has no MLS group ID, emitting raw event',
         );
+        final controller = _subscriptions[subscriptionId];
+        if (controller != null && !controller.isClosed) {
+          controller.add(envelope);
+        }
         return;
       }
 
@@ -583,11 +592,11 @@ class NostrService {
           emittedCount++;
         }
       }
-      
+
       debugPrint(
         'Emitted decrypted event ${decryptedEvent.id.substring(0, 8)}... to $emittedCount active subscription(s)',
       );
-      
+
       if (emittedCount == 0) {
         debugPrint(
           'WARNING: No active subscriptions to receive decrypted event ${decryptedEvent.id.substring(0, 8)}...',
@@ -948,13 +957,10 @@ class NostrService {
 
     // Create tags for the envelope with client signature
     final envelopeCreatedAt = DateTime.now();
-    final tags = await addClientTagsWithSignature(
-      [
-        ['p', recipient],
-        ['g', mlsGroupId],
-      ],
-      createdAt: envelopeCreatedAt,
-    );
+    final tags = await addClientTagsWithSignature([
+      ['p', recipient],
+      ['g', mlsGroupId],
+    ], createdAt: envelopeCreatedAt);
 
     // Create and sign the envelope using dart_nostr (this computes ID and signs)
     final nostrEnvelope = NostrEvent.fromPartialData(

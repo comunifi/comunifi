@@ -101,15 +101,31 @@ class _ReceiveRecoveryScreenState extends State<ReceiveRecoveryScreen> {
 
   Future<void> _handleTransferEvent(Map<String, dynamic> event) async {
     try {
-      // Get sender pubkey from event
-      final senderPubkey = event['pubkey'] as String;
+      // Get Nostr pubkey of sender (for confirmation)
+      final nostrPubkey = event['pubkey'] as String;
 
-      // Decrypt the content using NIP-44
+      // Get ephemeral sender pubkey from tags (used for NIP-44 decryption)
+      final tags = event['tags'] as List<dynamic>?;
+      String? ephemeralPubkey;
+      if (tags != null) {
+        for (final tag in tags) {
+          if (tag is List && tag.length >= 2 && tag[0] == 'sender_pubkey') {
+            ephemeralPubkey = tag[1] as String;
+            break;
+          }
+        }
+      }
+
+      if (ephemeralPubkey == null) {
+        throw Exception('Missing sender pubkey in event');
+      }
+
+      // Decrypt the content using NIP-44 with the ephemeral sender pubkey
       final encryptedContent = event['content'] as String;
       final decrypted = await Nip44Crypto.decrypt(
         payload: encryptedContent,
         recipientPrivateKey: _tempKeyPair!.privateKey,
-        senderPublicKey: _hexToBytes(senderPubkey),
+        senderPublicKey: _hexToBytes(ephemeralPubkey),
       );
 
       // Parse the recovery payload
@@ -130,8 +146,8 @@ class _ReceiveRecoveryScreenState extends State<ReceiveRecoveryScreen> {
 
       await _restoreFromPayload(payload);
 
-      // Send confirmation back to sender
-      await _sendConfirmation(senderPubkey);
+      // Send confirmation back to sender's Nostr pubkey
+      await _sendConfirmation(nostrPubkey);
     } catch (e) {
       setState(() {
         _error = 'Failed to process transfer: $e';

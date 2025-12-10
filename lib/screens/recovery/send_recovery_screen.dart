@@ -94,7 +94,7 @@ class _SendRecoveryScreenState extends State<SendRecoveryScreen> {
       );
 
       // Create gift-wrapped event (kind 1059)
-      // Use the sender's ephemeral pubkey
+      // Include the ephemeral sender pubkey so receiver can decrypt
       final privateKey = await groupState.getNostrPrivateKey();
       if (privateKey == null) {
         throw Exception('No private key available');
@@ -109,6 +109,8 @@ class _SendRecoveryScreenState extends State<SendRecoveryScreen> {
         keyPairs: keyPairs,
         tags: [
           ['p', qrData.tempPubkey],
+          // Include ephemeral sender pubkey for decryption
+          ['sender_pubkey', senderKeyPair.publicKeyHex],
         ],
         createdAt: createdAt,
       );
