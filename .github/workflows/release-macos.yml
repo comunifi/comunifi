@@ -28,6 +28,10 @@ jobs:
           CLIENT_SIGNATURE_PRIVATE_KEY=${PRIVATE_KEY}
           EOF
 
+      - name: Create empty .env.debug file
+        run: |
+          touch .env.debug
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
