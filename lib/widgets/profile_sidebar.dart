@@ -4,9 +4,11 @@ import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart' show ProfileData;
+import 'package:comunifi/screens/recovery/send_recovery_screen.dart';
 
 class ProfileSidebar extends StatefulWidget {
   final VoidCallback onClose;
@@ -43,6 +45,9 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
 
   // Danger zone state
   bool _isDeletingData = false;
+
+  // Device linking state
+  bool _isGeneratingRecoveryLink = false;
 
   @override
   void initState() {
@@ -280,6 +285,51 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
         setState(() {
           _isUpdatingUsername = false;
           _updateUsernameError = e.toString();
+        });
+      }
+    }
+  }
+
+  Future<void> _addNewDevice() async {
+    Navigator.of(context).push(
+      CupertinoPageRoute(builder: (context) => const SendRecoveryScreen()),
+    );
+  }
+
+  Future<void> _saveRecoveryLink() async {
+    setState(() {
+      _isGeneratingRecoveryLink = true;
+    });
+
+    try {
+      final groupState = context.read<GroupState>();
+      final payload = await groupState.generateRecoveryPayload();
+      if (payload == null) {
+        throw Exception('Failed to generate recovery link');
+      }
+
+      final recoveryLink = payload.toRecoveryLink();
+      await Share.share(recoveryLink, subject: 'Comunifi Recovery Link');
+    } catch (e) {
+      if (mounted) {
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Error'),
+            content: Text('Failed to generate recovery link: $e'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isGeneratingRecoveryLink = false;
         });
       }
     }
@@ -671,7 +721,93 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 12),
+                // Link Device section
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemGrey6,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'Link Another Device',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Transfer your account to another device or save a recovery link.',
+                        style: TextStyle(
+                          color: CupertinoColors.secondaryLabel.resolveFrom(
+                            context,
+                          ),
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        color: CupertinoColors.activeBlue,
+                        borderRadius: BorderRadius.circular(8),
+                        onPressed: _addNewDevice,
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              CupertinoIcons.device_phone_portrait,
+                              size: 18,
+                              color: CupertinoColors.white,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Add New Device',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: CupertinoColors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        color: CupertinoColors.systemGrey5,
+                        borderRadius: BorderRadius.circular(8),
+                        onPressed: _isGeneratingRecoveryLink
+                            ? null
+                            : _saveRecoveryLink,
+                        child: _isGeneratingRecoveryLink
+                            ? const CupertinoActivityIndicator()
+                            : const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    CupertinoIcons.link,
+                                    size: 18,
+                                    color: CupertinoColors.label,
+                                  ),
+                                  SizedBox(width: 8),
+                                  Text(
+                                    'Save Recovery Link',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      color: CupertinoColors.label,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
                 // Danger Zone section
                 Container(
                   padding: const EdgeInsets.all(16),
