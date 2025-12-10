@@ -39,7 +39,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     });
   }
 
-  Future<void> _login() async {
+  Future<void> _createAccount() async {
     setState(() {
       _isLoggingIn = true;
     });
@@ -95,8 +95,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         showCupertinoDialog(
           context: context,
           builder: (context) => CupertinoAlertDialog(
-            title: const Text('Login Failed'),
-            content: Text('Failed to login: $e'),
+            title: const Text('Account Creation Failed'),
+            content: Text('Failed to create account: $e'),
             actions: [
               CupertinoDialogAction(
                 child: const Text('OK'),
@@ -111,29 +111,156 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
   }
 
+  void _showImportComingSoon() {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Coming Soon'),
+        content: const Text(
+          'Importing from another device will be available in a future update.',
+        ),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text('OK'),
+            onPressed: () {
+              Navigator.of(context).pop();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      navigationBar: const CupertinoNavigationBar(middle: Text('Login')),
       child: SafeArea(
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(32.0),
+            padding: const EdgeInsets.symmetric(horizontal: 32.0),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text(
-                  'Welcome to Comunifi',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                // Welcome card with gradient styling
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        CupertinoColors.activeBlue.withOpacity(0.1),
+                        CupertinoColors.systemIndigo.withOpacity(0.1),
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: CupertinoColors.activeBlue.withOpacity(0.3),
+                      width: 1,
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      // Icon
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.activeBlue.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: const Icon(
+                          CupertinoIcons.sparkles,
+                          color: CupertinoColors.activeBlue,
+                          size: 40,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      // Welcome text
+                      const Text(
+                        'Welcome to Comunifi',
+                        style: TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 12),
+                      // Tagline
+                      const Text(
+                        'The home for your community.',
+                        style: TextStyle(
+                          fontSize: 15,
+                          color: CupertinoColors.secondaryLabel,
+                          height: 1.4,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 48),
-                CupertinoButton.filled(
-                  onPressed: _isLoggingIn ? null : _login,
-                  child: _isLoggingIn
-                      ? const CupertinoActivityIndicator(
-                          color: CupertinoColors.white,
-                        )
-                      : const Text('Login'),
+                const SizedBox(height: 40),
+                // Create account button (primary)
+                SizedBox(
+                  width: double.infinity,
+                  child: CupertinoButton(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    color: CupertinoColors.activeBlue,
+                    borderRadius: BorderRadius.circular(12),
+                    onPressed: _isLoggingIn ? null : _createAccount,
+                    child: _isLoggingIn
+                        ? const CupertinoActivityIndicator(
+                            color: CupertinoColors.white,
+                          )
+                        : const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                CupertinoIcons.person_add_solid,
+                                size: 18,
+                                color: CupertinoColors.white,
+                              ),
+                              SizedBox(width: 8),
+                              Text(
+                                'Create a new account',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 16,
+                                  color: CupertinoColors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // Import from another device button (secondary)
+                SizedBox(
+                  width: double.infinity,
+                  child: CupertinoButton(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    color: CupertinoColors.systemGrey5,
+                    borderRadius: BorderRadius.circular(12),
+                    onPressed: _isLoggingIn ? null : _showImportComingSoon,
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          CupertinoIcons.arrow_down_circle,
+                          size: 18,
+                          color: CupertinoColors.label,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Import from another device',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                            color: CupertinoColors.label,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ],
             ),
