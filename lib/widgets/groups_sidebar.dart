@@ -177,17 +177,16 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
         continue;
       }
 
-      // Find matching local MLS group if available
-      MlsGroup? matchingGroup;
-      try {
-        matchingGroup = groupState.groups.firstWhere((g) {
-          final gIdHex = g.id.bytes
-              .map((b) => b.toRadixString(16).padLeft(2, '0'))
-              .join();
-          return gIdHex == groupIdHex;
-        });
-      } catch (e) {
-        matchingGroup = null;
+      // Find matching local MLS group - use O(1) cached lookup
+      // Normalize to lowercase for consistent comparison
+      final matchingGroup = groupState.getGroupByHexId(
+        groupIdHex.toLowerCase(),
+      );
+
+      // Only show groups that have local MLS state (can actually be accessed)
+      // Groups without local MLS state can't be decrypted or interacted with
+      if (matchingGroup == null) {
+        continue;
       }
 
       allGroups.add(
@@ -319,33 +318,20 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                     itemBuilder: (context, index) {
                       final item = allGroups[index];
                       final announcement = item.announcement;
-                      final mlsGroup = item.mlsGroup;
-                      final isLocalGroup = mlsGroup != null;
-
-                      if (mlsGroup == null && announcement == null) {
-                        return const SizedBox.shrink();
-                      }
+                      final mlsGroup = item.mlsGroup!; // Always non-null now
 
                       final activeGroupId = groupState.activeGroup?.id.bytes
                           .toString();
-                      final groupId = mlsGroup?.id.bytes.toString();
+                      final groupId = mlsGroup.id.bytes.toString();
                       final isActive =
-                          isLocalGroup &&
-                          activeGroupId != null &&
-                          groupId != null &&
-                          activeGroupId == groupId;
+                          activeGroupId != null && activeGroupId == groupId;
 
-                      final groupName =
-                          announcement?.name ??
-                          mlsGroup?.name ??
-                          'Unnamed Group';
+                      final groupName = announcement?.name ?? mlsGroup.name;
                       final pictureUrl = announcement?.picture;
 
                       return _GroupIconButton(
-                        onTap: isLocalGroup
-                            ? () => _selectGroup(mlsGroup)
-                            : null,
-                        onLongPress: isLocalGroup && announcement != null
+                        onTap: () => _selectGroup(mlsGroup),
+                        onLongPress: announcement != null
                             ? () => _showEditGroupModal(announcement)
                             : null,
                         isActive: isActive,
@@ -353,7 +339,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                           name: groupName,
                           pictureUrl: pictureUrl,
                           isActive: isActive,
-                          isMember: isLocalGroup,
+                          isMember: true,
                         ),
                       );
                     },

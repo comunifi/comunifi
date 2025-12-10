@@ -1452,8 +1452,9 @@ class _EventItemContentWidget extends StatelessWidget {
                   behavior: HitTestBehavior.opaque,
                   onTap: () {
                     // Find the MlsGroup by groupIdHex using O(1) cached lookup
+                    // Normalize to lowercase for consistent comparison
                     final matchingGroup = groupState.getGroupByHexId(
-                      groupIdHex,
+                      groupIdHex.toLowerCase(),
                     );
                     if (matchingGroup != null) {
                       groupState.setActiveGroup(matchingGroup);
