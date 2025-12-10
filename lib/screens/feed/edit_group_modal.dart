@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/screens/feed/import_whatsapp_modal.dart';
 
 /// Modal for editing group metadata (name, about, picture, cover)
 /// Shows as a bottom sheet with form fields
@@ -12,11 +13,7 @@ class EditGroupModal extends StatefulWidget {
   final GroupAnnouncement announcement;
   final VoidCallback? onSaved;
 
-  const EditGroupModal({
-    super.key,
-    required this.announcement,
-    this.onSaved,
-  });
+  const EditGroupModal({super.key, required this.announcement, this.onSaved});
 
   @override
   State<EditGroupModal> createState() => _EditGroupModalState();
@@ -266,13 +263,14 @@ class _EditGroupModalState extends State<EditGroupModal> {
                                       fit: BoxFit.cover,
                                     )
                                   : _pictureUrl != null
-                                      ? DecorationImage(
-                                          image: NetworkImage(_pictureUrl!),
-                                          fit: BoxFit.cover,
-                                        )
-                                      : null,
+                                  ? DecorationImage(
+                                      image: NetworkImage(_pictureUrl!),
+                                      fit: BoxFit.cover,
+                                    )
+                                  : null,
                             ),
-                            child: (_selectedPhotoBytes == null &&
+                            child:
+                                (_selectedPhotoBytes == null &&
                                     _pictureUrl == null)
                                 ? const Icon(
                                     CupertinoIcons.person_2_fill,
@@ -356,14 +354,14 @@ class _EditGroupModalState extends State<EditGroupModal> {
                                     fit: BoxFit.cover,
                                   )
                                 : _coverUrl != null
-                                    ? DecorationImage(
-                                        image: NetworkImage(_coverUrl!),
-                                        fit: BoxFit.cover,
-                                      )
-                                    : null,
+                                ? DecorationImage(
+                                    image: NetworkImage(_coverUrl!),
+                                    fit: BoxFit.cover,
+                                  )
+                                : null,
                           ),
-                          child: (_selectedCoverBytes == null &&
-                                  _coverUrl == null)
+                          child:
+                              (_selectedCoverBytes == null && _coverUrl == null)
                               ? Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: const [
@@ -465,10 +463,95 @@ class _EditGroupModalState extends State<EditGroupModal> {
                     maxLines: 2,
                     enabled: !_isSaving,
                   ),
+                  const SizedBox(height: 32),
+                  // Import section (admin only)
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemGrey6,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              CupertinoIcons.arrow_down_doc,
+                              size: 20,
+                              color: CupertinoColors.systemOrange,
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Import Chat History',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Import messages from a WhatsApp chat export (.zip file). Imported messages will show the original author name with an "Imported" badge.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: CupertinoColors.secondaryLabel,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: CupertinoButton(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            color: CupertinoColors.systemOrange,
+                            borderRadius: BorderRadius.circular(8),
+                            onPressed: _isSaving
+                                ? null
+                                : () => _showImportModal(),
+                            child: const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  CupertinoIcons.folder,
+                                  size: 18,
+                                  color: CupertinoColors.white,
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Import WhatsApp Chat',
+                                  style: TextStyle(
+                                    color: CupertinoColors.white,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _showImportModal() {
+    showCupertinoModalPopup(
+      context: context,
+      builder: (modalContext) => SizedBox(
+        height: MediaQuery.of(context).size.height * 0.85,
+        child: ImportWhatsAppModal(
+          onImported: () {
+            // Optionally refresh the group messages
+            final groupState = context.read<GroupState>();
+            groupState.refreshActiveGroupMessages();
+          },
         ),
       ),
     );
@@ -484,10 +567,7 @@ Future<void> showEditGroupModal(
 }) {
   return showCupertinoModalPopup<void>(
     context: context,
-    builder: (context) => EditGroupModal(
-      announcement: announcement,
-      onSaved: onSaved,
-    ),
+    builder: (context) =>
+        EditGroupModal(announcement: announcement, onSaved: onSaved),
   );
 }
-

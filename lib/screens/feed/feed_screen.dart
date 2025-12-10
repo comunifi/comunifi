@@ -1529,14 +1529,22 @@ class _EventItemContentWidget extends StatelessWidget {
                       children: [
                         _AuthorAvatar(pubkey: event.pubkey),
                         const SizedBox(width: 8),
-                        Text(
-                          displayName,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14,
+                        // Show imported author name badge if this is an imported post
+                        if (event.isImported) ...[
+                          _ImportedAuthorBadge(
+                            authorName: event.importedAuthorName ?? 'Unknown',
                           ),
-                        ),
-                        const SizedBox(width: 8),
+                          const SizedBox(width: 8),
+                        ] else ...[
+                          Text(
+                            displayName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
                         Text(
                           _formatDate(event.createdAt),
                           style: const TextStyle(
@@ -1940,6 +1948,63 @@ class _MentionBadgeState extends State<_MentionBadge> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Badge displayed for imported messages showing the original author name
+class _ImportedAuthorBadge extends StatelessWidget {
+  final String authorName;
+
+  const _ImportedAuthorBadge({required this.authorName});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: CupertinoColors.systemOrange.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: CupertinoColors.systemOrange.withOpacity(0.3),
+          width: 0.5,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            CupertinoIcons.arrow_down_doc,
+            size: 12,
+            color: CupertinoColors.systemOrange.resolveFrom(context),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            authorName,
+            style: TextStyle(
+              color: CupertinoColors.systemOrange.resolveFrom(context),
+              fontWeight: FontWeight.w600,
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            decoration: BoxDecoration(
+              color: CupertinoColors.systemOrange.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Text(
+              'Imported',
+              style: TextStyle(
+                color: CupertinoColors.systemOrange.resolveFrom(context),
+                fontSize: 9,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

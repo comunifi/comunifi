@@ -43,6 +43,7 @@ import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/media/media_upload.dart';
 import 'package:comunifi/services/media/encrypted_media.dart';
 import 'package:comunifi/services/db/decrypted_media_cache.dart';
+import 'package:comunifi/services/whatsapp/whatsapp_import.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -4138,6 +4139,261 @@ class GroupState with ChangeNotifier {
       );
     }
   }
+
+  // ===========================================================================
+  // WhatsApp Import
+  // ===========================================================================
+
+  /// WhatsApp import service instance
+  final WhatsAppImportService _whatsAppImportService = WhatsAppImportService();
+
+  /// Import a WhatsApp chat export to the active group
+  ///
+  /// Only group admins can import chats. The import will:
+  /// 1. Parse the WhatsApp export zip file
+  /// 2. Generate deterministic throwaway keys for each author
+  /// 3. Import messages in chronological order with 'imported' tags
+  /// 4. Upload and encrypt any attachments
+  ///
+  /// [zipBytes] - The raw bytes of the WhatsApp export .zip file
+  /// [onProgress] - Optional callback for progress updates (current, total)
+  ///
+  /// Throws an exception if:
+  /// - No active group is selected
+  /// - User is not an admin of the group
+  /// - Not connected to relay
+  Future<WhatsAppImportResult> importWhatsAppChat(
+    Uint8List zipBytes, {
+    void Function(int current, int total)? onProgress,
+  }) async {
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    if (_activeGroup == null) {
+      throw Exception('No active group selected. Please select a group first.');
+    }
+
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+
+    // Check if user is admin
+    final isAdmin = await isGroupAdmin(groupIdHex);
+    if (!isAdmin) {
+      throw Exception('Only group admins can import WhatsApp chats.');
+    }
+
+    try {
+      // Parse the WhatsApp export
+      debugPrint('WhatsApp Import: Parsing export...');
+      final exportResult = await _whatsAppImportService.parseExport(zipBytes);
+
+      if (exportResult.messages.isEmpty) {
+        throw Exception('No messages found in the WhatsApp export.');
+      }
+
+      debugPrint(
+        'WhatsApp Import: Found ${exportResult.messages.length} messages from ${exportResult.authors.length} authors',
+      );
+
+      // Get our signing key
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception(
+          'No Nostr key found. Please ensure keys are initialized.',
+        );
+      }
+      final signingKeyPair = NostrKeyPairs(private: privateKey);
+
+      // Cache for throwaway keys (author name -> keypair)
+      final authorKeys = <String, NostrKeyPairs>{};
+
+      int imported = 0;
+      int failed = 0;
+      final total = exportResult.messages.length;
+
+      // Import messages in chronological order
+      for (int i = 0; i < exportResult.messages.length; i++) {
+        final message = exportResult.messages[i];
+
+        try {
+          // Get or generate throwaway key for this author
+          if (!authorKeys.containsKey(message.author)) {
+            authorKeys[message.author] = await _whatsAppImportService
+                .generateThrowawayKey(message.author, groupIdHex);
+            debugPrint(
+              'WhatsApp Import: Generated key for "${message.author}": ${authorKeys[message.author]!.public.substring(0, 16)}...',
+            );
+          }
+          final authorKeyPair = authorKeys[message.author]!;
+
+          // Build tags for the imported message
+          final baseTags = <List<String>>[
+            ['g', groupIdHex],
+            ['imported', 'whatsapp'],
+            ['imported_author', message.author],
+            [
+              'imported_time',
+              (message.timestamp.millisecondsSinceEpoch ~/ 1000).toString(),
+            ],
+          ];
+
+          // Handle attachment if present
+          String? imageUrl;
+          String? imageSha256;
+          bool isImageEncrypted = false;
+
+          if (message.hasAttachment) {
+            try {
+              final attachmentBytes = await _whatsAppImportService
+                  .getAttachment(zipBytes, message.attachmentFilename!);
+
+              if (attachmentBytes != null) {
+                final mimeType = _whatsAppImportService.getMimeType(
+                  message.attachmentFilename!,
+                );
+
+                // Upload with MLS encryption
+                final uploadResult = await _mediaUploadService.upload(
+                  fileBytes: attachmentBytes,
+                  mimeType: mimeType,
+                  groupId: groupIdHex,
+                  keyPairs: signingKeyPair,
+                  mlsGroup: _activeGroup,
+                );
+
+                imageUrl = uploadResult.url;
+                imageSha256 = uploadResult.sha256;
+                isImageEncrypted = uploadResult.isEncrypted;
+
+                // Add imeta tag for the attachment
+                if (isImageEncrypted) {
+                  baseTags.add([
+                    'imeta',
+                    'url $imageUrl',
+                    'x $imageSha256',
+                    'encrypted mls',
+                  ]);
+                } else {
+                  baseTags.add(['imeta', 'url $imageUrl']);
+                }
+
+                debugPrint(
+                  'WhatsApp Import: Uploaded attachment ${message.attachmentFilename}',
+                );
+              }
+            } catch (e) {
+              debugPrint(
+                'WhatsApp Import: Failed to upload attachment ${message.attachmentFilename}: $e',
+              );
+              // Continue without attachment
+            }
+          }
+
+          // Create the message event with the throwaway author's key
+          // Use original timestamp for createdAt
+          final messageCreatedAt = message.timestamp;
+          final messageTags = await addClientTagsWithSignature(
+            baseTags,
+            createdAt: messageCreatedAt,
+          );
+
+          // Create and sign the event with the throwaway key
+          final nostrEvent = NostrEvent.fromPartialData(
+            kind: 1,
+            content: message.content,
+            keyPairs: authorKeyPair,
+            tags: messageTags,
+            createdAt: messageCreatedAt,
+          );
+
+          final eventModel = NostrEventModel(
+            id: nostrEvent.id,
+            pubkey: nostrEvent.pubkey,
+            kind: nostrEvent.kind,
+            content: nostrEvent.content,
+            tags: nostrEvent.tags,
+            sig: nostrEvent.sig,
+            createdAt: nostrEvent.createdAt,
+          );
+
+          // Publish encrypted to the group
+          await _nostrService!.publishEvent(
+            eventModel.toJson(),
+            mlsGroupId: groupIdHex,
+            recipientPubkey: eventModel.pubkey,
+            keyPairs: signingKeyPair,
+          );
+
+          // Cache the decrypted event locally
+          if (_eventTable != null) {
+            await _eventTable!.insert(eventModel);
+          }
+
+          // Add to local messages for immediate display
+          _groupMessages.insert(0, eventModel);
+          if (!_allDecryptedMessages.any((e) => e.id == eventModel.id)) {
+            _allDecryptedMessages.insert(0, eventModel);
+          }
+
+          imported++;
+          onProgress?.call(i + 1, total);
+
+          // Small delay to avoid overwhelming the relay
+          if (i % 10 == 0) {
+            await Future.delayed(const Duration(milliseconds: 50));
+            safeNotifyListeners();
+          }
+        } catch (e) {
+          debugPrint('WhatsApp Import: Failed to import message ${i + 1}: $e');
+          failed++;
+        }
+      }
+
+      // Sort messages by timestamp (newest first for display)
+      _groupMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _allDecryptedMessages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      safeNotifyListeners();
+
+      debugPrint(
+        'WhatsApp Import: Completed. Imported: $imported, Failed: $failed',
+      );
+
+      return WhatsAppImportResult(
+        totalMessages: total,
+        importedCount: imported,
+        failedCount: failed,
+        authors: exportResult.authors.toList(),
+      );
+    } catch (e) {
+      debugPrint('WhatsApp Import: Failed: $e');
+      rethrow;
+    }
+  }
+
+  /// Preview a WhatsApp export without importing
+  ///
+  /// Returns information about the export contents.
+  Future<WhatsAppExportResult> previewWhatsAppExport(Uint8List zipBytes) async {
+    return await _whatsAppImportService.parseExport(zipBytes);
+  }
+}
+
+/// Result of a WhatsApp chat import operation
+class WhatsAppImportResult {
+  final int totalMessages;
+  final int importedCount;
+  final int failedCount;
+  final List<String> authors;
+
+  const WhatsAppImportResult({
+    required this.totalMessages,
+    required this.importedCount,
+    required this.failedCount,
+    required this.authors,
+  });
+
+  bool get isSuccess => failedCount == 0;
+  bool get hasPartialFailure => failedCount > 0 && importedCount > 0;
 }
 
 /// Represents a reaction update for real-time UI notifications

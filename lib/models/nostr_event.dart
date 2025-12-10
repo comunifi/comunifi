@@ -460,6 +460,67 @@ class NostrEventModel {
     return hashtags.map((tag) => ['t', tag]).toList();
   }
 
+  // ===========================================================================
+  // Imported message helpers
+  // ===========================================================================
+
+  /// Check if this post was imported from another platform (e.g., WhatsApp)
+  /// Looks for the 'imported' tag
+  bool get isImported {
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'imported') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Get the import source (e.g., 'whatsapp')
+  /// Returns null if this is not an imported post
+  String? get importSource {
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'imported' && tag.length > 1) {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
+  /// Get the original author name for imported posts
+  /// Returns null if this is not an imported post or no author name was recorded
+  String? get importedAuthorName {
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'imported_author' && tag.length > 1) {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
+  /// Get the original timestamp for imported posts (as Unix timestamp string)
+  /// Returns null if not an imported post or no original time was recorded
+  String? get importedOriginalTime {
+    for (final tag in tags) {
+      if (tag.isNotEmpty && tag[0] == 'imported_time' && tag.length > 1) {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
+  /// Get the original timestamp as DateTime for imported posts
+  /// Returns null if not an imported post or no original time was recorded
+  DateTime? get importedOriginalDateTime {
+    final timeStr = importedOriginalTime;
+    if (timeStr == null) return null;
+    try {
+      final timestamp = int.parse(timeStr);
+      return DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
+    } catch (e) {
+      return null;
+    }
+  }
+
   @override
   String toString() {
     return 'NostrEventModel(id: $id, pubkey: $pubkey, kind: $kind, content: $content, createdAt: $createdAt)';
