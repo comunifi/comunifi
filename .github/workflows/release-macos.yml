@@ -24,6 +24,9 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Install dependencies
+        run: flutter pub get
+
       - name: Install CocoaPods
         run: |
           cd macos
@@ -37,10 +40,8 @@ jobs:
           # Import the Sparkle private key for signing updates
           echo "${{ secrets.SPARKLE_PRIVATE_KEY }}" | ./macos/Pods/Sparkle/bin/generate_keys -f /dev/stdin
 
-      - name: Build macOS DMG
-        run: |
-          flutter pub get
-          flutter build macos --release
+      - name: Build macOS app
+        run: flutter build macos --release
 
       - name: Create DMG
         run: |
