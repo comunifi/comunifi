@@ -18,6 +18,16 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Extracted version: ${VERSION}"
 
+      - name: Create .env file
+        run: |
+          # Generate a new Ethereum private key (32 bytes = 64 hex chars, no 0x prefix)
+          PRIVATE_KEY=$(openssl rand -hex 32)
+
+          cat > .env << EOF
+          RELAY_URL=${{ secrets.RELAY_URL }}
+          CLIENT_SIGNATURE_PRIVATE_KEY=${PRIVATE_KEY}
+          EOF
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
