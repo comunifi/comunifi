@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:auto_updater/auto_updater.dart';
 import 'package:comunifi/routes/routes.dart';
+import 'package:comunifi/services/deep_link/deep_link_service.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/state.dart';
 import 'package:flutter/cupertino.dart';
@@ -17,6 +18,9 @@ late final GroupState _groupState;
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Initialize deep link service early to capture initial links
+  await DeepLinkService.instance.initialize();
+
   // Configure auto-updater (macOS only)
   if (Platform.isMacOS) {
     await autoUpdater.setFeedURL(
@@ -30,9 +34,23 @@ void main() async {
   _groupState = GroupState();
   await _groupState.waitForKeysGroupInit();
 
+  // Check for pending recovery from deep link
+  final hasPendingRecovery =
+      DeepLinkService.instance.pendingRecoveryPayload != null;
+
   // Check if user has identity to determine initial route
   final hasIdentity = await _groupState.hasNostrIdentity();
-  final initialLocation = hasIdentity ? '/feed' : '/';
+
+  // If there's a pending recovery, go to recovery screen
+  // Otherwise, normal flow based on identity
+  String initialLocation;
+  if (hasPendingRecovery) {
+    initialLocation = '/recovery/restore';
+  } else if (hasIdentity) {
+    initialLocation = '/feed';
+  } else {
+    initialLocation = '/';
+  }
 
   runApp(
     provideAppState(

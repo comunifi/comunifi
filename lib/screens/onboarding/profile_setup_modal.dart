@@ -7,15 +7,20 @@ import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 
 /// Modal for setting up user profile during onboarding
-/// Allows setting username and profile picture with option to skip
+/// Allows setting username with option to skip
+/// Photo upload is disabled during onboarding - can be added from settings later
 class ProfileSetupModal extends StatefulWidget {
   final String pubkey;
   final String? privateKey;
+
+  /// If true, this is shown during onboarding and photo upload is disabled
+  final bool isOnboarding;
 
   const ProfileSetupModal({
     super.key,
     required this.pubkey,
     this.privateKey,
+    this.isOnboarding = true,
   });
 
   @override
@@ -128,6 +133,14 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
   }
 
   Future<void> _pickPhoto() async {
+    // Don't allow photo upload during onboarding - group isn't ready yet
+    if (widget.isOnboarding) {
+      setState(
+        () => _error = 'Profile photos can be added from Settings after setup',
+      );
+      return;
+    }
+
     try {
       final XFile? pickedFile = await _imagePicker.pickImage(
         source: ImageSource.gallery,
@@ -160,10 +173,11 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
     try {
       final profileState = context.read<ProfileState>();
       final groupState = context.read<GroupState>();
-      final privateKey = widget.privateKey ?? await groupState.getNostrPrivateKey();
+      final privateKey =
+          widget.privateKey ?? await groupState.getNostrPrivateKey();
 
-      // Upload photo if selected
-      if (_selectedPhotoBytes != null) {
+      // Upload photo if selected (only if not onboarding - groups need to be ready)
+      if (_selectedPhotoBytes != null && !widget.isOnboarding) {
         setState(() => _isUploadingPhoto = true);
 
         final imageUrl = await groupState.uploadMediaToOwnGroup(
@@ -209,8 +223,13 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
 
   @override
   Widget build(BuildContext context) {
-    final hasChanges = _selectedPhotoBytes != null ||
-        (_usernameController.text.trim().isNotEmpty && _usernameAvailable == true);
+    // For onboarding, only check username changes (photo disabled)
+    final hasChanges = widget.isOnboarding
+        ? (_usernameController.text.trim().isNotEmpty &&
+              _usernameAvailable == true)
+        : _selectedPhotoBytes != null ||
+              (_usernameController.text.trim().isNotEmpty &&
+                  _usernameAvailable == true);
 
     return Container(
       height: MediaQuery.of(context).size.height * 0.75,
@@ -270,10 +289,7 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
                   // Welcome message
                   const Text(
                     'Welcome to Comunifi!',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 8),
@@ -325,10 +341,12 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
                         ],
                       ),
                     ),
-                  // Profile photo picker
+                  // Profile photo picker (disabled during onboarding)
                   Center(
                     child: GestureDetector(
-                      onTap: _isSaving ? null : _pickPhoto,
+                      onTap: (_isSaving || widget.isOnboarding)
+                          ? null
+                          : _pickPhoto,
                       child: Stack(
                         children: [
                           Container(
@@ -364,7 +382,8 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
                                 color: CupertinoColors.white,
                               ),
                             ),
-                          if (!_isSaving)
+                          // Only show camera icon if not onboarding
+                          if (!_isSaving && !widget.isOnboarding)
                             Positioned(
                               bottom: 0,
                               right: 0,
@@ -391,9 +410,11 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
                     child: Text(
                       _isUploadingPhoto
                           ? 'Uploading...'
+                          : widget.isOnboarding
+                          ? 'Photo can be added from Settings'
                           : _selectedPhotoBytes != null
-                              ? 'Tap to change'
-                              : 'Add profile photo (optional)',
+                          ? 'Tap to change'
+                          : 'Add profile photo (optional)',
                       style: const TextStyle(
                         color: CupertinoColors.secondaryLabel,
                         fontSize: 14,
@@ -404,10 +425,7 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
                   // Username field
                   const Text(
                     'Username',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
                   CupertinoTextField(
@@ -485,4 +503,3 @@ class _ProfileSetupModalState extends State<ProfileSetupModal> {
     );
   }
 }
-

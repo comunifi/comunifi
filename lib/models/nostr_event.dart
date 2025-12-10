@@ -71,6 +71,13 @@ const int kindMlsMemberJoined = 1061;
 /// The 'g' tag contains the MLS group ID used for encryption.
 const int kindEncryptedIdentity = 10078;
 
+/// Kind 30079: MLS group backup (parameterized replaceable event)
+/// Contains the full MLS group state encrypted with the user's personal group.
+/// Uses 'd' tag to identify which MLS group is being backed up.
+/// Tags: ['d', <backed_up_group_id>], ['g', <personal_group_id>]
+/// This allows recovery of all MLS groups from the relay.
+const int kindMlsGroupBackup = 30079;
+
 class NostrEventModel {
   final String id;
   final String pubkey;

@@ -137,7 +137,15 @@ jobs:
 
           # 5. Sign the main app bundle with entitlements (this signs the main executable too)
           echo "=== Signing main app with entitlements ==="
-          ENTITLEMENTS_PATH="macos/Runner/Release.entitlements"
+
+          # Create a processed entitlements file with $(AppIdentifierPrefix) expanded
+          ENTITLEMENTS_SRC="macos/Runner/Release.entitlements"
+          ENTITLEMENTS_PATH="$RUNNER_TEMP/Release.entitlements"
+          sed "s/\$(AppIdentifierPrefix)/${APPLE_TEAM_ID}./g" "$ENTITLEMENTS_SRC" > "$ENTITLEMENTS_PATH"
+
+          echo "Processed entitlements:"
+          cat "$ENTITLEMENTS_PATH"
+
           codesign --force --timestamp --options=runtime --entitlements "$ENTITLEMENTS_PATH" --sign "$IDENTITY" "$APP_PATH"
 
           # 6. Verify the signature

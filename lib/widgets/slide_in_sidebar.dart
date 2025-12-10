@@ -21,10 +21,7 @@ class SlideInSidebar extends StatefulWidget {
   State<SlideInSidebar> createState() => _SlideInSidebarState();
 }
 
-enum SlideInSidebarPosition {
-  left,
-  right,
-}
+enum SlideInSidebarPosition { left, right }
 
 class _SlideInSidebarState extends State<SlideInSidebar>
     with SingleTickerProviderStateMixin {
@@ -47,18 +44,12 @@ class _SlideInSidebarState extends State<SlideInSidebar>
     _slideAnimation = Tween<Offset>(
       begin: slideDirection,
       end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
     _fadeAnimation = Tween<double>(
       begin: 0.0,
       end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
     if (widget.isOpen) {
       _controller.forward();
@@ -89,11 +80,12 @@ class _SlideInSidebarState extends State<SlideInSidebar>
       return const SizedBox.shrink();
     }
 
+    // Positioned must be a direct child of Stack, so wrap IgnorePointer inside it
     // Use IgnorePointer when closing to allow touch events to pass through
     // during the close animation
-    return IgnorePointer(
-      ignoring: !widget.isOpen,
-      child: Positioned.fill(
+    return Positioned.fill(
+      child: IgnorePointer(
+        ignoring: !widget.isOpen,
         child: Stack(
           children: [
             // Backdrop
@@ -101,9 +93,7 @@ class _SlideInSidebarState extends State<SlideInSidebar>
               onTap: widget.onClose,
               child: FadeTransition(
                 opacity: _fadeAnimation,
-                child: Container(
-                  color: CupertinoColors.black.withOpacity(0.3),
-                ),
+                child: Container(color: CupertinoColors.black.withOpacity(0.3)),
               ),
             ),
             // Sidebar
@@ -114,7 +104,8 @@ class _SlideInSidebarState extends State<SlideInSidebar>
                     ? Alignment.centerLeft
                     : Alignment.centerRight,
                 child: GestureDetector(
-                  onTap: () {}, // Prevent tap from closing when tapping inside sidebar
+                  onTap:
+                      () {}, // Prevent tap from closing when tapping inside sidebar
                   child: Container(
                     width: widget.width,
                     height: double.infinity,
@@ -130,4 +121,3 @@ class _SlideInSidebarState extends State<SlideInSidebar>
     );
   }
 }
-

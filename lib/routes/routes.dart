@@ -1,7 +1,10 @@
 import 'package:comunifi/screens/feed/feed_screen.dart';
 import 'package:comunifi/screens/onboarding_screen.dart';
+import 'package:comunifi/screens/onboarding/backup_prompt_screen.dart';
 import 'package:comunifi/screens/post/post_detail_screen.dart';
 import 'package:comunifi/screens/profile_screen.dart';
+import 'package:comunifi/screens/recovery/receive_recovery_screen.dart';
+import 'package:comunifi/screens/recovery/recovery_confirmation_screen.dart';
 import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/post_detail.dart';
 import 'package:flutter/cupertino.dart';
@@ -27,6 +30,38 @@ GoRouter createRouter(
       parentNavigatorKey: rootNavigatorKey,
       builder: (context, state) {
         return const OnboardingScreen();
+      },
+    ),
+    GoRoute(
+      name: 'BackupPrompt',
+      path: '/onboarding/backup',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return const BackupPromptScreen();
+      },
+    ),
+    GoRoute(
+      name: 'ReceiveRecovery',
+      path: '/recovery/receive',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return const ReceiveRecoveryScreen();
+      },
+    ),
+    GoRoute(
+      name: 'RecoveryRestore',
+      path: '/recovery/restore',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return const ReceiveRecoveryScreen();
+      },
+    ),
+    GoRoute(
+      name: 'RecoveryConfirm',
+      path: '/recovery/confirm',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return const RecoveryConfirmationScreen();
       },
     ),
     GoRoute(

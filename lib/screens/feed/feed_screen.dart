@@ -2032,6 +2032,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   final bool isAdmin;
   final VoidCallback? onEditTap;
   final VoidCallback? onSettingsTap;
+  final bool hasFloatingOverlay;
 
   // Banner heights
   static const double _maxBannerHeight = 200.0;
@@ -2048,6 +2049,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
     required this.isAdmin,
     this.onEditTap,
     this.onSettingsTap,
+    this.hasFloatingOverlay = false,
   });
 
   @override
@@ -2066,7 +2068,8 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
         announcement?.cover != oldDelegate.announcement?.cover ||
         announcement?.about != oldDelegate.announcement?.about ||
         topPadding != oldDelegate.topPadding ||
-        isAdmin != oldDelegate.isAdmin;
+        isAdmin != oldDelegate.isAdmin ||
+        hasFloatingOverlay != oldDelegate.hasFloatingOverlay;
   }
 
   @override
@@ -2135,25 +2138,22 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
                   ),
           ),
           // Settings button in top-right corner (admin only)
+          // Offset to left when floating overlay buttons are present (mobile mode)
+          // Use same structure as floating members button for alignment
           if (isAdmin && onSettingsTap != null)
             Positioned(
               top: topPadding + 8,
-              right: 8,
+              right: hasFloatingOverlay ? 56 : 8,
               child: CupertinoButton(
-                padding: EdgeInsets.zero,
+                padding: const EdgeInsets.all(8),
+                color: CupertinoColors.black.withOpacity(0.4),
+                borderRadius: BorderRadius.circular(20),
+                minSize: 36,
                 onPressed: onSettingsTap,
-                child: Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: CupertinoColors.black.withOpacity(0.4),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    CupertinoIcons.gear_alt_fill,
-                    size: 20,
-                    color: CupertinoColors.white,
-                  ),
+                child: const Icon(
+                  CupertinoIcons.gear_alt_fill,
+                  size: 20,
+                  color: CupertinoColors.white,
                 ),
               ),
             ),
@@ -2387,6 +2387,8 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
   @override
   Widget build(BuildContext context) {
     final topPadding = MediaQuery.of(context).padding.top;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isNarrowScreen = screenWidth <= 1000;
 
     // Get the announcement for this group
     final groupIdHex = _groupIdToHex(widget.group);
@@ -2403,6 +2405,7 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
         isAdmin: _isAdmin,
         onEditTap: _showEditModal,
         onSettingsTap: _isAdmin ? _showSettingsModal : null,
+        hasFloatingOverlay: isNarrowScreen,
       ),
     );
   }

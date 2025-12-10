@@ -107,6 +107,13 @@ class MlsSecureStorage {
     await _storage.delete(key: 'mls_epoch_secrets_$groupIdHex');
   }
 
+  /// Delete ALL secure storage data
+  /// WARNING: This will permanently delete all MLS keys and secrets
+  Future<void> deleteAll() async {
+    await _storage.deleteAll();
+    debugPrint('Deleted all secure storage data');
+  }
+
   String _groupIdToHex(GroupId groupId) {
     return groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
@@ -323,8 +330,12 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
   @override
   Future<void> saveGroupState(GroupState state) async {
-    final groupIdHex = state.context.groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    final genStr = state.generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
+    final groupIdHex = state.context.groupId.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    final genStr = state.generations.entries
+        .map((e) => 'leaf${e.key.value}:${e.value}')
+        .join(', ');
     debugPrint(
       '>>> MLS SAVE: group=${groupIdHex.substring(0, 8)}... epoch=${state.context.epoch}, localLeaf=${state.localLeafIndex.value}, gens={$genStr}',
     );
@@ -352,16 +363,20 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
   @override
   Future<GroupState?> loadGroupState(GroupId groupId) async {
-    final groupIdHex = groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final groupIdHex = groupId.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
     debugPrint('>>> MLS LOAD START: group=${groupIdHex.substring(0, 8)}...');
-    
+
     // Load public state from database
     final publicStateBytes = await _table.loadPublicState(groupId);
     if (publicStateBytes == null) {
       debugPrint('>>> MLS LOAD: No public state found in database');
       return null;
     }
-    debugPrint('>>> MLS LOAD: Loaded ${publicStateBytes.length} bytes of public state');
+    debugPrint(
+      '>>> MLS LOAD: Loaded ${publicStateBytes.length} bytes of public state',
+    );
 
     // Load private keys from secure storage
     final (identityPrivateKey, leafHpkePrivateKey) = await _secureStorage
@@ -491,7 +506,7 @@ class SecurePersistentMlsStorage implements MlsStorage {
     final members = _deserializeMembers(membersBytes, _cryptoProvider);
 
     // Read localLeafIndex and generations (if present, for backward compatibility)
-    // 
+    //
     // Format detection:
     // - Old format: [4 bytes: generations length][generations data]
     // - New format: [4 bytes: localLeafIndex][4 bytes: generations length][generations data]
@@ -502,29 +517,35 @@ class SecurePersistentMlsStorage implements MlsStorage {
     // followed by another length prefix that works, it's new format.
     LeafIndex? localLeafIndex;
     Map<LeafIndex, int>? generations;
-    
+
     if (offset < publicStateBytes.length) {
       try {
         final remainingBytes = publicStateBytes.length - offset;
-        debugPrint('>>> MLS LOAD: $remainingBytes bytes remaining after members');
-        
+        debugPrint(
+          '>>> MLS LOAD: $remainingBytes bytes remaining after members',
+        );
+
         // Read first 4 bytes
-        final firstValue = (publicStateBytes[offset] << 24) |
+        final firstValue =
+            (publicStateBytes[offset] << 24) |
             (publicStateBytes[offset + 1] << 16) |
             (publicStateBytes[offset + 2] << 8) |
             publicStateBytes[offset + 3];
-        
+
         debugPrint('>>> MLS LOAD: First 4 bytes value = $firstValue');
-        
+
         // Check if this looks like old format (firstValue is a length prefix)
         // In old format: firstValue is length of generations blob, and we should have
         // exactly firstValue bytes remaining after the 4-byte length prefix
         final bytesAfterFirst = remainingBytes - 4;
-        final looksLikeOldFormat = (firstValue == bytesAfterFirst) && 
+        final looksLikeOldFormat =
+            (firstValue == bytesAfterFirst) &&
             _isValidGenerationsLength(firstValue);
-        
-        debugPrint('>>> MLS LOAD: bytesAfterFirst=$bytesAfterFirst, looksLikeOldFormat=$looksLikeOldFormat');
-        
+
+        debugPrint(
+          '>>> MLS LOAD: bytesAfterFirst=$bytesAfterFirst, looksLikeOldFormat=$looksLikeOldFormat',
+        );
+
         if (looksLikeOldFormat) {
           // Old format: no localLeafIndex, generations starts here
           debugPrint('>>> MLS LOAD: Detected OLD format (no localLeafIndex)');
@@ -537,16 +558,18 @@ class SecurePersistentMlsStorage implements MlsStorage {
           localLeafIndex = LeafIndex(firstValue);
           offset += 4;
           debugPrint('>>> MLS LOAD: localLeafIndex=${localLeafIndex.value}');
-          
+
           // Read generations if there's more data
           if (offset < publicStateBytes.length) {
             final generationsBytes = _readUint8List(publicStateBytes, offset);
             generations = _deserializeGenerations(generationsBytes);
           }
         }
-        
+
         if (generations != null) {
-          final genStr = generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
+          final genStr = generations.entries
+              .map((e) => 'leaf${e.key.value}:${e.value}')
+              .join(', ');
           debugPrint(
             '>>> MLS LOAD: Loaded generations: {$genStr} (${generations.length} entries)',
           );
@@ -565,7 +588,7 @@ class SecurePersistentMlsStorage implements MlsStorage {
         '>>> MLS LOAD: No localLeafIndex/generations data found, using defaults',
       );
     }
-    
+
     // Default localLeafIndex to 0 if not found (backward compatibility)
     localLeafIndex ??= LeafIndex(0);
     generations ??= {};
@@ -573,8 +596,12 @@ class SecurePersistentMlsStorage implements MlsStorage {
     // Deserialize epoch secrets
     final secrets = EpochSecrets.deserialize(epochSecretsBytes);
 
-    final genStr = generations.entries.map((e) => 'leaf${e.key.value}:${e.value}').join(', ');
-    final groupIdHex = context.groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final genStr = generations.entries
+        .map((e) => 'leaf${e.key.value}:${e.value}')
+        .join(', ');
+    final groupIdHex = context.groupId.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
     debugPrint(
       '>>> MLS LOAD: group=${groupIdHex.substring(0, 8)}... epoch=${context.epoch}, localLeaf=${localLeafIndex.value}, gens={$genStr}',
     );
@@ -605,7 +632,8 @@ class SecurePersistentMlsStorage implements MlsStorage {
     int offset = 0;
 
     // Read count
-    final count = (data[offset] << 24) |
+    final count =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
@@ -614,7 +642,8 @@ class SecurePersistentMlsStorage implements MlsStorage {
     // Read each entry
     for (int i = 0; i < count; i++) {
       // Leaf index
-      final leafIndexValue = (data[offset] << 24) |
+      final leafIndexValue =
+          (data[offset] << 24) |
           (data[offset + 1] << 16) |
           (data[offset + 2] << 8) |
           data[offset + 3];
@@ -622,7 +651,8 @@ class SecurePersistentMlsStorage implements MlsStorage {
       final leafIndex = LeafIndex(leafIndexValue);
 
       // Generation
-      final generation = (data[offset] << 24) |
+      final generation =
+          (data[offset] << 24) |
           (data[offset + 1] << 16) |
           (data[offset + 2] << 8) |
           data[offset + 3];

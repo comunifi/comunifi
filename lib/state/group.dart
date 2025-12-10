@@ -44,6 +44,9 @@ import 'package:comunifi/services/media/media_upload.dart';
 import 'package:comunifi/services/media/encrypted_media.dart';
 import 'package:comunifi/services/db/decrypted_media_cache.dart';
 import 'package:comunifi/services/whatsapp/whatsapp_import.dart';
+import 'package:comunifi/services/backup/backup_service.dart';
+import 'package:comunifi/services/backup/backup_models.dart';
+import 'package:comunifi/services/recovery/recovery_service.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -111,10 +114,10 @@ class GroupState with ChangeNotifier {
   AppDBService? _dbService;
   AppDBService? _eventDbService; // Separate DB for Nostr events
   NostrEventTable? _eventTable;
-  MlsGroup? _keysGroup;
+  MlsGroup? _personalGroup;
 
-  // Completer for keys group initialization (needed before checking identity)
-  final Completer<void> _keysGroupInitCompleter = Completer<void>();
+  // Completer for personal group initialization (needed before checking identity)
+  final Completer<void> _personalGroupInitCompleter = Completer<void>();
 
   // Cached HPKE key pair derived from Nostr private key
   // This is used for MLS group invitations
@@ -138,6 +141,15 @@ class GroupState with ChangeNotifier {
   // Database table for decrypted media cache
   DecryptedMediaCacheTable? _decryptedMediaCacheTable;
 
+  // Backup service for MLS group backup/restore
+  BackupService? _backupService;
+
+  // Timer for daily automatic backup
+  Timer? _dailyBackupTimer;
+
+  // Last daily backup check time
+  DateTime? _lastDailyBackupCheck;
+
   // Callback to ensure user profile (set by widgets that have access to ProfileState)
   // Parameters: pubkey, privateKey, hpkePublicKeyHex
   Future<void> Function(
@@ -151,9 +163,9 @@ class GroupState with ChangeNotifier {
     _initialize();
   }
 
-  /// Wait for keys group initialization to complete
+  /// Wait for personal group initialization to complete
   /// This should be called before checking identity
-  Future<void> waitForKeysGroupInit() => _keysGroupInitCompleter.future;
+  Future<void> waitForKeysGroupInit() => _personalGroupInitCompleter.future;
 
   /// Set callback to ensure user profile (called by widgets with access to ProfileState)
   void setEnsureProfileCallback(
@@ -189,8 +201,8 @@ class GroupState with ChangeNotifier {
 
   Future<void> _initialize() async {
     try {
-      // Initialize MLS storage for keys group
-      await _initializeKeysGroup();
+      // Initialize MLS storage for personal group (used for identity & group backups)
+      await _initializePersonalGroup();
 
       // Load or generate Nostr key
       await _ensureNostrKey();
@@ -220,6 +232,9 @@ class GroupState with ChangeNotifier {
 
       // Initialize event database for group announcements
       await _initializeEventDatabase();
+
+      // Initialize backup service (after nostrService and db are ready)
+      await _initializeBackupService();
 
       // Connect to relay
       await _nostrService!.connect((connected) async {
@@ -254,7 +269,7 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  Future<void> _initializeKeysGroup() async {
+  Future<void> _initializePersonalGroup() async {
     try {
       _dbService = AppDBService();
       await _dbService!.init('group_keys');
@@ -281,53 +296,62 @@ class GroupState with ChangeNotifier {
         storage: _mlsStorage!,
       );
 
-      // Try to load existing keys group
+      // Try to load existing personal group
       final savedGroups = await MlsGroupTable(
         _dbService!.database!,
       ).listGroupIds();
 
-      // Look for a group named "keys" or create one
-      MlsGroup? keysGroup;
+      // Look for a group named "Personal" or "keys" (migration) and use it
+      MlsGroup? personalGroup;
       for (final groupId in savedGroups) {
         final groupName = await _mlsStorage!.loadGroupName(groupId);
-        if (groupName == 'keys') {
-          keysGroup = await _mlsService!.loadGroup(groupId);
+        // Check for "Personal" first, then "keys" for backward compatibility
+        if (groupName == 'Personal') {
+          personalGroup = await _mlsService!.loadGroup(groupId);
           break;
+        } else if (groupName == 'keys' && personalGroup == null) {
+          // Migration: use old "keys" group as personal group
+          personalGroup = await _mlsService!.loadGroup(groupId);
+          // Rename it to "Personal" for consistency
+          if (personalGroup != null) {
+            await _mlsStorage!.saveGroupName(groupId, 'Personal');
+            debugPrint('Migrated "keys" group to "Personal"');
+          }
         }
       }
 
-      if (keysGroup == null) {
-        // Create new keys group
-        keysGroup = await _mlsService!.createGroup(
+      if (personalGroup == null) {
+        // Create new personal group
+        personalGroup = await _mlsService!.createGroup(
           creatorUserId: 'self',
-          groupName: 'keys',
+          groupName: 'Personal',
         );
       }
 
-      _keysGroup = keysGroup;
-      debugPrint('Keys group initialized: ${_keysGroup!.id.bytes}');
+      _personalGroup = personalGroup;
+      debugPrint('Personal group initialized: ${_personalGroup!.id.bytes}');
 
-      // Signal that keys group initialization is complete
-      if (!_keysGroupInitCompleter.isCompleted) {
-        _keysGroupInitCompleter.complete();
+      // Signal that personal group initialization is complete
+      if (!_personalGroupInitCompleter.isCompleted) {
+        _personalGroupInitCompleter.complete();
       }
     } catch (e) {
-      debugPrint('Failed to initialize keys group: $e');
+      debugPrint('Failed to initialize personal group: $e');
       // Complete with error so waiting code doesn't hang
-      if (!_keysGroupInitCompleter.isCompleted) {
-        _keysGroupInitCompleter.complete();
+      if (!_personalGroupInitCompleter.isCompleted) {
+        _personalGroupInitCompleter.complete();
       }
     }
   }
 
   Future<void> _ensureNostrKey() async {
-    if (_keysGroup == null) {
+    if (_personalGroup == null) {
       debugPrint('No keys group available, skipping Nostr key setup');
       return;
     }
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
+      final groupIdHex = _personalGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
@@ -336,7 +360,7 @@ class GroupState with ChangeNotifier {
 
       if (storedCiphertext != null) {
         try {
-          final decrypted = await _keysGroup!.decryptApplicationMessage(
+          final decrypted = await _personalGroup!.decryptApplicationMessage(
             storedCiphertext,
           );
           final keyData = jsonDecode(String.fromCharCodes(decrypted));
@@ -367,7 +391,7 @@ class GroupState with ChangeNotifier {
   /// Attempt to recover Nostr key from relay or generate a new one
   /// This should be called after relay connection is established
   Future<void> _recoverOrGenerateNostrKey() async {
-    if (!_needsNostrKeyRecovery || _keysGroup == null) {
+    if (!_needsNostrKeyRecovery || _personalGroup == null) {
       return;
     }
 
@@ -377,7 +401,7 @@ class GroupState with ChangeNotifier {
     }
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
+      final groupIdHex = _personalGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
@@ -406,7 +430,7 @@ class GroupState with ChangeNotifier {
   Future<Map<String, dynamic>?> _fetchNostrKeyFromRelay(
     String groupIdHex,
   ) async {
-    if (_nostrService == null || _keysGroup == null) return null;
+    if (_nostrService == null || _personalGroup == null) return null;
 
     try {
       // Query for kind 10078 events with our keys group ID
@@ -435,7 +459,7 @@ class GroupState with ChangeNotifier {
 
       // Reconstruct MlsCiphertext from the event content
       final ciphertext = MlsCiphertext(
-        groupId: _keysGroup!.id,
+        groupId: _personalGroup!.id,
         epoch: encryptedJson['epoch'] as int,
         senderIndex: encryptedJson['senderIndex'] as int,
         generation: encryptedJson['generation'] as int? ?? 0,
@@ -449,7 +473,9 @@ class GroupState with ChangeNotifier {
       );
 
       // Decrypt using the keys group
-      final decrypted = await _keysGroup!.decryptApplicationMessage(ciphertext);
+      final decrypted = await _personalGroup!.decryptApplicationMessage(
+        ciphertext,
+      );
       final keyData =
           jsonDecode(String.fromCharCodes(decrypted)) as Map<String, dynamic>;
 
@@ -466,7 +492,7 @@ class GroupState with ChangeNotifier {
 
   /// Generate a new Nostr keypair and publish to relay
   Future<void> _generateAndPublishNostrKey(String groupIdHex) async {
-    if (_keysGroup == null || _nostrService == null) return;
+    if (_personalGroup == null || _nostrService == null) return;
 
     // Generate new Nostr key pair
     final random = Random.secure();
@@ -486,7 +512,9 @@ class GroupState with ChangeNotifier {
     final keyBytes = Uint8List.fromList(keyJson.codeUnits);
 
     // Encrypt with the keys group
-    final ciphertext = await _keysGroup!.encryptApplicationMessage(keyBytes);
+    final ciphertext = await _personalGroup!.encryptApplicationMessage(
+      keyBytes,
+    );
 
     // Cache locally
     await _storeNostrKeyCiphertext(groupIdHex, ciphertext);
@@ -557,7 +585,7 @@ class GroupState with ChangeNotifier {
   /// Ensure the locally cached key is synced to the relay
   /// This is called after connection when we have a local key but need to verify it's on relay
   Future<void> _ensureKeyIsSyncedToRelay() async {
-    if (!_needsRelaySyncCheck || _keysGroup == null) {
+    if (!_needsRelaySyncCheck || _personalGroup == null) {
       return;
     }
 
@@ -567,7 +595,7 @@ class GroupState with ChangeNotifier {
     }
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
+      final groupIdHex = _personalGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
@@ -601,12 +629,12 @@ class GroupState with ChangeNotifier {
   /// Republish the current Nostr identity to the relay
   /// This is useful if the relay event was lost or to ensure backup is up-to-date
   Future<void> republishNostrIdentity() async {
-    if (_keysGroup == null || _nostrService == null || !_isConnected) {
+    if (_personalGroup == null || _nostrService == null || !_isConnected) {
       throw Exception('Not connected or keys group not initialized');
     }
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
+      final groupIdHex = _personalGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
@@ -617,7 +645,7 @@ class GroupState with ChangeNotifier {
       }
 
       // Decrypt to get the keypair (we need it to sign the event)
-      final decrypted = await _keysGroup!.decryptApplicationMessage(
+      final decrypted = await _personalGroup!.decryptApplicationMessage(
         storedCiphertext,
       );
       final keyData = jsonDecode(String.fromCharCodes(decrypted));
@@ -656,7 +684,7 @@ class GroupState with ChangeNotifier {
       final generation = row['generation'] as int? ?? 0;
 
       return MlsCiphertext(
-        groupId: _keysGroup!.id,
+        groupId: _personalGroup!.id,
         epoch: epoch,
         senderIndex: senderIndex,
         generation: generation,
@@ -721,6 +749,7 @@ class GroupState with ChangeNotifier {
   @override
   void dispose() {
     _mounted = false;
+    _dailyBackupTimer?.cancel();
     _groupEventSubscription?.cancel();
     _messageEventSubscription?.cancel();
     _encryptedEnvelopeSubscription?.cancel();
@@ -742,6 +771,70 @@ class GroupState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to initialize event database: $e');
       // Continue without event DB - group name resolution will fall back to MLS groups
+    }
+  }
+
+  /// Initialize backup service for MLS group backup/restore
+  Future<void> _initializeBackupService() async {
+    if (_nostrService == null || _dbService?.database == null) {
+      debugPrint('Cannot initialize backup service: missing dependencies');
+      return;
+    }
+
+    try {
+      _backupService = await BackupService.fromDatabase(
+        database: _dbService!.database!,
+        nostrService: _nostrService!,
+      );
+      debugPrint('Backup service initialized');
+
+      // Start daily backup timer
+      _startDailyBackupTimer();
+    } catch (e) {
+      debugPrint('Failed to initialize backup service: $e');
+      // Continue without backup service - not critical for core functionality
+    }
+  }
+
+  /// Start timer for daily automatic backup
+  void _startDailyBackupTimer() {
+    // Cancel any existing timer
+    _dailyBackupTimer?.cancel();
+
+    // Check every hour if we need to do a daily backup
+    _dailyBackupTimer = Timer.periodic(const Duration(hours: 1), (_) {
+      _checkAndPerformDailyBackup();
+    });
+
+    // Also do an initial check
+    _checkAndPerformDailyBackup();
+  }
+
+  /// Check if 24 hours have passed and perform backup if needed
+  Future<void> _checkAndPerformDailyBackup() async {
+    final now = DateTime.now();
+
+    // Skip if we checked recently (within last hour)
+    if (_lastDailyBackupCheck != null &&
+        now.difference(_lastDailyBackupCheck!).inHours < 1) {
+      return;
+    }
+
+    _lastDailyBackupCheck = now;
+
+    // Check if backup is needed (any pending backups)
+    if (_backupService == null) return;
+
+    try {
+      final lastBackup = await _backupService!.getOverallLastBackupTime();
+
+      // If never backed up or more than 24 hours since last backup
+      if (lastBackup == null || now.difference(lastBackup).inHours >= 24) {
+        debugPrint('Daily backup check: performing automatic backup');
+        await _performBackupInternal(forceAll: false);
+      }
+    } catch (e) {
+      debugPrint('Daily backup check failed: $e');
     }
   }
 
@@ -1432,6 +1525,9 @@ class GroupState with ChangeNotifier {
           debugPrint(
             'Published NIP-29 put-user (kind 9000) to add creator as admin: ${putUserModel.id}',
           );
+
+          // Trigger backup for the newly created group
+          await _backupNewGroup(mlsGroup);
         } else {
           debugPrint(
             'Warning: No Nostr key found, group creation event not published',
@@ -1445,6 +1541,49 @@ class GroupState with ChangeNotifier {
       debugPrint('Failed to create group: $e');
       rethrow;
     }
+  }
+
+  /// Backup a newly created or joined group
+  Future<void> _backupNewGroup(MlsGroup group) async {
+    if (_backupService == null) return;
+
+    try {
+      final personalGroup = await _getPersonalGroup();
+      if (personalGroup == null) {
+        debugPrint('Cannot backup: no personal group found');
+        return;
+      }
+
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null) return;
+
+      final keyPairs = NostrKeyPairs(private: privateKey);
+      final personalGroupIdHex = _groupIdToHex(personalGroup.id);
+      final groupIdHex = _groupIdToHex(group.id);
+
+      // Don't backup the personal group itself
+      if (groupIdHex == personalGroupIdHex) return;
+
+      // Track and backup the group
+      await _backupService!.trackGroup(groupIdHex);
+      await _backupService!.backupMlsGroup(
+        groupId: group.id,
+        personalGroup: personalGroup,
+        keyPairs: keyPairs,
+        personalGroupIdHex: personalGroupIdHex,
+      );
+    } catch (e) {
+      debugPrint('Failed to backup new group: $e');
+      // Don't fail the operation if backup fails
+    }
+  }
+
+  /// Get the user's personal MLS group (for encryption)
+  /// This is the unified personal group used for both identity backup and MLS group backups
+  Future<MlsGroup?> _getPersonalGroup() async {
+    // Return the personal group that was initialized at startup
+    // This is the same group used for Nostr identity backup
+    return _personalGroup;
   }
 
   /// Update group metadata (name, about, picture, cover)
@@ -2628,12 +2767,12 @@ class GroupState with ChangeNotifier {
 
   /// Get the stored Nostr private key
   Future<String?> getNostrPrivateKey() async {
-    if (_keysGroup == null || _dbService?.database == null) {
+    if (_personalGroup == null || _dbService?.database == null) {
       return null;
     }
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
+      final groupIdHex = _personalGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
@@ -2642,7 +2781,7 @@ class GroupState with ChangeNotifier {
         return null;
       }
 
-      final decrypted = await _keysGroup!.decryptApplicationMessage(
+      final decrypted = await _personalGroup!.decryptApplicationMessage(
         storedCiphertext,
       );
       final keyData = jsonDecode(String.fromCharCodes(decrypted));
@@ -2655,12 +2794,12 @@ class GroupState with ChangeNotifier {
 
   /// Get the stored Nostr public key
   Future<String?> getNostrPublicKey() async {
-    if (_keysGroup == null || _dbService?.database == null) {
+    if (_personalGroup == null || _dbService?.database == null) {
       return null;
     }
 
     try {
-      final groupIdHex = _keysGroup!.id.bytes
+      final groupIdHex = _personalGroup!.id.bytes
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
@@ -2669,7 +2808,7 @@ class GroupState with ChangeNotifier {
         return null;
       }
 
-      final decrypted = await _keysGroup!.decryptApplicationMessage(
+      final decrypted = await _personalGroup!.decryptApplicationMessage(
         storedCiphertext,
       );
       final keyData = jsonDecode(String.fromCharCodes(decrypted));
@@ -3496,120 +3635,144 @@ class GroupState with ChangeNotifier {
       debugPrint(
         'Successfully joined group ${properGroupName ?? group.name} ($groupIdHex)',
       );
+
+      // Trigger backup for the newly joined group
+      await _backupNewGroup(group);
     } catch (e) {
       debugPrint('Failed to handle Welcome invitation: $e');
       rethrow;
     }
   }
 
-  /// Ensure a personal MLS group exists for the user's Nostr key.
-  /// This can be called for migration purposes for existing users who don't
-  /// have a personal group yet.
+  /// Ensure the personal MLS group is announced to the relay.
   ///
-  /// Note: For new users, personal group creation is handled in the onboarding flow.
+  /// The personal group is created locally at startup (in _initializePersonalGroup).
+  /// This method ensures it's announced to the relay so other devices can discover it.
   ///
-  /// The method:
-  /// 1. Checks if the user already has a local MLS group they created
-  /// 2. If not found locally, checks the relay for groups created by this user
-  /// 3. If a relay group exists but user isn't in it locally, attempts to join it
-  /// 4. If no personal group exists anywhere, creates a new one with isPersonal: true
+  /// The unified personal group is used for:
+  /// - Nostr identity backup (kind 10078)
+  /// - MLS group backups (kind 30079)
   Future<void> ensurePersonalGroup() async {
-    if (!_isConnected || _nostrService == null || _mlsService == null) {
+    if (!_isConnected || _nostrService == null || _personalGroup == null) {
       return;
     }
 
     try {
-      // Get user's pubkey
+      // Get user's pubkey and private key
       final pubkey = await getNostrPublicKey();
-      if (pubkey == null) {
-        debugPrint('No pubkey available, skipping personal group check');
+      final privateKey = await getNostrPrivateKey();
+      if (pubkey == null || privateKey == null) {
+        debugPrint(
+          'No Nostr key available, skipping personal group announcement',
+        );
         return;
       }
 
+      final personalGroupIdHex = _groupIdToHex(_personalGroup!.id);
       debugPrint(
-        'Ensuring personal group for pubkey: ${pubkey.substring(0, 8)}...',
+        'Ensuring personal group is announced: ${personalGroupIdHex.substring(0, 8)}...',
       );
 
-      // Step 1: Check if we have any local MLS groups
-      // The user is a member of all groups in _groups since they're loaded from local MLS storage
-      if (_groups.isNotEmpty) {
-        // Check if any local group was created by us (check relay announcements)
-        for (final group in _groups) {
-          final groupIdHex = _groupIdToHex(group.id);
-          // Look up the group announcement to see who created it
-          final announcement = _discoveredGroups.firstWhere(
-            (a) => a.mlsGroupId == groupIdHex,
-            orElse: () => GroupAnnouncement(
-              eventId: '',
-              pubkey: '',
-              createdAt: DateTime.now(),
-            ),
-          );
-          if (announcement.pubkey == pubkey) {
-            debugPrint(
-              'User already has their own group: ${group.name} ($groupIdHex)',
-            );
-            return;
-          }
-        }
-
-        // Also check if any local group is named "Personal" (for backwards compatibility)
-        final hasPersonalNamedGroup = _groups.any((group) {
-          final name = group.name.toLowerCase();
-          return name == 'personal' || name == 'my group';
-        });
-        if (hasPersonalNamedGroup) {
-          debugPrint('User has a local group named Personal');
-          return;
-        }
-      }
-
-      // Step 2: Check relay for groups created by this user
+      // Check if personal group is already announced on relay
       final existingGroups = await fetchGroupsFromRelay(
         limit: 1000,
         useCache: false,
       );
 
-      final userOwnedGroups = existingGroups
-          .where((announcement) => announcement.pubkey == pubkey)
-          .toList();
+      // Check if our personal group is already announced
+      final alreadyAnnounced = existingGroups.any((announcement) {
+        return announcement.mlsGroupId == personalGroupIdHex &&
+            announcement.pubkey == pubkey;
+      });
 
-      if (userOwnedGroups.isNotEmpty) {
-        // User has created a group on the relay but doesn't have it locally
-        // This can happen if they're on a new device or cleared local storage
-        final ownedGroup = userOwnedGroups.first;
-        debugPrint(
-          'Found user-owned group on relay: ${ownedGroup.name ?? "unnamed"} (${ownedGroup.mlsGroupId})',
-        );
+      if (alreadyAnnounced) {
+        debugPrint('Personal group already announced on relay');
 
-        // Check if we already have this group locally
-        final alreadyHaveLocally = _groups.any((g) {
-          final idHex = _groupIdToHex(g.id);
-          return idHex == ownedGroup.mlsGroupId;
-        });
-
-        if (alreadyHaveLocally) {
-          debugPrint('User already has their owned group locally');
-          return;
+        // Add to groups list if not already there
+        if (!_groups.any((g) => _groupIdToHex(g.id) == personalGroupIdHex)) {
+          _groups.insert(0, _personalGroup!);
+          safeNotifyListeners();
         }
-
-        // User created a group but doesn't have it locally
-        // Since they are the creator, they should recreate it with the same ID
-        // However, MLS groups can't be "rejoined" without a Welcome message
-        // So we'll create a new personal group instead
-        debugPrint(
-          'User owns a group on relay but cannot rejoin without Welcome. Creating new personal group.',
-        );
+        return;
       }
 
-      // Step 3: No personal group exists - create one
-      debugPrint('Creating personal MLS group for pubkey: $pubkey');
-      await createGroup(
-        'Personal',
-        about: 'My personal group',
-        isPersonal: true,
+      // Announce personal group to relay
+      debugPrint('Announcing personal group to relay');
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Create kind 9007 event (create-group) per NIP-29
+      final createGroupCreatedAt = DateTime.now();
+      final createGroupTags = await addClientTagsWithSignature([
+        ['h', personalGroupIdHex],
+        ['name', 'Personal'],
+        ['about', 'My personal group'],
+        ['personal', pubkey],
+        ['public'],
+        ['open'],
+      ], createdAt: createGroupCreatedAt);
+
+      final createGroupEvent = NostrEvent.fromPartialData(
+        kind: kindCreateGroup,
+        content: '',
+        keyPairs: keyPair,
+        tags: createGroupTags,
+        createdAt: createGroupCreatedAt,
       );
-      debugPrint('Personal group created successfully');
+
+      final createGroupModel = NostrEventModel(
+        id: createGroupEvent.id,
+        pubkey: createGroupEvent.pubkey,
+        kind: createGroupEvent.kind,
+        content: createGroupEvent.content,
+        tags: createGroupEvent.tags,
+        sig: createGroupEvent.sig,
+        createdAt: createGroupEvent.createdAt,
+      );
+
+      await _nostrService!.publishEvent(createGroupModel.toJson());
+      debugPrint('Published NIP-29 create-group for personal group');
+
+      // Add creator as admin with kind 9000 (put-user)
+      final putUserCreatedAt = DateTime.now();
+      final putUserTags = await addClientTagsWithSignature([
+        ['h', personalGroupIdHex],
+        ['p', keyPair.public, 'admin'],
+      ], createdAt: putUserCreatedAt);
+
+      final putUserEvent = NostrEvent.fromPartialData(
+        kind: kindPutUser,
+        content: '',
+        keyPairs: keyPair,
+        tags: putUserTags,
+        createdAt: putUserCreatedAt,
+      );
+
+      final putUserModel = NostrEventModel(
+        id: putUserEvent.id,
+        pubkey: putUserEvent.pubkey,
+        kind: putUserEvent.kind,
+        content: putUserEvent.content,
+        tags: putUserEvent.tags,
+        sig: putUserEvent.sig,
+        createdAt: putUserEvent.createdAt,
+      );
+
+      await _nostrService!.publishEvent(putUserModel.toJson());
+      debugPrint('Published NIP-29 put-user for personal group');
+
+      // Add to groups list if not already there
+      if (!_groups.any((g) => _groupIdToHex(g.id) == personalGroupIdHex)) {
+        _groups.insert(0, _personalGroup!);
+      }
+
+      // Cache the group
+      _mlsGroups[personalGroupIdHex] = _personalGroup!;
+
+      // Refresh the event listener to include the personal group
+      refreshGroupEventListener();
+
+      safeNotifyListeners();
+      debugPrint('Personal group announced successfully');
     } catch (e) {
       debugPrint('Failed to ensure personal group: $e');
       // Don't throw - this is not critical for app functionality
@@ -4375,6 +4538,400 @@ class GroupState with ChangeNotifier {
   /// Returns information about the export contents.
   Future<WhatsAppExportResult> previewWhatsAppExport(Uint8List zipBytes) async {
     return await _whatsAppImportService.parseExport(zipBytes);
+  }
+
+  // ============================================================================
+  // Backup & Recovery
+  // ============================================================================
+
+  /// Perform manual backup of all MLS groups
+  ///
+  /// Returns the number of groups backed up, or -1 if backup failed
+  Future<int> performManualBackup() async {
+    return await _performBackupInternal(forceAll: true);
+  }
+
+  /// Internal backup method used by both manual and automatic backups
+  Future<int> _performBackupInternal({required bool forceAll}) async {
+    if (_backupService == null) {
+      debugPrint('Backup service not initialized');
+      return -1;
+    }
+
+    try {
+      final personalGroup = await _getPersonalGroup();
+      if (personalGroup == null) {
+        debugPrint('Cannot backup: no personal group found');
+        return -1;
+      }
+
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null) {
+        debugPrint('Cannot backup: no private key');
+        return -1;
+      }
+
+      final keyPairs = NostrKeyPairs(private: privateKey);
+      final personalGroupIdHex = _groupIdToHex(personalGroup.id);
+
+      final count = await _backupService!.backupAllMlsGroups(
+        groups: _groups,
+        personalGroup: personalGroup,
+        keyPairs: keyPairs,
+        personalGroupIdHex: personalGroupIdHex,
+        forceAll: forceAll,
+      );
+
+      safeNotifyListeners();
+      return count;
+    } catch (e) {
+      debugPrint('Backup failed: $e');
+      return -1;
+    }
+  }
+
+  /// Get backup status (last backup time and pending count)
+  Future<BackupStatus> getBackupStatus() async {
+    if (_backupService == null) {
+      return BackupStatus(
+        lastBackupTime: null,
+        pendingCount: _groups.length,
+        totalGroups: _groups.length,
+      );
+    }
+
+    return await _backupService!.getBackupStatus();
+  }
+
+  /// Check if any backups are pending
+  Future<bool> hasPendingBackups() async {
+    if (_backupService == null) return true;
+    return await _backupService!.hasPendingBackups();
+  }
+
+  /// Get last backup time
+  Future<DateTime?> getLastBackupTime() async {
+    if (_backupService == null) return null;
+    return await _backupService!.getOverallLastBackupTime();
+  }
+
+  /// Mark a group as dirty (needs backup)
+  /// Called when group state changes
+  Future<void> markGroupDirtyForBackup(String groupIdHex) async {
+    if (_backupService == null) return;
+    await _backupService!.markGroupDirty(groupIdHex);
+  }
+
+  /// Restore MLS groups from relay backups
+  ///
+  /// Returns the list of restored backups. The caller is responsible for
+  /// restoring these to local storage.
+  Future<List<MlsGroupBackup>> restoreBackupsFromRelay() async {
+    if (_backupService == null || _nostrService == null) {
+      debugPrint(
+        'Cannot restore: backup service or nostr service not initialized',
+      );
+      return [];
+    }
+
+    try {
+      final personalGroup = await _getPersonalGroup();
+      if (personalGroup == null) {
+        debugPrint('Cannot restore: no personal group found');
+        return [];
+      }
+
+      final pubkey = await getNostrPublicKey();
+      if (pubkey == null) {
+        debugPrint('Cannot restore: no pubkey');
+        return [];
+      }
+
+      final personalGroupIdHex = _groupIdToHex(personalGroup.id);
+
+      return await _backupService!.fetchBackupsFromRelay(
+        personalGroup: personalGroup,
+        userPubkey: pubkey,
+        personalGroupIdHex: personalGroupIdHex,
+      );
+    } catch (e) {
+      debugPrint('Restore failed: $e');
+      return [];
+    }
+  }
+
+  /// Get the relay URL being used
+  String? get relayUrl => dotenv.env['RELAY_URL'];
+
+  /// Publish a Nostr event to the relay
+  Future<void> publishEvent(NostrEventModel event) async {
+    if (_nostrService == null) {
+      throw Exception('Nostr service not initialized');
+    }
+    await _nostrService!.publishEvent(event.toJson());
+  }
+
+  /// Wait for connection to be established
+  Future<void> waitForConnection() async {
+    // If already connected, return immediately
+    if (_isConnected) return;
+
+    // Wait for connection with timeout
+    final completer = Completer<void>();
+    Timer? timeout;
+
+    void listener() {
+      if (_isConnected && !completer.isCompleted) {
+        timeout?.cancel();
+        completer.complete();
+      }
+    }
+
+    addListener(listener);
+    timeout = Timer(const Duration(seconds: 30), () {
+      if (!completer.isCompleted) {
+        completer.completeError(TimeoutException('Connection timeout'));
+      }
+    });
+
+    try {
+      await completer.future;
+    } finally {
+      removeListener(listener);
+    }
+  }
+
+  /// Listen for gift-wrapped events sent to a specific pubkey
+  ///
+  /// Used for device-to-device recovery transfer
+  StreamSubscription<NostrEventModel>? listenForGiftWrappedEvents({
+    required String recipientPubkey,
+    required Function(Map<String, dynamic>) onEvent,
+  }) {
+    if (_nostrService == null) return null;
+
+    final stream = _nostrService!.listenToEvents(
+      kind: kindEncryptedEnvelope,
+      pTags: [recipientPubkey],
+    );
+
+    return stream.listen((event) {
+      onEvent(event.toJson());
+    });
+  }
+
+  /// Restore from a recovery payload (used when recovering via link or device transfer)
+  ///
+  /// This restores the personal MLS group, which is then used to recover
+  /// the Nostr identity and other MLS groups from the relay.
+  Future<bool> restoreFromRecoveryPayload(RecoveryPayload payload) async {
+    try {
+      debugPrint('Restoring from recovery payload...');
+
+      // Get database from existing service
+      if (_dbService?.database == null) {
+        debugPrint('Cannot restore: database not initialized');
+        return false;
+      }
+
+      // Create recovery service
+      final recoveryService = await RecoveryService.fromDatabase(
+        _dbService!.database!,
+      );
+
+      // Restore the personal group
+      final restoredGroup = await recoveryService.restoreFromPayload(
+        payload,
+        _dbService!.database!,
+      );
+
+      if (restoredGroup == null) {
+        debugPrint('Failed to restore personal group');
+        return false;
+      }
+
+      // Set as our personal group
+      _personalGroup = restoredGroup;
+      debugPrint(
+        'Personal group restored: ${payload.groupId.substring(0, 8)}...',
+      );
+
+      // Signal that personal group is ready (if not already completed)
+      if (!_personalGroupInitCompleter.isCompleted) {
+        _personalGroupInitCompleter.complete();
+      }
+
+      // Add to groups list
+      if (!_groups.any((g) => _groupIdToHex(g.id) == payload.groupId)) {
+        _groups.insert(0, restoredGroup);
+      }
+
+      // Cache the group
+      _mlsGroups[payload.groupId] = restoredGroup;
+
+      safeNotifyListeners();
+      return true;
+    } catch (e) {
+      debugPrint('Restore from payload failed: $e');
+      return false;
+    }
+  }
+
+  /// Generate recovery payload for the personal group
+  Future<RecoveryPayload?> generateRecoveryPayload() async {
+    final personalGroup = await _getPersonalGroup();
+    if (personalGroup == null) {
+      debugPrint('Cannot generate recovery: no personal group');
+      return null;
+    }
+
+    if (_dbService?.database == null) {
+      debugPrint('Cannot generate recovery: database not initialized');
+      return null;
+    }
+
+    final recoveryService = await RecoveryService.fromDatabase(
+      _dbService!.database!,
+    );
+
+    return await recoveryService.generateRecoveryPayload(personalGroup);
+  }
+
+  // ============================================================================
+  // Data Deletion (Danger Zone)
+  // ============================================================================
+
+  /// Delete ALL app data permanently
+  ///
+  /// This will:
+  /// - Delete all local databases
+  /// - Delete all keychain/secure storage values
+  /// - Set Nostr profile to empty values
+  ///
+  /// WARNING: This is irreversible unless the user has a recovery link!
+  Future<void> deleteAllAppData() async {
+    debugPrint('Starting deletion of all app data...');
+
+    try {
+      // 1. Clear Nostr profile (set to empty values)
+      await _clearNostrProfile();
+
+      // 2. Delete all secure storage (keychain) data
+      await _deleteAllSecureStorage();
+
+      // 3. Delete all databases
+      await _deleteAllDatabases();
+
+      // 4. Clear in-memory state
+      _clearInMemoryState();
+
+      debugPrint('All app data deleted successfully');
+    } catch (e) {
+      debugPrint('Error deleting app data: $e');
+      rethrow;
+    }
+  }
+
+  /// Clear Nostr profile by setting empty values
+  Future<void> _clearNostrProfile() async {
+    try {
+      final pubkey = await getNostrPublicKey();
+      final privateKey = await getNostrPrivateKey();
+
+      if (pubkey == null || privateKey == null || _nostrService == null) {
+        debugPrint('Cannot clear profile: missing keys or service');
+        return;
+      }
+
+      // Create empty profile event (kind 0)
+      final keyPairs = NostrKeyPairs(private: privateKey);
+      final createdAt = DateTime.now();
+
+      final emptyProfile = <String, dynamic>{
+        'name': '',
+        'about': '',
+        'picture': '',
+        'banner': '',
+        'nip05': '',
+        'lud16': '',
+        'website': '',
+      };
+
+      final profileEvent = NostrEvent.fromPartialData(
+        kind: 0, // Profile metadata
+        content: jsonEncode(emptyProfile),
+        keyPairs: keyPairs,
+        tags: [],
+        createdAt: createdAt,
+      );
+
+      final eventModel = NostrEventModel(
+        id: profileEvent.id,
+        pubkey: profileEvent.pubkey,
+        kind: profileEvent.kind,
+        content: profileEvent.content,
+        tags: profileEvent.tags,
+        sig: profileEvent.sig,
+        createdAt: profileEvent.createdAt,
+      );
+
+      await _nostrService!.publishEvent(eventModel.toJson());
+      debugPrint('Nostr profile cleared');
+    } catch (e) {
+      debugPrint('Error clearing Nostr profile: $e');
+      // Continue with other deletions even if this fails
+    }
+  }
+
+  /// Delete all secure storage data
+  Future<void> _deleteAllSecureStorage() async {
+    try {
+      final secureStorage = MlsSecureStorage();
+      await secureStorage.deleteAll();
+      debugPrint('Secure storage cleared');
+    } catch (e) {
+      debugPrint('Error clearing secure storage: $e');
+      rethrow;
+    }
+  }
+
+  /// Delete all databases
+  Future<void> _deleteAllDatabases() async {
+    try {
+      // Delete main app database
+      if (_dbService != null) {
+        await _dbService!.deleteDB();
+        debugPrint('Main database deleted');
+      }
+
+      // Delete event database
+      if (_eventDbService != null) {
+        await _eventDbService!.deleteDB();
+        debugPrint('Event database deleted');
+      }
+
+      debugPrint('All databases deleted');
+    } catch (e) {
+      debugPrint('Error deleting databases: $e');
+      rethrow;
+    }
+  }
+
+  /// Clear all in-memory state
+  void _clearInMemoryState() {
+    _groups.clear();
+    _mlsGroups.clear();
+    _personalGroup = null;
+    _groupEventSubscription?.cancel();
+    _groupEventSubscription = null;
+    _messageEventSubscription?.cancel();
+    _messageEventSubscription = null;
+    _dailyBackupTimer?.cancel();
+    _dailyBackupTimer = null;
+    _backupService = null;
+    _isConnected = false;
+    safeNotifyListeners();
+    debugPrint('In-memory state cleared');
   }
 }
 

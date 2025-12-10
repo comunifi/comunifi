@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
+import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
+import 'package:comunifi/screens/settings/backup_settings_modal.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -30,6 +32,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _isUploadingPhoto = false;
   String? _uploadPhotoError;
   final ImagePicker _imagePicker = ImagePicker();
+
+  // Danger zone state
+  bool _isDeletingData = false;
 
   @override
   void initState() {
@@ -275,9 +280,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      navigationBar: const CupertinoNavigationBar(
-        middle: Text('Profile'),
-      ),
+      navigationBar: const CupertinoNavigationBar(middle: Text('Profile')),
       child: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(16),
@@ -295,10 +298,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 children: [
                   const Text(
                     'Profile Photo',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 16),
                   // Profile picture avatar
@@ -315,7 +315,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             color: CupertinoColors.systemGrey4,
                             image: _currentProfilePictureUrl != null
                                 ? DecorationImage(
-                                    image: NetworkImage(_currentProfilePictureUrl!),
+                                    image: NetworkImage(
+                                      _currentProfilePictureUrl!,
+                                    ),
                                     fit: BoxFit.cover,
                                   )
                                 : null,
@@ -363,9 +365,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    _isUploadingPhoto
-                        ? 'Uploading...'
-                        : 'Tap to change photo',
+                    _isUploadingPhoto ? 'Uploading...' : 'Tap to change photo',
                     style: const TextStyle(
                       color: CupertinoColors.secondaryLabel,
                       fontSize: 14,
@@ -430,10 +430,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 children: [
                   const Text(
                     'Username',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 12),
                   CupertinoTextField(
@@ -565,11 +562,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   CupertinoButton.filled(
                     onPressed:
                         (_userNostrPubkey != null &&
-                                _usernameAvailable == true &&
-                                !_isUpdatingUsername &&
-                                _usernameController.text.trim() != _userUsername)
-                            ? _updateUsername
-                            : null,
+                            _usernameAvailable == true &&
+                            !_isUpdatingUsername &&
+                            _usernameController.text.trim() != _userUsername)
+                        ? _updateUsername
+                        : null,
                     child: _isUpdatingUsername
                         ? const CupertinoActivityIndicator(
                             color: CupertinoColors.white,
@@ -589,10 +586,275 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ],
               ),
             ),
+            // Backup & Recovery section
+            Container(
+              padding: const EdgeInsets.all(16),
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemGrey6,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'Backup & Recovery',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Backup your groups to the relay for recovery on other devices.',
+                    style: TextStyle(
+                      color: CupertinoColors.secondaryLabel.resolveFrom(
+                        context,
+                      ),
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    onPressed: () => showBackupSettingsModal(context),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: CupertinoColors.systemBackground.resolveFrom(
+                          context,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: CupertinoColors.systemBlue.withOpacity(
+                                0.15,
+                              ),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(
+                              CupertinoIcons.cloud_upload,
+                              size: 18,
+                              color: CupertinoColors.systemBlue,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Backup Settings',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w500,
+                                    color: CupertinoColors.label.resolveFrom(
+                                      context,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'View backup status and backup now',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: CupertinoColors.secondaryLabel
+                                        .resolveFrom(context),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Icon(
+                            CupertinoIcons.chevron_right,
+                            size: 16,
+                            color: CupertinoColors.tertiaryLabel.resolveFrom(
+                              context,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            // Danger Zone section
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemRed.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: CupertinoColors.systemRed.withOpacity(0.3),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        CupertinoIcons.exclamationmark_triangle_fill,
+                        color: CupertinoColors.systemRed.resolveFrom(context),
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Danger Zone',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: CupertinoColors.systemRed,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'These actions are permanent and cannot be undone.',
+                    style: TextStyle(
+                      color: CupertinoColors.secondaryLabel.resolveFrom(
+                        context,
+                      ),
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  CupertinoButton(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    color: CupertinoColors.systemRed,
+                    borderRadius: BorderRadius.circular(8),
+                    onPressed: _isDeletingData ? null : _showDeleteConfirmation,
+                    child: _isDeletingData
+                        ? const CupertinoActivityIndicator(
+                            color: CupertinoColors.white,
+                          )
+                        : const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                CupertinoIcons.trash,
+                                size: 18,
+                                color: CupertinoColors.white,
+                              ),
+                              SizedBox(width: 8),
+                              Text(
+                                'Delete All App Data',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: CupertinoColors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 32),
           ],
         ),
       ),
     );
   }
-}
 
+  void _showDeleteConfirmation() {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Delete All App Data?'),
+        content: const Text(
+          'This will permanently delete:\n\n'
+          '• All your messages and groups\n'
+          '• Your encryption keys\n'
+          '• Your local settings\n'
+          '• Your Nostr profile data\n\n'
+          'If you don\'t have a recovery link saved, you will lose access to your account forever.\n\n'
+          'This action cannot be undone.',
+        ),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () {
+              Navigator.of(context).pop();
+              _showFinalConfirmation();
+            },
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showFinalConfirmation() {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Are you absolutely sure?'),
+        content: const Text(
+          'Type "DELETE" to confirm you want to permanently delete all your data.',
+        ),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () {
+              Navigator.of(context).pop();
+              _deleteAllData();
+            },
+            child: const Text('Delete Everything'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _deleteAllData() async {
+    setState(() {
+      _isDeletingData = true;
+    });
+
+    try {
+      final groupState = context.read<GroupState>();
+      await groupState.deleteAllAppData();
+
+      // Navigate to onboarding screen
+      if (mounted) {
+        context.go('/');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isDeletingData = false;
+        });
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Error'),
+            content: Text('Failed to delete data: $e'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+}
