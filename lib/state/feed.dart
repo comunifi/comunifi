@@ -28,6 +28,14 @@ class FeedState with ChangeNotifier {
   AppDBService? _dbService;
   MlsGroup? _keysGroup;
 
+  // Stream controller for comment updates on posts
+  final _commentUpdateController =
+      StreamController<String>.broadcast();
+
+  /// Stream of post IDs that received new comments (for real-time UI updates)
+  Stream<String> get commentUpdates =>
+      _commentUpdateController.stream;
+
   FeedState() {
     _initialize();
   }
@@ -341,6 +349,7 @@ class FeedState with ChangeNotifier {
   void dispose() {
     _mounted = false;
     _eventSubscription?.cancel();
+    _commentUpdateController.close();
     _nostrService?.disconnect();
     _dbService?.database?.close();
     super.dispose();
@@ -542,11 +551,25 @@ class FeedState with ChangeNotifier {
             (event) {
               // Check if this is a comment (has 'e' tag) - exclude it from feed
               bool isComment = false;
+              String? commentedPostId;
               for (final tag in event.tags) {
-                if (tag.isNotEmpty && tag[0] == 'e') {
+                if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
                   isComment = true;
+                  commentedPostId = tag[1]; // Extract the post ID being commented on
                   break;
                 }
+              }
+
+              // If it's a comment, notify listeners about the comment update
+              if (isComment && commentedPostId != null) {
+                // Cache the comment so getCommentCount can find it
+                _nostrService!.cacheEvent(event).then((_) {
+                  // Emit update for real-time UI after caching
+                  _commentUpdateController.add(commentedPostId!);
+                  debugPrint('Received comment on post $commentedPostId');
+                }).catchError((e) {
+                  debugPrint('Failed to cache comment: $e');
+                });
               }
 
               // Only add top-level posts (not comments)
