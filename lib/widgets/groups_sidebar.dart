@@ -247,7 +247,15 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
         return SafeArea(
           child: Container(
             width: 108,
-            color: CupertinoColors.systemBackground,
+            decoration: BoxDecoration(
+              color: CupertinoColors.systemBackground,
+              border: Border(
+                right: BorderSide(
+                  color: CupertinoColors.separator,
+                  width: 0.5,
+                ),
+              ),
+            ),
             child: Column(
               children: [
                 SizedBox(height: topPadding),
@@ -972,7 +980,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: MediaQuery.of(context).size.height * 0.6,
+      height: MediaQuery.of(context).size.height * 0.5,
       decoration: const BoxDecoration(
         color: CupertinoColors.systemBackground,
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),

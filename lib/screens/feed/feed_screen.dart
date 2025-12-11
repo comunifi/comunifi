@@ -1340,7 +1340,7 @@ class _EventItemContentState extends State<_EventItemContent> {
     showCupertinoModalPopup(
       context: context,
       builder: (modalContext) => SizedBox(
-        height: MediaQuery.of(context).size.height * 0.9,
+        height: MediaQuery.of(context).size.height * 0.5,
         child: QuotePostModal(
           quotedEvent: widget.event,
           isConnected: isConnected,
