@@ -1572,7 +1572,8 @@ class GroupState with ChangeNotifier {
   /// [about] - Optional description of the group
   /// [picture] - Optional picture URL for the group
   /// [isPersonal] - If true, marks this as the user's personal group
-  Future<void> createGroup(
+  /// Returns the created [MlsGroup]
+  Future<MlsGroup> createGroup(
     String name, {
     String? about,
     String? picture,
@@ -1599,19 +1600,55 @@ class GroupState with ChangeNotifier {
         groupName: name,
       );
 
-      // Cache the group
       final groupIdHex = _groupIdToHex(mlsGroup.id);
+      debugPrint('Created MLS group: ${mlsGroup.name} ($groupIdHex)');
+
+      // Verify the group was saved correctly by loading it back
+      debugPrint('Verifying group save...');
+      final verifyGroup = await _mlsService!.loadGroup(mlsGroup.id);
+      if (verifyGroup == null) {
+        debugPrint(
+          'ERROR: Group save verification failed - group not found in storage!',
+        );
+        throw Exception('Failed to save group to storage');
+      }
+      debugPrint(
+        'Group save verified successfully - epoch: ${verifyGroup.epoch}, members: ${verifyGroup.members.length}',
+      );
+
+      // Cache the group
       _mlsGroups[groupIdHex] = mlsGroup;
 
       // Add to groups list
       _groups.insert(0, mlsGroup);
+      debugPrint(
+        'Group added to local lists: _groups.length=${_groups.length}, _mlsGroups.length=${_mlsGroups.length}',
+      );
+
+      // Add a local GroupAnnouncement so the group appears in sidebar immediately
+      // (before the kind 9007 event round-trips through the relay)
+      final localAnnouncement = GroupAnnouncement(
+        eventId: 'local-$groupIdHex', // Temporary ID until relay confirms
+        pubkey: creatorPubkey,
+        name: name,
+        about: about,
+        picture: picture,
+        mlsGroupId: groupIdHex,
+        createdAt: DateTime.now(),
+        isPersonal: isPersonal,
+        personalPubkey: isPersonal ? creatorPubkey : null,
+      );
+      _discoveredGroups.insert(0, localAnnouncement);
+      _groupAnnouncementCache[groupIdHex] = localAnnouncement;
+      _groupNameCache[groupIdHex] = name;
+      debugPrint(
+        'Added local GroupAnnouncement: discoveredGroups.length=${_discoveredGroups.length}',
+      );
 
       // Refresh the event listener to include the new group
       refreshGroupEventListener();
 
       safeNotifyListeners();
-
-      debugPrint('Created MLS group: ${mlsGroup.name} (${groupIdHex})');
 
       // Publish NIP-29 group creation event (kind 9007)
       try {
@@ -1701,6 +1738,8 @@ class GroupState with ChangeNotifier {
         debugPrint('Failed to publish group creation event to relay: $e');
         // Don't fail group creation if announcement fails
       }
+
+      return mlsGroup;
     } catch (e) {
       debugPrint('Failed to create group: $e');
       rethrow;
@@ -3491,6 +3530,10 @@ class GroupState with ChangeNotifier {
       );
 
       // Publish NIP-29 put-user event (kind 9000) to officially add the invitee to the group
+      debugPrint(
+        'Preparing put-user event: groupId=$groupIdHex, inviteePubkey=$inviteeNostrPubkey',
+      );
+
       final putUserCreatedAt = DateTime.now();
       final putUserTags = await addClientTagsWithSignature([
         ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
@@ -3513,6 +3556,10 @@ class GroupState with ChangeNotifier {
         tags: putUserEvent.tags,
         sig: putUserEvent.sig,
         createdAt: putUserEvent.createdAt,
+      );
+
+      debugPrint(
+        'Publishing put-user event: id=${putUserModel.id}, tags=${putUserModel.tags}',
       );
 
       await _nostrService!.publishEvent(putUserModel.toJson());

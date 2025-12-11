@@ -337,7 +337,7 @@ class SecurePersistentMlsStorage implements MlsStorage {
         .map((e) => 'leaf${e.key.value}:${e.value}')
         .join(', ');
     debugPrint(
-      '>>> MLS SAVE: group=${groupIdHex.substring(0, 8)}... epoch=${state.context.epoch}, localLeaf=${state.localLeafIndex.value}, gens={$genStr}',
+      '>>> MLS SAVE START: group=${groupIdHex.substring(0, 8)}... epoch=${state.context.epoch}, localLeaf=${state.localLeafIndex.value}, gens={$genStr}',
     );
 
     // Separate sensitive from non-sensitive data
@@ -345,20 +345,42 @@ class SecurePersistentMlsStorage implements MlsStorage {
     final epochSecretsBytes = state.secrets.serialize();
 
     // Save public state to database
-    await _table.savePublicState(state.context.groupId, publicState);
+    try {
+      await _table.savePublicState(state.context.groupId, publicState);
+      debugPrint(
+        '>>> MLS SAVE: public state saved (${publicState.length} bytes)',
+      );
+    } catch (e) {
+      debugPrint('>>> MLS SAVE ERROR: Failed to save public state: $e');
+      rethrow;
+    }
 
     // Save private keys to secure storage
-    await _secureStorage.savePrivateKeys(
-      state.context.groupId,
-      state.identityPrivateKey,
-      state.leafHpkePrivateKey,
-    );
+    try {
+      await _secureStorage.savePrivateKeys(
+        state.context.groupId,
+        state.identityPrivateKey,
+        state.leafHpkePrivateKey,
+      );
+      debugPrint('>>> MLS SAVE: private keys saved');
+    } catch (e) {
+      debugPrint('>>> MLS SAVE ERROR: Failed to save private keys: $e');
+      rethrow;
+    }
 
     // Save epoch secrets to secure storage
-    await _secureStorage.saveEpochSecrets(
-      state.context.groupId,
-      epochSecretsBytes,
-    );
+    try {
+      await _secureStorage.saveEpochSecrets(
+        state.context.groupId,
+        epochSecretsBytes,
+      );
+      debugPrint(
+        '>>> MLS SAVE COMPLETE: epoch secrets saved (${epochSecretsBytes.length} bytes)',
+      );
+    } catch (e) {
+      debugPrint('>>> MLS SAVE ERROR: Failed to save epoch secrets: $e');
+      rethrow;
+    }
   }
 
   @override

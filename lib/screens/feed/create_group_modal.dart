@@ -79,11 +79,14 @@ class _CreateGroupModalState extends State<CreateGroupModal> {
       }
 
       final about = _aboutController.text.trim();
-      await groupState.createGroup(
+      final newGroup = await groupState.createGroup(
         name,
         about: about.isEmpty ? null : about,
         picture: pictureUrl,
       );
+
+      // Navigate into the newly created group
+      groupState.setActiveGroup(newGroup);
 
       widget.onCreated?.call();
       if (mounted) Navigator.of(context).pop();
@@ -256,4 +259,3 @@ class _CreateGroupModalState extends State<CreateGroupModal> {
     );
   }
 }
-

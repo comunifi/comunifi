@@ -705,72 +705,78 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     onClear: () => groupState.clearHashtagFilter(),
                   ),
                 Expanded(
-                  child: groupState.groupMessages.isEmpty
-                      ? Center(
-                          child: Text(
-                            groupState.hashtagFilter != null
-                                ? 'No messages with #${groupState.hashtagFilter}'
-                                : 'No messages in this group yet',
+                  child: CustomScrollView(
+                    controller: _scrollController,
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    slivers: [
+                      // Collapsing group header - pinned at top, shrinks on scroll
+                      _GroupHeaderSliver(
+                        group: groupState.activeGroup!,
+                        groupState: groupState,
+                      ),
+                      CupertinoSliverRefreshControl(
+                        onRefresh: () async {
+                          await groupState.refreshActiveGroupMessages();
+                        },
+                      ),
+                      // Empty state message when no messages
+                      if (groupState.groupMessages.isEmpty)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Center(
+                            child: Text(
+                              groupState.hashtagFilter != null
+                                  ? 'No messages with #${groupState.hashtagFilter}'
+                                  : 'No messages in this group yet',
+                            ),
                           ),
                         )
-                      : CustomScrollView(
-                          controller: _scrollController,
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          slivers: [
-                            // Collapsing group header - pinned at top, shrinks on scroll
-                            _GroupHeaderSliver(
-                              group: groupState.activeGroup!,
-                              groupState: groupState,
-                            ),
-                            CupertinoSliverRefreshControl(
-                              onRefresh: () async {
-                                await groupState.refreshActiveGroupMessages();
-                              },
-                            ),
-                            SliverList(
-                              delegate: SliverChildBuilderDelegate((
-                                context,
-                                index,
-                              ) {
-                                if (index < groupState.groupMessages.length) {
-                                  final event = groupState.groupMessages[index];
-                                  return _EventItem(
-                                    key: ValueKey(event.id),
-                                    event: event,
-                                  );
-                                }
-                                return const SizedBox.shrink();
-                              }, childCount: groupState.groupMessages.length),
-                            ),
-                            // Loading indicator for infinite scroll
-                            if (groupState.isLoadingMoreGroupMessages)
-                              const SliverToBoxAdapter(
-                                child: Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 16.0),
-                                  child: Center(
-                                    child: CupertinoActivityIndicator(),
-                                  ),
-                                ),
-                              ),
-                            // "No more messages" indicator
-                            if (!groupState.hasMoreGroupMessages &&
-                                groupState.groupMessages.isNotEmpty)
-                              const SliverToBoxAdapter(
-                                child: Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 16.0),
-                                  child: Center(
-                                    child: Text(
-                                      'No more messages',
-                                      style: TextStyle(
-                                        color: CupertinoColors.systemGrey,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
+                      else ...[
+                        SliverList(
+                          delegate: SliverChildBuilderDelegate((
+                            context,
+                            index,
+                          ) {
+                            if (index < groupState.groupMessages.length) {
+                              final event = groupState.groupMessages[index];
+                              return _EventItem(
+                                key: ValueKey(event.id),
+                                event: event,
+                              );
+                            }
+                            return const SizedBox.shrink();
+                          }, childCount: groupState.groupMessages.length),
                         ),
+                        // Loading indicator for infinite scroll
+                        if (groupState.isLoadingMoreGroupMessages)
+                          const SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(vertical: 16.0),
+                              child: Center(
+                                child: CupertinoActivityIndicator(),
+                              ),
+                            ),
+                          ),
+                        // "No more messages" indicator
+                        if (!groupState.hasMoreGroupMessages &&
+                            groupState.groupMessages.isNotEmpty)
+                          const SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(vertical: 16.0),
+                              child: Center(
+                                child: Text(
+                                  'No more messages',
+                                  style: TextStyle(
+                                    color: CupertinoColors.systemGrey,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ],
+                  ),
                 ),
                 _ComposeMessageWidget(
                   controller: _messageController,
@@ -3281,7 +3287,10 @@ class _ExploreGroupsViewState extends State<_ExploreGroupsView> {
       if (announcement.isPersonal) continue;
 
       // Only show groups user is NOT a member of
-      final isMember = _memberships[groupIdHex] ?? false;
+      // Normalize to lowercase for case-insensitive matching
+      final normalizedGroupId = groupIdHex.toLowerCase();
+      final isMember =
+          _memberships[groupIdHex] ?? _memberships[normalizedGroupId] ?? false;
       if (isMember) continue;
 
       explorableGroups.add(announcement);
