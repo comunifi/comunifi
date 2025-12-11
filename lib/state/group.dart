@@ -315,13 +315,29 @@ class GroupState with ChangeNotifier {
 
       // Look for a group named "Personal" or "keys" (migration) and use it
       MlsGroup? personalGroup;
+      debugPrint(
+        'Searching for Personal group among ${savedGroups.length} saved groups',
+      );
       for (final groupId in savedGroups) {
+        final groupIdHex = groupId.bytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
         final groupName = await _mlsStorage!.loadGroupName(groupId);
         // Check for "Personal" first, then "keys" for backward compatibility
         if (groupName == 'Personal') {
+          debugPrint('Found Personal group in DB: $groupIdHex');
           personalGroup = await _mlsService!.loadGroup(groupId);
-          break;
+          // Only break if we successfully loaded the group
+          // (keys might be missing from Keychain)
+          if (personalGroup != null) {
+            debugPrint('Successfully loaded Personal group');
+            break;
+          }
+          debugPrint(
+            'Found Personal group in DB but failed to load keys for $groupIdHex',
+          );
         } else if (groupName == 'keys' && personalGroup == null) {
+          debugPrint('Found legacy "keys" group: $groupIdHex');
           // Migration: use old "keys" group as personal group
           personalGroup = await _mlsService!.loadGroup(groupId);
           // Rename it to "Personal" for consistency
@@ -2190,7 +2206,8 @@ class GroupState with ChangeNotifier {
             tags: [groupIdHex], // Filter by 'g' tag
             since: newestCachedTime, // Only fetch events newer than cached
             limit: _groupMessagesPageSize,
-            useCache: true, // Allow cache, but 'since' will fetch new events from network
+            useCache:
+                true, // Allow cache, but 'since' will fetch new events from network
           );
 
           debugPrint('Received ${pastEvents.length} new events from relay');
@@ -4531,13 +4548,15 @@ class GroupState with ChangeNotifier {
             // Add/update with network events (may have newer versions)
             for (final event in networkPutEvents) {
               final existing = allPutEvents[event.id];
-              if (existing == null || event.createdAt.isAfter(existing.createdAt)) {
+              if (existing == null ||
+                  event.createdAt.isAfter(existing.createdAt)) {
                 allPutEvents[event.id] = event;
               }
             }
             for (final event in networkRemoveEvents) {
               final existing = allRemoveEvents[event.id];
-              if (existing == null || event.createdAt.isAfter(existing.createdAt)) {
+              if (existing == null ||
+                  event.createdAt.isAfter(existing.createdAt)) {
                 allRemoveEvents[event.id] = event;
               }
             }

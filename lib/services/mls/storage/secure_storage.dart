@@ -21,6 +21,13 @@ class MlsSecureStorage {
       biometricPromptSubtitle: 'Use your biometric to unlock the MLS data',
     ),
     iOptions: IOSOptions(
+      synchronizable: false,
+      accessibility: KeychainAccessibility.first_unlock_this_device,
+    ),
+    mOptions: MacOsOptions(
+      // Keep data local to this device (not synced to iCloud)
+      synchronizable: false,
+      // Accessible after first unlock - persists across app restarts
       accessibility: KeychainAccessibility.first_unlock_this_device,
     ),
   );
@@ -346,7 +353,7 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
     // Save public state to database
     try {
-    await _table.savePublicState(state.context.groupId, publicState);
+      await _table.savePublicState(state.context.groupId, publicState);
       debugPrint(
         '>>> MLS SAVE: public state saved (${publicState.length} bytes)',
       );
@@ -357,11 +364,11 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
     // Save private keys to secure storage
     try {
-    await _secureStorage.savePrivateKeys(
-      state.context.groupId,
-      state.identityPrivateKey,
-      state.leafHpkePrivateKey,
-    );
+      await _secureStorage.savePrivateKeys(
+        state.context.groupId,
+        state.identityPrivateKey,
+        state.leafHpkePrivateKey,
+      );
       debugPrint('>>> MLS SAVE: private keys saved');
     } catch (e) {
       debugPrint('>>> MLS SAVE ERROR: Failed to save private keys: $e');
@@ -370,10 +377,10 @@ class SecurePersistentMlsStorage implements MlsStorage {
 
     // Save epoch secrets to secure storage
     try {
-    await _secureStorage.saveEpochSecrets(
-      state.context.groupId,
-      epochSecretsBytes,
-    );
+      await _secureStorage.saveEpochSecrets(
+        state.context.groupId,
+        epochSecretsBytes,
+      );
       debugPrint(
         '>>> MLS SAVE COMPLETE: epoch secrets saved (${epochSecretsBytes.length} bytes)',
       );
