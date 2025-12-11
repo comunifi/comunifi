@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:comunifi/state/group.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
@@ -18,6 +20,7 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
   bool _isGenerating = false;
   bool _hasSaved = false;
   String? _error;
+  final GlobalKey _saveButtonKey = GlobalKey();
 
   Future<void> _saveRecoveryLink() async {
     setState(() {
@@ -37,15 +40,25 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
       // Create recovery link
       final recoveryLink = payload.toRecoveryLink();
 
+      // Get button position for macOS
+      Rect? sharePositionOrigin;
+      if (Platform.isMacOS) {
+        final box = _saveButtonKey.currentContext?.findRenderObject() as RenderBox?;
+        if (box != null) {
+          final position = box.localToGlobal(Offset.zero);
+          sharePositionOrigin = position & box.size;
+        }
+      }
+
       // Show share sheet
       final result = await Share.share(
         recoveryLink,
         subject: 'Comunifi Recovery Link',
+        sharePositionOrigin: sharePositionOrigin,
       );
 
-      // Check if user actually shared (on some platforms we can detect this)
-      if (result.status == ShareResultStatus.success ||
-          result.status == ShareResultStatus.dismissed) {
+      // Only mark as saved if user actually shared (not just dismissed)
+      if (result.status == ShareResultStatus.success) {
         setState(() {
           _hasSaved = true;
         });
@@ -176,6 +189,7 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
 
                   // Save button
                   SizedBox(
+                    key: _saveButtonKey,
                     width: double.infinity,
                     child: CupertinoButton(
                       padding: const EdgeInsets.symmetric(vertical: 14),
@@ -186,7 +200,7 @@ class _BackupPromptScreenState extends State<BackupPromptScreen> {
                           : (_hasSaved ? _continue : _saveRecoveryLink),
                       child: _isGenerating
                           ? const CupertinoActivityIndicator(
-                              color: CupertinoColors.white,
+                              color: CupertinoColors.black,
                             )
                           : Text(
                               _hasSaved ? 'Continue' : 'Save Recovery Link',

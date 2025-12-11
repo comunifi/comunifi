@@ -18,6 +18,7 @@ class ProfileSetupScreen extends StatefulWidget {
 
 class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   final TextEditingController _usernameController = TextEditingController();
+  final FocusNode _usernameFocusNode = FocusNode();
   final ImagePicker _imagePicker = ImagePicker();
 
   bool _isCheckingUsername = false;
@@ -39,6 +40,11 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     super.initState();
     _usernameController.addListener(_onUsernameChanged);
     _loadKeys();
+    
+    // Focus the username field when the page loads
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _usernameFocusNode.requestFocus();
+    });
   }
 
   @override
@@ -46,6 +52,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     _debounceTimer?.cancel();
     _usernameController.removeListener(_onUsernameChanged);
     _usernameController.dispose();
+    _usernameFocusNode.dispose();
     super.dispose();
   }
 
@@ -220,6 +227,13 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
             _usernameAvailable == true);
 
     return CupertinoPageScaffold(
+      navigationBar: CupertinoNavigationBar(
+        leading: CupertinoNavigationBarBackButton(
+          onPressed: () {
+            context.go('/');
+          },
+        ),
+      ),
       child: SafeArea(
         child: Center(
           child: ConstrainedBox(
@@ -381,6 +395,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                     const SizedBox(height: 8),
                     CupertinoTextField(
                       controller: _usernameController,
+                      focusNode: _usernameFocusNode,
                       placeholder: 'Enter your username',
                       padding: const EdgeInsets.all(14),
                       enabled: !_isSaving,
