@@ -30,13 +30,16 @@ import 'package:comunifi/models/nostr_event.dart'
         kindGroupAdmins,
         kindGroupMembers,
         kindJoinRequest,
+        kindMlsCommit,
         kindMlsWelcome,
         kindPutUser,
         kindRemoveUser,
         NostrEventModel;
 import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/messages/messages.dart'
-    show AddProposal, Welcome;
+    show AddProposal, Commit, Welcome;
+import 'package:comunifi/services/mls/key_schedule/key_schedule.dart'
+    show EpochSecrets;
 import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
@@ -150,9 +153,7 @@ class GroupState with ChangeNotifier {
 
   // Secure storage for onboarding completion flag
   static const FlutterSecureStorage _onboardingStorage = FlutterSecureStorage(
-    aOptions: AndroidOptions(
-      encryptedSharedPreferences: true,
-    ),
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
     iOptions: IOSOptions(
       accessibility: KeychainAccessibility.first_unlock_this_device,
     ),
@@ -1080,6 +1081,9 @@ class GroupState with ChangeNotifier {
   /// Get all members of a group from NIP-29 events (kind 39001 admins + kind 39002 members)
   /// Returns a list of NIP29GroupMember with pubkeys and roles
   /// If [forceRefresh] is true, bypasses the event cache to fetch fresh data from the relay
+  ///
+  /// Falls back to aggregating kind 9000 (put-user) and kind 9001 (remove-user) events
+  /// directly if relay-generated events (39001/39002) are empty or incomplete.
   Future<List<NIP29GroupMember>> getGroupMembers(
     String groupIdHex, {
     bool forceRefresh = false,
@@ -1133,6 +1137,17 @@ class GroupState with ChangeNotifier {
         }
       }
 
+      // Fallback: If relay-generated events are empty/incomplete, aggregate
+      // kind 9000 (put-user) and kind 9001 (remove-user) events directly.
+      // Many relays don't properly generate kind 39001/39002 aggregated lists.
+      if (members.isEmpty) {
+        final aggregatedMembers = await _aggregateMembershipFromEvents(
+          groupIdHex,
+          forceRefresh: forceRefresh,
+        );
+        members.addAll(aggregatedMembers);
+      }
+
       // Sort: admins first, then by pubkey
       final memberList = members.values.toList();
       memberList.sort((a, b) {
@@ -1147,6 +1162,91 @@ class GroupState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to get group members: $e');
       return [];
+    }
+  }
+
+  /// Aggregate group membership by querying kind 9000 (put-user) and kind 9001 (remove-user)
+  /// events directly. This is a fallback when relay-generated kind 39001/39002 events
+  /// are not available.
+  ///
+  /// For each user, we compare the latest put-user vs remove-user timestamp.
+  /// If put-user is more recent (or no remove-user exists), the user is a member.
+  Future<Map<String, NIP29GroupMember>> _aggregateMembershipFromEvents(
+    String groupIdHex, {
+    bool forceRefresh = false,
+  }) async {
+    if (_nostrService == null || !_isConnected) {
+      return {};
+    }
+
+    try {
+      // Query all kind 9000 (put-user) events for this group
+      final putUserEvents = await _nostrService!.requestPastEvents(
+        kind: kindPutUser,
+        tags: [groupIdHex],
+        tagKey: 'h',
+        limit: 500,
+        useCache: !forceRefresh,
+      );
+
+      // Query all kind 9001 (remove-user) events for this group
+      final removeUserEvents = await _nostrService!.requestPastEvents(
+        kind: kindRemoveUser,
+        tags: [groupIdHex],
+        tagKey: 'h',
+        limit: 500,
+        useCache: !forceRefresh,
+      );
+
+      // Build maps of latest event per user
+      // Map<pubkey, (DateTime timestamp, String? role)>
+      final latestPutByUser = <String, (DateTime, String?)>{};
+      final latestRemoveByUser = <String, DateTime>{};
+
+      // Process put-user events
+      for (final event in putUserEvents) {
+        for (final tag in event.tags) {
+          if (tag.length >= 2 && tag[0] == 'p') {
+            final pubkey = tag[1];
+            final role = tag.length >= 3 ? tag[2] : null;
+            final existing = latestPutByUser[pubkey];
+            if (existing == null || event.createdAt.isAfter(existing.$1)) {
+              latestPutByUser[pubkey] = (event.createdAt, role);
+            }
+          }
+        }
+      }
+
+      // Process remove-user events
+      for (final event in removeUserEvents) {
+        for (final tag in event.tags) {
+          if (tag.length >= 2 && tag[0] == 'p') {
+            final pubkey = tag[1];
+            final existing = latestRemoveByUser[pubkey];
+            if (existing == null || event.createdAt.isAfter(existing)) {
+              latestRemoveByUser[pubkey] = event.createdAt;
+            }
+          }
+        }
+      }
+
+      // Determine current members: put-user is more recent than remove-user
+      final members = <String, NIP29GroupMember>{};
+      for (final entry in latestPutByUser.entries) {
+        final pubkey = entry.key;
+        final (putTime, role) = entry.value;
+        final removeTime = latestRemoveByUser[pubkey];
+
+        // User is a member if no remove-user or put-user is more recent
+        if (removeTime == null || putTime.isAfter(removeTime)) {
+          members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
+        }
+      }
+
+      return members;
+    } catch (e) {
+      debugPrint('Failed to aggregate membership from events: $e');
+      return {};
     }
   }
 
@@ -2074,6 +2174,26 @@ class GroupState with ChangeNotifier {
             },
           );
 
+      // Listen for MLS Commit messages (kind 1061) addressed to us
+      // These are sent when a new member is added to a group we're already in
+      _nostrService!
+          .listenToEvents(
+            kind: kindMlsCommit,
+            pTags: [ourPubkey], // Filter by recipient pubkey
+            limit: null,
+          )
+          .listen(
+            (event) {
+              // Handle Commit message to update our MLS state
+              handleExternalCommit(event).catchError((error) {
+                debugPrint('Error handling Commit message: $error');
+              });
+            },
+            onError: (error) {
+              debugPrint('Error listening to Commit messages: $error');
+            },
+          );
+
       // Listen for new NIP-29 create-group events (kind 9007) to keep DB and cache updated
       _nostrService!
           .listenToEvents(kind: kindCreateGroup, limit: null)
@@ -2889,7 +3009,7 @@ class GroupState with ChangeNotifier {
   Future<bool> isOnboardingComplete() async {
     // Wait for keys group to be initialized first
     await waitForKeysGroupInit();
-    
+
     // Must have keys
     final hasKeys = await getNostrPublicKey() != null;
     if (!hasKeys) {
@@ -2904,10 +3024,7 @@ class GroupState with ChangeNotifier {
   /// Mark onboarding as complete
   /// This should be called when the user first reaches the feed screen
   Future<void> markOnboardingComplete() async {
-    await _onboardingStorage.write(
-      key: _onboardingCompleteKey,
-      value: 'true',
-    );
+    await _onboardingStorage.write(key: _onboardingCompleteKey, value: 'true');
   }
 
   /// Derive HPKE key pair from Nostr private key
@@ -3226,6 +3343,7 @@ class GroupState with ChangeNotifier {
   /// 2. Add them to the group (advances epoch)
   /// 3. Create a Welcome message
   /// 4. Send the Welcome message to the invitee via Nostr (kind 1060)
+  /// 5. Broadcast Commit message to all existing members (kind 1061)
   Future<void> inviteMember({
     required String inviteeNostrPubkey,
     required mls_crypto.PublicKey inviteeIdentityKey,
@@ -3245,6 +3363,11 @@ class GroupState with ChangeNotifier {
     }
 
     try {
+      // Get existing members BEFORE adding the new member
+      // These are the members who need to receive the Commit message
+      final existingMlsMembers = _activeGroup!.members;
+      final ourPubkey = await getNostrPublicKey();
+
       // Create AddProposal
       final addProposal = AddProposal(
         identityKey: inviteeIdentityKey,
@@ -3252,7 +3375,7 @@ class GroupState with ChangeNotifier {
         userId: inviteeUserId,
       );
 
-      // Add member to group (this creates Welcome message)
+      // Add member to group (this creates Welcome message and advances epoch)
       final (commit, commitCiphertexts, welcomeMessages) = await _activeGroup!
           .addMembers([addProposal]);
 
@@ -3308,6 +3431,16 @@ class GroupState with ChangeNotifier {
         'Sent Welcome message to $inviteeUserId for group ${_activeGroup!.name}',
       );
 
+      // Broadcast Commit message to all existing members (kind 1061)
+      // This allows them to update their MLS state to the new epoch
+      await _broadcastCommitToMembers(
+        commit: commit,
+        existingMembers: existingMlsMembers,
+        groupIdHex: groupIdHex,
+        keyPair: keyPair,
+        ourPubkey: ourPubkey,
+      );
+
       // Publish NIP-29 put-user event (kind 9000) to officially add the invitee to the group
       final putUserCreatedAt = DateTime.now();
       final putUserTags = await addClientTagsWithSignature([
@@ -3347,6 +3480,80 @@ class GroupState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to invite member: $e');
       rethrow;
+    }
+  }
+
+  /// Broadcast MLS Commit message to all existing group members
+  ///
+  /// This is called after adding a new member to ensure all existing members
+  /// can update their MLS state to the new epoch with the new secrets.
+  Future<void> _broadcastCommitToMembers({
+    required Commit commit,
+    required List<GroupMember> existingMembers,
+    required String groupIdHex,
+    required NostrKeyPairs keyPair,
+    required String? ourPubkey,
+  }) async {
+    if (_activeGroup == null || _nostrService == null) return;
+
+    // Get the new epoch and serialized secrets from the updated group state
+    final newEpoch = _activeGroup!.epoch;
+    final newSecretsSerialized = _activeGroup!.serializedEpochSecrets;
+
+    // Create enhanced Commit with epoch and secrets
+    final enhancedCommit = Commit(
+      proposals: commit.proposals,
+      updatePath: commit.updatePath,
+      newEpoch: newEpoch,
+      newSecretsSerialized: newSecretsSerialized,
+    );
+
+    final commitJson = enhancedCommit.toJson();
+
+    // Send to each existing member (except ourselves)
+    for (final member in existingMembers) {
+      // Skip ourselves - we already have the updated state
+      if (ourPubkey != null && member.userId == ourPubkey) {
+        continue;
+      }
+
+      try {
+        final commitCreatedAt = DateTime.now();
+        final commitTags = await addClientTagsWithSignature([
+          [
+            'p',
+            member.userId,
+          ], // Recipient (member's userId is their Nostr pubkey)
+          ['g', groupIdHex], // Group ID
+        ], createdAt: commitCreatedAt);
+
+        final commitEvent = NostrEvent.fromPartialData(
+          kind: kindMlsCommit,
+          content: commitJson,
+          keyPairs: keyPair,
+          tags: commitTags,
+          createdAt: commitCreatedAt,
+        );
+
+        final commitEventModel = NostrEventModel(
+          id: commitEvent.id,
+          pubkey: commitEvent.pubkey,
+          kind: commitEvent.kind,
+          content: commitEvent.content,
+          tags: commitEvent.tags,
+          sig: commitEvent.sig,
+          createdAt: commitEvent.createdAt,
+        );
+
+        await _nostrService!.publishEvent(commitEventModel.toJson());
+
+        debugPrint(
+          'Sent Commit message to ${member.userId} for epoch $newEpoch',
+        );
+      } catch (e) {
+        debugPrint('Failed to send Commit to ${member.userId}: $e');
+        // Continue sending to other members even if one fails
+      }
     }
   }
 
@@ -3724,6 +3931,105 @@ class GroupState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to handle Welcome invitation: $e');
       rethrow;
+    }
+  }
+
+  /// Handle receiving an MLS Commit message
+  ///
+  /// This is called when a kind 1061 event is received from another member
+  /// who added a new member to a group we're already in. The commit contains
+  /// the new epoch secrets that we need to update our local state with.
+  ///
+  /// [commitEvent] - The Nostr event containing the Commit message
+  Future<void> handleExternalCommit(NostrEventModel commitEvent) async {
+    if (commitEvent.kind != kindMlsCommit) {
+      debugPrint('Event is not a Commit message (kind 1061)');
+      return;
+    }
+
+    // Check if this Commit is for us (check 'p' tag)
+    final recipientPubkey =
+        commitEvent.tags
+                .firstWhere(
+                  (tag) => tag.isNotEmpty && tag[0] == 'p',
+                  orElse: () => [],
+                )
+                .length >
+            1
+        ? commitEvent.tags.firstWhere(
+            (tag) => tag.isNotEmpty && tag[0] == 'p',
+          )[1]
+        : null;
+
+    if (recipientPubkey == null) {
+      debugPrint('Commit message has no recipient tag');
+      return;
+    }
+
+    // Check if this Commit is for our Nostr pubkey
+    final ourPubkey = await getNostrPublicKey();
+    if (ourPubkey != recipientPubkey) {
+      debugPrint(
+        'Commit message is not for us (ours: $ourPubkey, theirs: $recipientPubkey)',
+      );
+      return;
+    }
+
+    // Get group ID from 'g' tag
+    final groupIdHex =
+        commitEvent.tags
+                .firstWhere(
+                  (tag) => tag.isNotEmpty && tag[0] == 'g',
+                  orElse: () => [],
+                )
+                .length >
+            1
+        ? commitEvent.tags.firstWhere(
+            (tag) => tag.isNotEmpty && tag[0] == 'g',
+          )[1]
+        : null;
+
+    if (groupIdHex == null) {
+      debugPrint('Commit message has no group ID tag');
+      return;
+    }
+
+    // Find the MLS group
+    final group = _mlsGroups[groupIdHex.toLowerCase()];
+    if (group == null) {
+      debugPrint('Received Commit for unknown group: $groupIdHex');
+      return;
+    }
+
+    try {
+      // Deserialize Commit message
+      final commit = Commit.fromJson(commitEvent.content);
+
+      // Check if we have the new secrets
+      if (commit.newSecretsSerialized == null) {
+        debugPrint('Commit message has no new secrets, cannot update state');
+        return;
+      }
+
+      // Deserialize epoch secrets
+      final newSecrets = EpochSecrets.deserialize(commit.newSecretsSerialized!);
+
+      // Apply the commit with provided secrets
+      await group.applyExternalCommitWithSecrets(
+        commit,
+        commit.newEpoch,
+        newSecrets,
+      );
+
+      debugPrint(
+        'Successfully applied external commit for group $groupIdHex, '
+        'new epoch: ${commit.newEpoch}',
+      );
+
+      // Invalidate membership cache so sidebar updates
+      invalidateMembershipCache(notify: true);
+    } catch (e) {
+      debugPrint('Failed to handle external Commit: $e');
     }
   }
 

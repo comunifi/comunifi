@@ -61,9 +61,12 @@ const int kindEncryptedEnvelope = 1059;
 /// Kind 1060: MLS Welcome message (encrypted invitation to join a group)
 const int kindMlsWelcome = 1060;
 
-/// Kind 1061: MLS Member Joined event (legacy, use kindJoinRequest instead)
-/// @deprecated Use kind 9021 (join request) instead per NIP-29
-const int kindMlsMemberJoined = 1061;
+/// Kind 1061: MLS Commit message (epoch advancement notification)
+/// Sent to existing group members when a new member is added or removed.
+/// Allows existing members to update their MLS state to the new epoch.
+/// Tags: ['p', recipientPubkey], ['g', groupIdHex]
+/// Content: JSON-serialized commit data
+const int kindMlsCommit = 1061;
 
 /// Kind 10078: Encrypted identity backup (replaceable event)
 /// Contains the user's Nostr keypair encrypted with their personal MLS group.

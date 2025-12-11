@@ -26,6 +26,7 @@ import 'package:comunifi/widgets/quote_button.dart';
 import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
 import 'package:comunifi/widgets/encrypted_image.dart';
+import 'package:comunifi/widgets/author_avatar.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/media/media_upload.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -1600,7 +1601,7 @@ class _EventItemContentWidget extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        _AuthorAvatar(pubkey: event.pubkey),
+                        AuthorAvatar(pubkey: event.pubkey),
                         const SizedBox(width: 8),
                         // Show imported author name badge if this is an imported post
                         if (event.isImported) ...[
@@ -1875,66 +1876,6 @@ class _RichContentText extends StatelessWidget {
         debugPrint('Could not launch URL: $e');
       }
     }
-  }
-}
-
-/// Author avatar that displays profile photo by pubkey
-class _AuthorAvatar extends StatefulWidget {
-  final String pubkey;
-  final double size;
-
-  const _AuthorAvatar({required this.pubkey, this.size = 32});
-
-  @override
-  State<_AuthorAvatar> createState() => _AuthorAvatarState();
-}
-
-class _AuthorAvatarState extends State<_AuthorAvatar> {
-  String? _profilePictureUrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadProfilePicture();
-  }
-
-  Future<void> _loadProfilePicture() async {
-    try {
-      final profileState = context.read<ProfileState>();
-      final profile = await profileState.getProfile(widget.pubkey);
-      if (mounted && profile?.picture != null) {
-        setState(() {
-          _profilePictureUrl = profile!.picture;
-        });
-      }
-    } catch (e) {
-      // Silently fail - will show placeholder
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: widget.size,
-      height: widget.size,
-      decoration: BoxDecoration(
-        color: CupertinoColors.systemGrey4,
-        shape: BoxShape.circle,
-        image: _profilePictureUrl != null
-            ? DecorationImage(
-                image: NetworkImage(_profilePictureUrl!),
-                fit: BoxFit.cover,
-              )
-            : null,
-      ),
-      child: _profilePictureUrl == null
-          ? Icon(
-              CupertinoIcons.person_fill,
-              size: widget.size * 0.6,
-              color: CupertinoColors.systemGrey,
-            )
-          : null,
-    );
   }
 }
 

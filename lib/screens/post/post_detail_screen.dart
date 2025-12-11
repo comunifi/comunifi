@@ -14,6 +14,7 @@ import 'package:comunifi/widgets/quote_button.dart';
 import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
 import 'package:comunifi/widgets/encrypted_image.dart';
+import 'package:comunifi/widgets/author_avatar.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -805,6 +806,8 @@ class _CommentItemContentState extends State<_CommentItemContent> {
         children: [
           Row(
             children: [
+              AuthorAvatar(pubkey: widget.event.pubkey, size: 28),
+              const SizedBox(width: 8),
               Text(
                 widget.displayName,
                 style: const TextStyle(
