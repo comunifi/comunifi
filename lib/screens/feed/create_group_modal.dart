@@ -256,3 +256,4 @@ class _CreateGroupModalState extends State<CreateGroupModal> {
     );
   }
 }
+
