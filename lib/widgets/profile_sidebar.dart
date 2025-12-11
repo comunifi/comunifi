@@ -466,22 +466,43 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: CupertinoColors.systemGrey4,
-                                image: _currentProfilePictureUrl != null
-                                    ? DecorationImage(
-                                        image: NetworkImage(
-                                          _currentProfilePictureUrl!,
-                                        ),
-                                        fit: BoxFit.cover,
-                                      )
-                                    : null,
                               ),
-                              child: _currentProfilePictureUrl == null
-                                  ? const Icon(
+                              child: _currentProfilePictureUrl != null
+                                  ? ClipOval(
+                                      child: Image.network(
+                                        _currentProfilePictureUrl!,
+                                        width: 100,
+                                        height: 100,
+                                        fit: BoxFit.cover,
+                                        loadingBuilder: (context, child, loadingProgress) {
+                                          if (loadingProgress == null) {
+                                            return child;
+                                          }
+                                          return Container(
+                                            width: 100,
+                                            height: 100,
+                                            color: CupertinoColors.systemGrey4,
+                                            child: Center(
+                                              child: CupertinoActivityIndicator(
+                                                radius: 15,
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                        errorBuilder: (context, error, stackTrace) {
+                                          return const Icon(
+                                            CupertinoIcons.person_fill,
+                                            size: 50,
+                                            color: CupertinoColors.systemGrey,
+                                          );
+                                        },
+                                      ),
+                                    )
+                                  : const Icon(
                                       CupertinoIcons.person_fill,
                                       size: 50,
                                       color: CupertinoColors.systemGrey,
-                                    )
-                                  : null,
+                                    ),
                             ),
                             if (_isUploadingPhoto)
                               Container(
