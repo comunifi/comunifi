@@ -297,6 +297,11 @@ class MlsGroup {
         newLeafIndex,
       );
 
+      debugPrint(
+        'MLS addMembers: Creating Welcome for leaf $newLeafIndex - '
+        'groupInfo.length=${groupInfo.length}, groupSecrets.length=${groupSecrets.length}',
+      );
+
       // Encrypt group secrets with new member's HPKE public key
       final encapResult = await _crypto.hpke.setupBaseSender(
         recipientPublicKey: add.hpkeInitKey,
@@ -325,6 +330,12 @@ class MlsGroup {
       final encryptedGroupInfo = await encapResult.context.seal(
         plaintext: groupInfo,
         aad: Uint8List(0),
+      );
+
+      debugPrint(
+        'MLS addMembers: Welcome encrypted - '
+        'encryptedGroupSecrets.length=${encryptedGroupSecrets.length}, '
+        'encryptedGroupInfo.length=${encryptedGroupInfo.length}',
       );
 
       final welcome = Welcome(
@@ -708,10 +719,35 @@ class MlsGroup {
     );
 
     // Decrypt group info
+    debugPrint(
+      'MLS joinFromWelcome: Welcome received - '
+      'encryptedGroupSecrets.length=${welcome.encryptedGroupSecrets.length}, '
+      'encryptedGroupInfo.length=${welcome.encryptedGroupInfo.length}',
+    );
+    debugPrint(
+      'MLS joinFromWelcome: decryptedSecrets.length=${decryptedSecrets.length}',
+    );
     final decryptedGroupInfo = await hpkeContext.open(
       ciphertext: welcome.encryptedGroupInfo,
       aad: Uint8List(0),
     );
+    debugPrint(
+      'MLS joinFromWelcome: decryptedGroupInfo.length=${decryptedGroupInfo.length}',
+    );
+
+    // Validate decrypted data looks reasonable
+    if (decryptedSecrets.length < 20) {
+      throw MlsError(
+        'Decrypted group secrets too short (${decryptedSecrets.length} bytes). '
+        'HPKE decryption may have failed silently.',
+      );
+    }
+    if (decryptedGroupInfo.length < 20) {
+      throw MlsError(
+        'Decrypted group info too short (${decryptedGroupInfo.length} bytes). '
+        'HPKE decryption may have failed silently.',
+      );
+    }
 
     // Deserialize group secrets
     final (initSecret, secrets, localLeafIndex) = _deserializeGroupSecrets(
@@ -721,6 +757,7 @@ class MlsGroup {
     debugPrint('MLS joinFromWelcome: localLeafIndex=${localLeafIndex.value}');
 
     // Deserialize group info
+    debugPrint('MLS joinFromWelcome: deserializing groupInfo...');
     final (context, tree, members) = _deserializeGroupInfo(decryptedGroupInfo);
 
     // Generate identity key pair for this member (if not provided)
@@ -777,12 +814,20 @@ class MlsGroup {
     offset += secretsLength;
     final secrets = EpochSecrets.deserialize(secretsBytes);
 
-    // Read leaf index
-    final leafIndexValue =
+    // Read leaf index (serialized with length prefix via _writeUint8List)
+    final leafIndexLength =
         (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
+    offset += 4;
+    // leafIndexLength should be 4
+    final leafIndexBytes = data.sublist(offset, offset + leafIndexLength);
+    final leafIndexValue =
+        (leafIndexBytes[0] << 24) |
+        (leafIndexBytes[1] << 16) |
+        (leafIndexBytes[2] << 8) |
+        leafIndexBytes[3];
     final leafIndex = LeafIndex(leafIndexValue);
 
     return (initSecret, secrets, leafIndex);
@@ -793,6 +838,11 @@ class MlsGroup {
   _deserializeGroupInfo(Uint8List data) {
     int offset = 0;
 
+    debugPrint(
+      'MLS _deserializeGroupInfo: data.length=${data.length}, '
+      'first16bytes=${data.length >= 16 ? data.sublist(0, 16).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ") : "too short"}',
+    );
+
     // Read context
     final contextLength =
         (data[offset] << 24) |
@@ -800,6 +850,26 @@ class MlsGroup {
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
+
+    debugPrint(
+      'MLS _deserializeGroupInfo: contextLength=$contextLength, dataRemaining=${data.length - offset}',
+    );
+
+    // Sanity check: contextLength should be reasonable (< 10KB for context)
+    if (contextLength > 10000) {
+      throw MlsError(
+        'Invalid groupInfo: contextLength=$contextLength appears corrupted '
+        '(first 4 bytes as hex: ${data.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}). '
+        'This likely indicates HPKE decryption failed silently.',
+      );
+    }
+
+    if (contextLength > data.length - offset) {
+      throw MlsError(
+        'Invalid groupInfo: contextLength=$contextLength exceeds remaining data ${data.length - offset}',
+      );
+    }
+
     final contextBytes = data.sublist(offset, offset + contextLength);
     offset += contextLength;
     final context = GroupContext.deserialize(contextBytes);

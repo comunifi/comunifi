@@ -1548,13 +1548,34 @@ class GroupState with ChangeNotifier {
         }
       }
 
+      debugPrint(
+        '_loadSavedGroups: loaded ${loadedGroups.length} groups from storage, _mlsGroups has ${_mlsGroups.length} entries',
+      );
+
+      // Clear and rebuild _mlsGroups to ensure consistency
+      _mlsGroups.clear();
+      for (final group in loadedGroups) {
+        final groupIdHex = _groupIdToHex(group.id);
+        _mlsGroups[groupIdHex] = group;
+      }
+
       _groups = loadedGroups;
+
+      debugPrint(
+        '_loadSavedGroups: _groups.length=${_groups.length}, _mlsGroups.length=${_mlsGroups.length}',
+      );
 
       // Refresh _activeGroup reference if it was set
       // This prevents stale references after reloading groups from storage
       if (_activeGroup != null) {
         final activeGroupIdHex = _groupIdToHex(_activeGroup!.id);
-        _activeGroup = _mlsGroups[activeGroupIdHex];
+        final refreshedGroup = _mlsGroups[activeGroupIdHex];
+        if (refreshedGroup == null) {
+          debugPrint(
+            'WARNING: _activeGroup ($activeGroupIdHex) not found after reload!',
+          );
+        }
+        _activeGroup = refreshedGroup;
       }
 
       _isLoading = false;
@@ -3569,7 +3590,13 @@ class GroupState with ChangeNotifier {
       );
 
       // Update groups list to reflect new member
+      debugPrint(
+        'inviteMember: before _loadSavedGroups - _groups.length=${_groups.length}, _mlsGroups.length=${_mlsGroups.length}',
+      );
       await _loadSavedGroups();
+      debugPrint(
+        'inviteMember: after _loadSavedGroups - _groups.length=${_groups.length}, _mlsGroups.length=${_mlsGroups.length}',
+      );
 
       // Invalidate membership cache so UIs update (explore view, members sidebar)
       invalidateMembershipCache(notify: true);
@@ -3918,6 +3945,18 @@ class GroupState with ChangeNotifier {
     try {
       // Deserialize Welcome message
       final welcome = Welcome.fromJson(welcomeEvent.content);
+
+      // Check if we already have this group (deduplication)
+      final welcomeGroupIdHex = welcome.groupId.bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join()
+          .toLowerCase();
+      if (_mlsGroups.containsKey(welcomeGroupIdHex)) {
+        debugPrint(
+          'Already have group ${welcomeGroupIdHex.substring(0, 8)}..., skipping Welcome',
+        );
+        return;
+      }
 
       // Get our HPKE private key derived from our Nostr key
       // This ensures we use the same key that corresponds to our published HPKE public key
