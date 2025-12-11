@@ -1914,6 +1914,24 @@ class _AuthorAvatarState extends State<_AuthorAvatar> {
 
   @override
   Widget build(BuildContext context) {
+    // Listen to ProfileState changes for this specific pubkey
+    // This ensures the avatar updates when the profile picture changes
+    final profile = context.select<ProfileState, ProfileData?>(
+      (state) => state.profiles[widget.pubkey],
+    );
+
+    // Update local state if profile picture changed
+    final newPictureUrl = profile?.picture;
+    if (newPictureUrl != null && newPictureUrl != _profilePictureUrl) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {
+            _profilePictureUrl = newPictureUrl;
+          });
+        }
+      });
+    }
+
     return Container(
       width: widget.size,
       height: widget.size,
