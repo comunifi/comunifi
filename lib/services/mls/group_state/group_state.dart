@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import '../key_schedule/key_schedule.dart';
 import '../crypto/crypto.dart' as mls_crypto;
 import '../crypto/default_crypto.dart';
@@ -13,7 +14,9 @@ class GroupId {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is GroupId && runtimeType == other.runtimeType && bytes.toString() == other.bytes.toString();
+      other is GroupId &&
+          runtimeType == other.runtimeType &&
+          bytes.toString() == other.bytes.toString();
 
   @override
   int get hashCode => bytes.toString().hashCode;
@@ -39,11 +42,17 @@ class GroupContext {
   Uint8List serialize() {
     // Simplified serialization: group_id (4 bytes length + bytes) + epoch (4 bytes) + hashes
     final groupIdLength = groupId.bytes.length;
-    final totalLength = 4 + groupIdLength + 4 + treeHash.length + confirmedTranscriptHash.length + (extensionsHash?.length ?? 0);
-    
+    final totalLength =
+        4 +
+        groupIdLength +
+        4 +
+        treeHash.length +
+        confirmedTranscriptHash.length +
+        (extensionsHash?.length ?? 0);
+
     final result = Uint8List(totalLength);
     int offset = 0;
-    
+
     // Group ID length and bytes
     result[offset++] = (groupIdLength >> 24) & 0xFF;
     result[offset++] = (groupIdLength >> 16) & 0xFF;
@@ -51,26 +60,30 @@ class GroupContext {
     result[offset++] = groupIdLength & 0xFF;
     result.setRange(offset, offset + groupIdLength, groupId.bytes);
     offset += groupIdLength;
-    
+
     // Epoch
     result[offset++] = (epoch >> 24) & 0xFF;
     result[offset++] = (epoch >> 16) & 0xFF;
     result[offset++] = (epoch >> 8) & 0xFF;
     result[offset++] = epoch & 0xFF;
-    
+
     // Tree hash
     result.setRange(offset, offset + treeHash.length, treeHash);
     offset += treeHash.length;
-    
+
     // Confirmed transcript hash
-    result.setRange(offset, offset + confirmedTranscriptHash.length, confirmedTranscriptHash);
+    result.setRange(
+      offset,
+      offset + confirmedTranscriptHash.length,
+      confirmedTranscriptHash,
+    );
     offset += confirmedTranscriptHash.length;
-    
+
     // Extensions hash (if present)
     if (extensionsHash != null) {
       result.setRange(offset, offset + extensionsHash!.length, extensionsHash!);
     }
-    
+
     return result;
   }
 
@@ -79,7 +92,8 @@ class GroupContext {
     int offset = 0;
 
     // Read group ID
-    final groupIdLength = (data[offset] << 24) |
+    final groupIdLength =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
@@ -89,7 +103,8 @@ class GroupContext {
     final groupId = GroupId(groupIdBytes);
 
     // Read epoch
-    final epoch = (data[offset] << 24) |
+    final epoch =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
@@ -206,26 +221,98 @@ class GroupState {
     );
   }
 
+  /// Create a tree with public keys properly populated from members map
+  ///
+  /// The internal tree state may not have all members' public keys in the
+  /// RatchetNode objects - they might only be stored in the members map.
+  /// This method creates a tree with all public keys properly set for serialization.
+  RatchetTree _createPopulatedTree() {
+    final treeSize = tree.nodes.length;
+    if (treeSize == 0) return tree;
+
+    // In this tree structure, leaves are in the bottom half:
+    // firstLeafNodeIndex = (treeSize - 1) ~/ 2
+    // Leaf i is at node index: firstLeafNodeIndex + i
+    final firstLeafNodeIndex = treeSize <= 1 ? 0 : (treeSize - 1) ~/ 2;
+
+    final newNodes = <RatchetNode>[];
+
+    for (int i = 0; i < treeSize; i++) {
+      final node = tree.nodes[i];
+
+      // Check if this is a leaf node (index >= firstLeafNodeIndex)
+      final isLeaf = i >= firstLeafNodeIndex;
+
+      if (isLeaf) {
+        // Convert node index to leaf index
+        final leafIndexValue = i - firstLeafNodeIndex;
+        final leafIndex = LeafIndex(leafIndexValue);
+
+        // Try to get the public key from the members map
+        final member = members[leafIndex];
+
+        if (member != null) {
+          // Use the member's HPKE public key, preserve private key if we have it
+          newNodes.add(
+            RatchetNode.withKeys(
+              member.hpkePublicKey,
+              node.privateKey, // Preserve our private key if this is our leaf
+              node.secret,
+            ),
+          );
+        } else if (node.publicKey != null) {
+          // Use existing key
+          newNodes.add(node);
+        } else if (node.isBlank) {
+          // Blank leaf (removed member or unoccupied slot)
+          newNodes.add(RatchetNode.blank());
+        } else {
+          // No key available - shouldn't happen for active leaves
+          debugPrint(
+            'WARNING: _createPopulatedTree: No public key for leaf $leafIndexValue at node $i',
+          );
+          newNodes.add(RatchetNode.blank());
+        }
+      } else {
+        // Internal node - blank it to avoid corrupt old leaf data after tree expansion
+        // Internal nodes derive their keys during key schedule operations
+        newNodes.add(RatchetNode.blank());
+      }
+    }
+
+    return RatchetTree(newNodes);
+  }
+
   /// Serialize group state to bytes
   Uint8List serialize() {
     // Format: group_context + ratchet_tree + members + epoch_secrets + identity_private_key + leaf_hpke_private_key + localLeafIndex + generations
     final contextBytes = context.serialize();
-    final treeBytes = tree.serialize();
+    // Create tree with public keys properly populated from members map
+    final populatedTree = _createPopulatedTree();
+    final treeBytes = populatedTree.serialize();
     final membersBytes = _serializeMembers(members);
     final secretsBytes = secrets.serialize();
     final generationsBytes = _serializeGenerations(_generations);
-    
+
     final identityPrivateKeyBytes = identityPrivateKey?.bytes;
     final leafHpkePrivateKeyBytes = leafHpkePrivateKey?.bytes;
 
-    final totalLength = 4 + contextBytes.length +
-        4 + treeBytes.length +
-        4 + membersBytes.length +
-        4 + secretsBytes.length +
-        4 + (identityPrivateKeyBytes?.length ?? 0) +
-        4 + (leafHpkePrivateKeyBytes?.length ?? 0) +
+    final totalLength =
+        4 +
+        contextBytes.length +
+        4 +
+        treeBytes.length +
+        4 +
+        membersBytes.length +
+        4 +
+        secretsBytes.length +
+        4 +
+        (identityPrivateKeyBytes?.length ?? 0) +
+        4 +
+        (leafHpkePrivateKeyBytes?.length ?? 0) +
         4 + // localLeafIndex
-        4 + generationsBytes.length;
+        4 +
+        generationsBytes.length;
 
     final result = Uint8List(totalLength);
     int offset = 0;
@@ -332,10 +419,14 @@ class GroupState {
       final identityKeyBytes = member.identityKey.bytes;
       final hpkeKeyBytes = member.hpkePublicKey.bytes;
 
-      final memberLength = 4 + // leaf_index
-          4 + userIdBytes.length + // user_id
-          4 + identityKeyBytes.length + // identity_key
-          4 + hpkeKeyBytes.length; // hpke_key
+      final memberLength =
+          4 + // leaf_index
+          4 +
+          userIdBytes.length + // user_id
+          4 +
+          identityKeyBytes.length + // identity_key
+          4 +
+          hpkeKeyBytes.length; // hpke_key
 
       final memberBytes = Uint8List(memberLength);
       int memberOffset = 0;
@@ -407,27 +498,35 @@ class GroupState {
     final secrets = EpochSecrets.deserialize(secretsBytes);
 
     // Read identity private key
-    final identityPrivateKeyLength = (data[offset] << 24) |
+    final identityPrivateKeyLength =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
     mls_crypto.PrivateKey? identityPrivateKey;
     if (identityPrivateKeyLength > 0) {
-      final identityPrivateKeyBytes = data.sublist(offset, offset + identityPrivateKeyLength);
+      final identityPrivateKeyBytes = data.sublist(
+        offset,
+        offset + identityPrivateKeyLength,
+      );
       identityPrivateKey = DefaultPrivateKey(identityPrivateKeyBytes);
       offset += identityPrivateKeyLength;
     }
 
     // Read leaf HPKE private key
-    final leafHpkePrivateKeyLength = (data[offset] << 24) |
+    final leafHpkePrivateKeyLength =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
     mls_crypto.PrivateKey? leafHpkePrivateKey;
     if (leafHpkePrivateKeyLength > 0) {
-      final leafHpkePrivateKeyBytes = data.sublist(offset, offset + leafHpkePrivateKeyLength);
+      final leafHpkePrivateKeyBytes = data.sublist(
+        offset,
+        offset + leafHpkePrivateKeyLength,
+      );
       leafHpkePrivateKey = DefaultPrivateKey(leafHpkePrivateKeyBytes);
       offset += leafHpkePrivateKeyLength;
     }
@@ -435,16 +534,17 @@ class GroupState {
     // Read localLeafIndex (if present, for backward compatibility)
     LeafIndex? localLeafIndex;
     Map<LeafIndex, int>? generations;
-    
+
     if (offset < data.length) {
       // Read localLeafIndex (4 bytes)
-      final localLeafIndexValue = (data[offset] << 24) |
+      final localLeafIndexValue =
+          (data[offset] << 24) |
           (data[offset + 1] << 16) |
           (data[offset + 2] << 8) |
           data[offset + 3];
       offset += 4;
       localLeafIndex = LeafIndex(localLeafIndexValue);
-      
+
       // Read generations map (if present)
       if (offset < data.length) {
         try {
@@ -481,7 +581,8 @@ class GroupState {
     int offset = 0;
 
     // Read count
-    final count = (data[offset] << 24) |
+    final count =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
@@ -490,7 +591,8 @@ class GroupState {
     // Read each entry
     for (int i = 0; i < count; i++) {
       // Leaf index
-      final leafIndexValue = (data[offset] << 24) |
+      final leafIndexValue =
+          (data[offset] << 24) |
           (data[offset + 1] << 16) |
           (data[offset + 2] << 8) |
           data[offset + 3];
@@ -498,7 +600,8 @@ class GroupState {
       final leafIndex = LeafIndex(leafIndexValue);
 
       // Generation
-      final generation = (data[offset] << 24) |
+      final generation =
+          (data[offset] << 24) |
           (data[offset + 1] << 16) |
           (data[offset + 2] << 8) |
           data[offset + 3];
@@ -511,7 +614,8 @@ class GroupState {
   }
 
   static Uint8List _readUint8List(Uint8List data, int offset) {
-    final length = (data[offset] << 24) |
+    final length =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
@@ -526,7 +630,8 @@ class GroupState {
     int offset = 0;
 
     // Read member count
-    final memberCount = (data[offset] << 24) |
+    final memberCount =
+        (data[offset] << 24) |
         (data[offset + 1] << 16) |
         (data[offset + 2] << 8) |
         data[offset + 3];
@@ -534,7 +639,8 @@ class GroupState {
 
     for (int i = 0; i < memberCount; i++) {
       // Read leaf index
-      final leafIndex = (data[offset] << 24) |
+      final leafIndex =
+          (data[offset] << 24) |
           (data[offset + 1] << 16) |
           (data[offset + 2] << 8) |
           data[offset + 3];
@@ -566,4 +672,3 @@ class GroupState {
     return members;
   }
 }
-

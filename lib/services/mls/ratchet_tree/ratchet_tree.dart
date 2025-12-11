@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import '../crypto/crypto.dart' as mls_crypto;
 import '../crypto/default_crypto.dart';
 
@@ -68,7 +69,14 @@ class RatchetNode {
 
   /// Serialize ratchet node to bytes
   Uint8List serialize() {
-    // Format: is_blank (1 byte) + public_key_length (4 bytes) + public_key + private_key_length (4 bytes) + private_key + secret_length (4 bytes) + secret
+    // Format for blank: is_blank (1 byte) only
+    // Format for non-blank: is_blank (1 byte) + public_key_length (4 bytes) + public_key + private_key_length (4 bytes) + private_key + secret_length (4 bytes) + secret
+
+    // For blank nodes, just write the flag
+    if (isBlank) {
+      return Uint8List.fromList([1]);
+    }
+
     int totalLength = 1; // is_blank
 
     final publicKeyBytes = publicKey?.bytes;
@@ -82,8 +90,8 @@ class RatchetNode {
     final result = Uint8List(totalLength);
     int offset = 0;
 
-    // Write is_blank
-    result[offset++] = isBlank ? 1 : 0;
+    // Write is_blank (0 = not blank)
+    result[offset++] = 0;
 
     // Write public key
     if (publicKeyBytes != null) {
@@ -155,6 +163,17 @@ class RatchetNode {
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
+
+    // Sanity check
+    if (publicKeyLength > 1000) {
+      debugPrint(
+        'RatchetNode.deserialize: SUSPICIOUS publicKeyLength=$publicKeyLength at offset ${offset - 4}, data.length=${data.length}',
+      );
+      debugPrint(
+        'RatchetNode.deserialize: bytes around offset: ${data.sublist(offset - 8 > 0 ? offset - 8 : 0, offset + 8 < data.length ? offset + 8 : data.length).map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}',
+      );
+    }
+
     mls_crypto.PublicKey? publicKey;
     if (publicKeyLength > 0) {
       final publicKeyBytes = data.sublist(offset, offset + publicKeyLength);
@@ -169,6 +188,14 @@ class RatchetNode {
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
+
+    // Sanity check
+    if (privateKeyLength > 1000) {
+      debugPrint(
+        'RatchetNode.deserialize: SUSPICIOUS privateKeyLength=$privateKeyLength at offset ${offset - 4}',
+      );
+    }
+
     mls_crypto.PrivateKey? privateKey;
     if (privateKeyLength > 0) {
       final privateKeyBytes = data.sublist(offset, offset + privateKeyLength);
@@ -183,6 +210,14 @@ class RatchetNode {
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
+
+    // Sanity check
+    if (secretLength > 1000) {
+      debugPrint(
+        'RatchetNode.deserialize: SUSPICIOUS secretLength=$secretLength at offset ${offset - 4}',
+      );
+    }
+
     Uint8List? secret;
     if (secretLength > 0) {
       secret = data.sublist(offset, offset + secretLength);
@@ -415,11 +450,19 @@ class RatchetTree {
         data[offset + 3];
     offset += 4;
 
+    debugPrint(
+      'RatchetTree.deserialize: nodeCount=$nodeCount, data.length=${data.length}',
+    );
+
     final nodes = <RatchetNode>[];
     for (int i = 0; i < nodeCount; i++) {
+      debugPrint('RatchetTree.deserialize: reading node $i at offset $offset');
       final (node, bytesRead) = RatchetNode.deserialize(data, offset);
       nodes.add(node);
       offset += bytesRead;
+      debugPrint(
+        'RatchetTree.deserialize: node $i read, bytesRead=$bytesRead, newOffset=$offset',
+      );
     }
 
     return RatchetTree(nodes);

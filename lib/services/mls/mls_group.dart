@@ -298,8 +298,9 @@ class MlsGroup {
       );
 
       debugPrint(
-        'MLS addMembers: Creating Welcome for leaf $newLeafIndex - '
-        'groupInfo.length=${groupInfo.length}, groupSecrets.length=${groupSecrets.length}',
+        'MLS addMembers: Creating Welcome for leaf ${newLeafIndex.value} - '
+        'groupInfo.length=${groupInfo.length}, groupSecrets.length=${groupSecrets.length}, '
+        'newMembers.length=${newMembers.length}',
       );
 
       // Encrypt group secrets with new member's HPKE public key
@@ -872,7 +873,11 @@ class MlsGroup {
 
     final contextBytes = data.sublist(offset, offset + contextLength);
     offset += contextLength;
+    debugPrint(
+      'MLS _deserializeGroupInfo: deserializing context (${contextBytes.length} bytes)...',
+    );
     final context = GroupContext.deserialize(contextBytes);
+    debugPrint('MLS _deserializeGroupInfo: context deserialized OK');
 
     // Read tree
     final treeLength =
@@ -881,9 +886,25 @@ class MlsGroup {
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
+    debugPrint(
+      'MLS _deserializeGroupInfo: treeLength=$treeLength, offset=$offset, dataRemaining=${data.length - offset}',
+    );
+
+    if (treeLength > data.length - offset) {
+      throw MlsError(
+        'Invalid groupInfo: treeLength=$treeLength exceeds remaining data ${data.length - offset}',
+      );
+    }
+
     final treeBytes = data.sublist(offset, offset + treeLength);
     offset += treeLength;
+    debugPrint(
+      'MLS _deserializeGroupInfo: deserializing tree (${treeBytes.length} bytes)...',
+    );
     final tree = RatchetTree.deserialize(treeBytes);
+    debugPrint(
+      'MLS _deserializeGroupInfo: tree deserialized OK, ${tree.nodes.length} nodes',
+    );
 
     // Read members
     final membersLength =
@@ -892,8 +913,24 @@ class MlsGroup {
         (data[offset + 2] << 8) |
         data[offset + 3];
     offset += 4;
+    debugPrint(
+      'MLS _deserializeGroupInfo: membersLength=$membersLength, offset=$offset, dataRemaining=${data.length - offset}',
+    );
+
+    if (membersLength > data.length - offset) {
+      throw MlsError(
+        'Invalid groupInfo: membersLength=$membersLength exceeds remaining data ${data.length - offset}',
+      );
+    }
+
     final membersBytes = data.sublist(offset, offset + membersLength);
+    debugPrint(
+      'MLS _deserializeGroupInfo: deserializing members (${membersBytes.length} bytes)...',
+    );
     final members = _deserializeMembersPublic(membersBytes);
+    debugPrint(
+      'MLS _deserializeGroupInfo: members deserialized OK, ${members.length} members',
+    );
 
     return (context, tree, members);
   }
@@ -911,8 +948,15 @@ class MlsGroup {
         data[offset + 3];
     offset += 4;
 
+    debugPrint(
+      'MLS _deserializeMembersPublic: count=$count, data.length=${data.length}',
+    );
+
     // Read each member
     for (int i = 0; i < count; i++) {
+      debugPrint(
+        'MLS _deserializeMembersPublic: reading member $i at offset $offset',
+      );
       // Leaf index
       final leafIndexValue =
           (data[offset] << 24) |
@@ -1075,15 +1119,116 @@ class MlsGroup {
     );
   }
 
+  /// Create a public-only tree for Welcome message serialization
+  ///
+  /// The internal tree state may not have all members' public keys in the
+  /// RatchetNode objects - they might only be stored in the members map.
+  /// This method creates a clean tree with all public keys properly set.
+  RatchetTree _createPublicTreeForWelcome(
+    RatchetTree tree,
+    Map<LeafIndex, GroupMember> members,
+  ) {
+    final treeSize = tree.nodes.length;
+    // In this tree structure, leaves are in the bottom half:
+    // firstLeafNodeIndex = (treeSize - 1) ~/ 2
+    // Leaf i is at node index: firstLeafNodeIndex + i
+    final firstLeafNodeIndex = treeSize <= 1 ? 0 : (treeSize - 1) ~/ 2;
+
+    debugPrint(
+      'MLS _createPublicTreeForWelcome: treeSize=$treeSize, firstLeafNodeIndex=$firstLeafNodeIndex, '
+      'members.length=${members.length}, memberLeafIndices=${members.keys.map((k) => k.value).toList()}',
+    );
+
+    // Debug: show all members' HPKE key lengths
+    for (final entry in members.entries) {
+      debugPrint(
+        'MLS _createPublicTreeForWelcome: member at leaf ${entry.key.value} has '
+        'hpkeKey length=${entry.value.hpkePublicKey.bytes.length}',
+      );
+    }
+
+    // Create new nodes list with public keys populated
+    final newNodes = <RatchetNode>[];
+
+    for (int i = 0; i < treeSize; i++) {
+      final node = tree.nodes[i];
+
+      // Check if this is a leaf node (index >= firstLeafNodeIndex)
+      final isLeaf = i >= firstLeafNodeIndex;
+
+      if (isLeaf) {
+        // Convert node index to leaf index
+        final leafIndexValue = i - firstLeafNodeIndex;
+        final leafIndex = LeafIndex(leafIndexValue);
+
+        // Try to get the public key from the members map
+        final member = members[leafIndex];
+        debugPrint(
+          'MLS _createPublicTreeForWelcome: node $i is leaf $leafIndexValue - '
+          'memberFound=${member != null}, nodeIsBlank=${node.isBlank}',
+        );
+
+        if (member != null) {
+          // Use the member's HPKE public key
+          final keyLen = member.hpkePublicKey.bytes.length;
+          debugPrint(
+            'MLS _createPublicTreeForWelcome: node $i - using member HPKE key ($keyLen bytes)',
+          );
+          if (keyLen == 0) {
+            debugPrint(
+              'WARNING: Member HPKE key is empty for leaf $leafIndexValue!',
+            );
+          }
+          newNodes.add(RatchetNode.withKeys(member.hpkePublicKey, null, null));
+        } else if (node.publicKey != null) {
+          // Use existing public key, strip private key and secret
+          debugPrint(
+            'MLS _createPublicTreeForWelcome: node $i - using existing key '
+            '(${node.publicKey!.bytes.length} bytes)',
+          );
+          newNodes.add(RatchetNode.withKeys(node.publicKey, null, null));
+        } else if (node.isBlank) {
+          // Blank leaf (removed member or unoccupied slot)
+          debugPrint('MLS _createPublicTreeForWelcome: node $i - blank leaf');
+          newNodes.add(RatchetNode.blank());
+        } else {
+          // No key available - this shouldn't happen for active leaves
+          debugPrint(
+            'WARNING: No public key for leaf $leafIndexValue at node $i',
+          );
+          newNodes.add(RatchetNode.blank());
+        }
+      } else {
+        // Internal node - blank it for Welcome message
+        // Don't preserve old data as tree restructuring may have left corrupt leaf data here
+        // Internal nodes derive their keys during key schedule operations
+        debugPrint(
+          'MLS _createPublicTreeForWelcome: node $i (internal) - blanking',
+        );
+        newNodes.add(RatchetNode.blank());
+      }
+    }
+
+    debugPrint(
+      'MLS _createPublicTreeForWelcome: created public tree with ${newNodes.length} nodes',
+    );
+
+    return RatchetTree(newNodes);
+  }
+
   /// Serialize group info (public state) for Welcome message
   Uint8List _serializeGroupInfo(
     GroupContext context,
     RatchetTree tree,
     Map<LeafIndex, GroupMember> members,
   ) {
+    // Create a public-only tree with all members' public keys properly populated
+    // The internal tree state may not have all public keys in the RatchetNode objects
+    final publicTree = _createPublicTreeForWelcome(tree, members);
+
     // Serialize: context + tree + members (public info only)
     final contextBytes = context.serialize();
-    final treeBytes = tree.serialize();
+    final treeBytes = publicTree.serialize();
 
     // Serialize members (public keys only)
     final membersBytes = _serializeMembersPublic(members);
