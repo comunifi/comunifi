@@ -961,6 +961,47 @@ class GroupState with ChangeNotifier {
     }
   }
 
+  /// Load group announcements from local database cache (instant display)
+  /// Returns list of GroupAnnouncement objects loaded from cache
+  Future<List<GroupAnnouncement>> loadGroupAnnouncementsFromCache() async {
+    if (_eventTable == null) return [];
+
+    try {
+      // Query all kind 9007 events (NIP-29 create-group) from DB
+      final events = await _eventTable!.query(
+        kind: kindCreateGroup,
+        limit: 10000, // Load all cached events
+      );
+
+      final announcements = <GroupAnnouncement>[];
+      for (final event in events) {
+        final announcement = _parseCreateGroupEvent(event);
+        if (announcement != null && announcement.mlsGroupId != null) {
+          announcements.add(announcement);
+        }
+      }
+
+      // Sort by creation date (newest first)
+      announcements.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+      debugPrint(
+        'Loaded ${announcements.length} group announcements from cache',
+      );
+      return announcements;
+    } catch (e) {
+      debugPrint('Failed to load group announcements from cache: $e');
+      return [];
+    }
+  }
+
+  /// Set discovered groups from cache (for instant display)
+  /// This is used by the sidebar to show groups immediately from cache
+  void setDiscoveredGroupsFromCache(List<GroupAnnouncement> announcements) {
+    _discoveredGroups = announcements;
+    _rebuildAnnouncementCache();
+    safeNotifyListeners();
+  }
+
   /// Sync group names from NIP-29 create-group events (kind 9007)
   /// This fetches create-group events from the relay and updates the group name cache
   /// and local storage for joined groups
@@ -2111,6 +2152,7 @@ class GroupState with ChangeNotifier {
         limit: _groupMessagesPageSize,
       );
 
+      DateTime? newestCachedTime;
       if (cachedDecrypted.isNotEmpty) {
         debugPrint(
           'Found ${cachedDecrypted.length} cached decrypted messages - displaying immediately',
@@ -2119,45 +2161,60 @@ class GroupState with ChangeNotifier {
         final cachedCount = _mergeGroupMessages(cachedDecrypted, groupIdHex);
         debugPrint('Added $cachedCount cached messages');
 
+        // Get the newest cached message timestamp to only fetch newer events
+        if (_groupMessages.isNotEmpty) {
+          newestCachedTime = _groupMessages.first.createdAt;
+        }
+
         // Notify immediately so UI shows cached content
         _isLoading = false;
         safeNotifyListeners();
-      }
-
-      // STEP 2: Fetch from relay and merge (only if connected)
-      if (!_isConnected) {
-        debugPrint('Not connected to relay, using cache only');
+      } else {
+        // No cached messages - ensure loading state is cleared
         _isLoading = false;
         safeNotifyListeners();
+      }
+
+      // STEP 2: Fetch only new events from relay in background (only if connected)
+      if (!_isConnected) {
+        debugPrint('Not connected to relay, using cache only');
         return;
       }
 
-      // Request past encrypted envelopes (kind 1059) for this group
-      // NostrService will automatically decrypt envelopes if possible
-      final pastEvents = await _nostrService!.requestPastEvents(
-        kind: kindEncryptedEnvelope,
-        tags: [groupIdHex], // Filter by 'g' tag
-        limit: _groupMessagesPageSize,
-        useCache: false, // Force relay query to get fresh events
-      );
+      // Fetch only newer events in the background (don't block UI)
+      // Use 'since' to only get events newer than what we have cached
+      Future.microtask(() async {
+        try {
+          final pastEvents = await _nostrService!.requestPastEvents(
+            kind: kindEncryptedEnvelope,
+            tags: [groupIdHex], // Filter by 'g' tag
+            since: newestCachedTime, // Only fetch events newer than cached
+            limit: _groupMessagesPageSize,
+            useCache: true, // Allow cache, but 'since' will fetch new events from network
+          );
 
-      debugPrint('Received ${pastEvents.length} events from relay');
+          debugPrint('Received ${pastEvents.length} new events from relay');
 
-      if (pastEvents.isNotEmpty) {
-        // Merge relay events into existing list
-        final addedCount = _mergeGroupMessages(pastEvents, groupIdHex);
-        debugPrint('Added $addedCount new messages from relay');
-      }
+          if (pastEvents.isNotEmpty) {
+            // Merge relay events into existing list
+            final addedCount = _mergeGroupMessages(pastEvents, groupIdHex);
+            debugPrint('Added $addedCount new messages from relay');
+            if (addedCount > 0) {
+              safeNotifyListeners();
+            }
+          }
 
-      // Update pagination state based on relay response
-      _hasMoreGroupMessages = pastEvents.length >= _groupMessagesPageSize;
+          // Update pagination state based on relay response
+          _hasMoreGroupMessages = pastEvents.length >= _groupMessagesPageSize;
 
-      debugPrint(
-        'Total ${_groupMessages.length} messages for group $groupIdHex',
-      );
-
-      _isLoading = false;
-      safeNotifyListeners();
+          debugPrint(
+            'Total ${_groupMessages.length} messages for group $groupIdHex',
+          );
+        } catch (e) {
+          debugPrint('Failed to fetch new messages from relay: $e');
+          // Don't show error to user - cache is already displayed
+        }
+      });
     } catch (e) {
       _isLoading = false;
       debugPrint('Failed to load group messages: $e');
@@ -2244,44 +2301,47 @@ class GroupState with ChangeNotifier {
           );
 
       // Fetch past Welcome messages we might have missed (e.g., app was closed when invited)
-      try {
-        final pastWelcomes = await _nostrService!.requestPastEvents(
-          kind: kindMlsWelcome,
-          tags: [ourPubkey],
-          tagKey: 'p',
-          limit: 50,
-          useCache: false, // Always check relay for fresh data
-        );
+      // Do this in background so it doesn't block UI after groups are loaded from DB
+      Future.microtask(() async {
+        try {
+          final pastWelcomes = await _nostrService!.requestPastEvents(
+            kind: kindMlsWelcome,
+            tags: [ourPubkey],
+            tagKey: 'p',
+            limit: 50,
+            useCache: true, // Check cache first, then network for new ones
+          );
 
-        debugPrint(
-          'Fetched ${pastWelcomes.length} past Welcome messages to process',
-        );
+          debugPrint(
+            'Fetched ${pastWelcomes.length} past Welcome messages to process',
+          );
 
-        for (final welcomeEvent in pastWelcomes) {
-          // Extract group ID from 'g' tag
-          String? groupIdHex;
-          for (final tag in welcomeEvent.tags) {
-            if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
-              groupIdHex = tag[1].toLowerCase();
-              break;
+          for (final welcomeEvent in pastWelcomes) {
+            // Extract group ID from 'g' tag
+            String? groupIdHex;
+            for (final tag in welcomeEvent.tags) {
+              if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+                groupIdHex = tag[1].toLowerCase();
+                break;
+              }
+            }
+
+            // Only process if we don't already have this group
+            if (groupIdHex != null && !_mlsGroups.containsKey(groupIdHex)) {
+              debugPrint(
+                'Processing missed Welcome for group: ${groupIdHex.substring(0, 8)}...',
+              );
+              try {
+                await handleWelcomeInvitation(welcomeEvent);
+              } catch (e) {
+                debugPrint('Failed to process past Welcome: $e');
+              }
             }
           }
-
-          // Only process if we don't already have this group
-          if (groupIdHex != null && !_mlsGroups.containsKey(groupIdHex)) {
-            debugPrint(
-              'Processing missed Welcome for group: ${groupIdHex.substring(0, 8)}...',
-            );
-            try {
-              await handleWelcomeInvitation(welcomeEvent);
-            } catch (e) {
-              debugPrint('Failed to process past Welcome: $e');
-            }
-          }
+        } catch (e) {
+          debugPrint('Failed to fetch past Welcome messages: $e');
         }
-      } catch (e) {
-        debugPrint('Failed to fetch past Welcome messages: $e');
-      }
+      });
 
       // Listen for MLS Commit messages (kind 1061) addressed to us
       // These are sent when a new member is added to a group we're already in
@@ -4393,115 +4453,185 @@ class GroupState with ChangeNotifier {
       return Map.unmodifiable(_membershipCache);
     }
 
-    if (_nostrService == null || !_isConnected) {
-      return {};
-    }
-
     final userPubkey = await getNostrPublicKey();
     if (userPubkey == null) {
       return {};
     }
 
     try {
-      // Query all kind 9000 (put-user) events addressed to user
-      final putEvents = await _nostrService!.requestPastEvents(
-        kind: kindPutUser,
-        tags: [userPubkey],
-        tagKey: 'p',
-        limit: 1000,
-        useCache: false,
-      );
+      // STEP 1: Load from cache first (instant display)
+      List<NostrEventModel> putEvents = [];
+      List<NostrEventModel> removeEvents = [];
 
-      // Query all kind 9001 (remove-user) events addressed to user
-      final removeEvents = await _nostrService!.requestPastEvents(
-        kind: kindRemoveUser,
-        tags: [userPubkey],
-        tagKey: 'p',
-        limit: 1000,
-        useCache: false,
-      );
+      if (_nostrService != null) {
+        // Query cached put-user events
+        putEvents = await _nostrService!.queryCachedEvents(
+          kind: kindPutUser,
+          tagKey: 'p',
+          tagValue: userPubkey,
+          limit: 1000,
+        );
 
-      // Build maps of latest event per group
-      // Map<groupIdHex, DateTime>
-      final latestPutByGroup = <String, DateTime>{};
-      final latestRemoveByGroup = <String, DateTime>{};
+        // Query cached remove-user events
+        removeEvents = await _nostrService!.queryCachedEvents(
+          kind: kindRemoveUser,
+          tagKey: 'p',
+          tagValue: userPubkey,
+          limit: 1000,
+        );
 
-      // Process put-user events
-      for (final event in putEvents) {
-        // Extract group ID from 'h' tag
-        String? groupIdHex;
-        for (final tag in event.tags) {
-          if (tag.length >= 2 && tag[0] == 'h') {
-            groupIdHex = tag[1].toLowerCase(); // Normalize to lowercase
-            break;
+        // If we have cached data, compute memberships immediately
+        if (putEvents.isNotEmpty || removeEvents.isNotEmpty) {
+          final cachedMemberships = _computeMembershipsFromEvents(
+            putEvents,
+            removeEvents,
+          );
+          _membershipCache = cachedMemberships;
+          _membershipCacheLoaded = true;
+          debugPrint(
+            'Loaded ${cachedMemberships.length} group memberships from cache (${cachedMemberships.values.where((v) => v).length} active)',
+          );
+        }
+      }
+
+      // STEP 2: Fetch from network in background (only if connected and not forcing refresh)
+      if (_nostrService != null && _isConnected && !forceRefresh) {
+        Future.microtask(() async {
+          try {
+            // Query all kind 9000 (put-user) events addressed to user
+            final networkPutEvents = await _nostrService!.requestPastEvents(
+              kind: kindPutUser,
+              tags: [userPubkey],
+              tagKey: 'p',
+              limit: 1000,
+              useCache: true, // Allow cache, but will fetch new events
+            );
+
+            // Query all kind 9001 (remove-user) events addressed to user
+            final networkRemoveEvents = await _nostrService!.requestPastEvents(
+              kind: kindRemoveUser,
+              tags: [userPubkey],
+              tagKey: 'p',
+              limit: 1000,
+              useCache: true, // Allow cache, but will fetch new events
+            );
+
+            // Merge cached and network events (network may have newer events)
+            final allPutEvents = <String, NostrEventModel>{};
+            final allRemoveEvents = <String, NostrEventModel>{};
+
+            // Add cached events
+            for (final event in putEvents) {
+              allPutEvents[event.id] = event;
+            }
+            for (final event in removeEvents) {
+              allRemoveEvents[event.id] = event;
+            }
+
+            // Add/update with network events (may have newer versions)
+            for (final event in networkPutEvents) {
+              final existing = allPutEvents[event.id];
+              if (existing == null || event.createdAt.isAfter(existing.createdAt)) {
+                allPutEvents[event.id] = event;
+              }
+            }
+            for (final event in networkRemoveEvents) {
+              final existing = allRemoveEvents[event.id];
+              if (existing == null || event.createdAt.isAfter(existing.createdAt)) {
+                allRemoveEvents[event.id] = event;
+              }
+            }
+
+            // Recompute memberships with all events
+            final updatedMemberships = _computeMembershipsFromEvents(
+              allPutEvents.values.toList(),
+              allRemoveEvents.values.toList(),
+            );
+
+            _membershipCache = updatedMemberships;
+            _membershipCacheLoaded = true;
+            safeNotifyListeners();
+
+            debugPrint(
+              'Updated group memberships from network: ${updatedMemberships.length} groups (${updatedMemberships.values.where((v) => v).length} active)',
+            );
+          } catch (e) {
+            debugPrint('Failed to refresh memberships from network: $e');
+            // Don't show error - cache is already displayed
           }
-        }
-        if (groupIdHex == null) continue;
-
-        // Update latest timestamp for this group
-        final existing = latestPutByGroup[groupIdHex];
-        if (existing == null || event.createdAt.isAfter(existing)) {
-          latestPutByGroup[groupIdHex] = event.createdAt;
-        }
+        });
       }
 
-      // Process remove-user events
-      for (final event in removeEvents) {
-        // Extract group ID from 'h' tag
-        String? groupIdHex;
-        for (final tag in event.tags) {
-          if (tag.length >= 2 && tag[0] == 'h') {
-            groupIdHex = tag[1].toLowerCase(); // Normalize to lowercase
-            break;
-          }
-        }
-        if (groupIdHex == null) continue;
-
-        // Update latest timestamp for this group
-        final existing = latestRemoveByGroup[groupIdHex];
-        if (existing == null || event.createdAt.isAfter(existing)) {
-          latestRemoveByGroup[groupIdHex] = event.createdAt;
-        }
-      }
-
-      // Build membership map
-      final memberships = <String, bool>{};
-
-      // Check all groups where user was ever added
-      for (final groupIdHex in latestPutByGroup.keys) {
-        final putTime = latestPutByGroup[groupIdHex]!;
-        final removeTime = latestRemoveByGroup[groupIdHex];
-
-        // Member if no removal or put is after removal
-        memberships[groupIdHex] =
-            removeTime == null || putTime.isAfter(removeTime);
-      }
-
-      debugPrint(
-        'getUserGroupMemberships: found ${putEvents.length} put-user events, ${removeEvents.length} remove-user events',
-      );
-      debugPrint(
-        'getUserGroupMemberships: ${memberships.length} groups where user is a member',
-      );
-      for (final entry in memberships.entries) {
-        if (entry.value) {
-          debugPrint('  - Member of group: ${entry.key}');
-        }
-      }
-
-      // Cache the result
-      _membershipCache = memberships;
-      _membershipCacheLoaded = true;
-
-      debugPrint(
-        'Loaded ${memberships.length} group memberships (${memberships.values.where((v) => v).length} active)',
-      );
-
-      return Map.unmodifiable(memberships);
+      // Return cached memberships (computed from cache or empty if no cache)
+      return Map.unmodifiable(_membershipCache);
     } catch (e) {
       debugPrint('Failed to get user group memberships: $e');
       return {};
     }
+  }
+
+  /// Compute memberships from put-user and remove-user events
+  Map<String, bool> _computeMembershipsFromEvents(
+    List<NostrEventModel> putEvents,
+    List<NostrEventModel> removeEvents,
+  ) {
+    // Build maps of latest event per group
+    // Map<groupIdHex, DateTime>
+    final latestPutByGroup = <String, DateTime>{};
+    final latestRemoveByGroup = <String, DateTime>{};
+
+    // Process put-user events
+    for (final event in putEvents) {
+      // Extract group ID from 'h' tag
+      String? groupIdHex;
+      for (final tag in event.tags) {
+        if (tag.length >= 2 && tag[0] == 'h') {
+          groupIdHex = tag[1].toLowerCase(); // Normalize to lowercase
+          break;
+        }
+      }
+      if (groupIdHex == null) continue;
+
+      // Update latest timestamp for this group
+      final existing = latestPutByGroup[groupIdHex];
+      if (existing == null || event.createdAt.isAfter(existing)) {
+        latestPutByGroup[groupIdHex] = event.createdAt;
+      }
+    }
+
+    // Process remove-user events
+    for (final event in removeEvents) {
+      // Extract group ID from 'h' tag
+      String? groupIdHex;
+      for (final tag in event.tags) {
+        if (tag.length >= 2 && tag[0] == 'h') {
+          groupIdHex = tag[1].toLowerCase(); // Normalize to lowercase
+          break;
+        }
+      }
+      if (groupIdHex == null) continue;
+
+      // Update latest timestamp for this group
+      final existing = latestRemoveByGroup[groupIdHex];
+      if (existing == null || event.createdAt.isAfter(existing)) {
+        latestRemoveByGroup[groupIdHex] = event.createdAt;
+      }
+    }
+
+    // Build membership map
+    final memberships = <String, bool>{};
+
+    // Check all groups where user was ever added
+    for (final groupIdHex in latestPutByGroup.keys) {
+      final putTime = latestPutByGroup[groupIdHex]!;
+      final removeTime = latestRemoveByGroup[groupIdHex];
+
+      // Member if no removal or put is after removal
+      memberships[groupIdHex] =
+          removeTime == null || putTime.isAfter(removeTime);
+    }
+
+    return memberships;
   }
 
   /// Request to join a group (publishes kind 9021 per NIP-29)

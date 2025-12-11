@@ -44,8 +44,8 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   void initState() {
     super.initState();
     _loadUserPubkey();
-    _fetchGroupsFromRelay();
-    _loadMemberships();
+    _loadFromCache(); // Load from cache first for instant display
+    _fetchGroupsFromRelay(); // Then fetch from network in background
   }
 
   Future<void> _loadUserPubkey() async {
@@ -67,11 +67,39 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     }
   }
 
-  Future<void> _loadMemberships() async {
+  /// Load memberships and group announcements from cache first (instant display)
+  Future<void> _loadFromCache() async {
     final groupState = context.read<GroupState>();
-    if (!groupState.isConnected) return;
 
     try {
+      // Load memberships from cache (will load from cache first, then network in background)
+      final memberships = await groupState.getUserGroupMemberships();
+      if (mounted) {
+        setState(() {
+          _memberships = memberships;
+          _membershipsLoaded = true;
+        });
+      }
+
+      // Load group announcements from cache
+      final cachedAnnouncements =
+          await groupState.loadGroupAnnouncementsFromCache();
+      if (mounted && cachedAnnouncements.isNotEmpty) {
+        // Update discovered groups with cached announcements
+        // This will show groups instantly from cache
+        groupState.setDiscoveredGroupsFromCache(cachedAnnouncements);
+      }
+    } catch (e) {
+      debugPrint('Failed to load from cache: $e');
+      // Silently fail - will fall back to network fetch
+    }
+  }
+
+  Future<void> _loadMemberships() async {
+    final groupState = context.read<GroupState>();
+
+    try {
+      // This will use cache if available, then fetch from network in background
       final memberships = await groupState.getUserGroupMemberships();
       if (mounted) {
         setState(() {
@@ -91,11 +119,12 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     setState(() => _isFetchingGroups = true);
 
     try {
+      // Fetch from network in background (cache already displayed)
       await groupState.refreshDiscoveredGroups(limit: 1000);
       // Also refresh memberships when fetching groups
       await _loadMemberships();
     } catch (e) {
-      // Silently fail
+      // Silently fail - cache is already displayed
     } finally {
       if (mounted) setState(() => _isFetchingGroups = false);
     }
@@ -155,10 +184,11 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     final allGroups = <_GroupItem>[];
 
     debugPrint(
-      'GroupsSidebar._buildGroupList: ${groupState.discoveredGroups.length} discovered groups, ${_memberships.length} memberships, ${groupState.groups.length} local MLS groups',
+      'GroupsSidebar._buildGroupList: ${groupState.discoveredGroups.length} discovered groups, ${_memberships.length} memberships',
     );
 
     // Filter groups based on NIP-29 membership (kind 9000/9001 events)
+    // Only show groups where user is a member (based on Nostr membership, not MLS)
     // Exclude personal groups
     for (final announcement in groupState.discoveredGroups) {
       final groupIdHex = announcement.mlsGroupId;
@@ -182,41 +212,20 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
       final isMember =
           _memberships[groupIdHex] ?? _memberships[normalizedGroupId] ?? false;
 
-      // Skip groups user is not a member of
+      // Only show groups where user is a member (based on Nostr membership)
       if (!isMember) {
-        debugPrint(
-          'GroupsSidebar: Skipping group ${announcement.name} ($normalizedGroupId) - not in memberships',
-        );
         continue;
       }
 
-      // Find matching local MLS group - use O(1) cached lookup
+      // Show all groups where user is a member (don't require MLS group)
+      // MLS group may be null if user hasn't received Welcome message yet
       final matchingGroup = groupState.getGroupByHexId(normalizedGroupId);
-
-      // Check if user is the group creator
       final isCreator = announcement.pubkey == _userNostrPubkey;
-
-      // Show groups if:
-      // 1. Has local MLS state (can decrypt messages), OR
-      // 2. User is the creator (should be able to see their own groups)
-      if (matchingGroup == null && !isCreator) {
-        debugPrint(
-          'GroupsSidebar: Skipping group ${announcement.name} ($normalizedGroupId) - no local MLS state and not creator',
-        );
-        continue;
-      }
-
-      if (matchingGroup == null && isCreator) {
-        debugPrint(
-          'GroupsSidebar: Including group ${announcement.name} ($normalizedGroupId) - creator but no local MLS state (needs recovery)',
-        );
-      }
 
       allGroups.add(
         _GroupItem(
           announcement: announcement,
-          mlsGroup:
-              matchingGroup, // May be null for creator groups needing recovery
+          mlsGroup: matchingGroup, // May be null - that's OK, we show based on Nostr membership
           isMyGroup: isCreator,
         ),
       );
@@ -366,10 +375,12 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                         onTap: mlsGroup != null
                             ? () => _selectGroup(mlsGroup)
                             : () {
-                                // Show recovery needed message
+                                // Group is a member but no MLS state yet
+                                // This can happen if Welcome message hasn't been received
                                 debugPrint(
-                                  'Group ${announcement?.name} needs MLS recovery',
+                                  'Group ${announcement?.name} is a member but MLS state not available yet',
                                 );
+                                // Could show a message or try to recover
                               },
                         onLongPress: announcement != null
                             ? () => _showEditGroupModal(announcement)

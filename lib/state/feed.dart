@@ -423,12 +423,19 @@ class FeedState with ChangeNotifier {
         safeNotifyListeners();
       }
 
-      // Request initial batch of events (kind 1 = text notes)
-      // Skip cache since we already loaded from cache in _loadCachedEvents
+      // Calculate 'since' timestamp from newest cached event to only fetch newer ones
+      DateTime? newestCachedTime;
+      if (_events.isNotEmpty) {
+        newestCachedTime = _events.first.createdAt;
+      }
+
+      // Request only new events (kind 1 = text notes) in background
+      // Use 'since' to only get events newer than what we have cached
       final pastEvents = await _nostrService!.requestPastEvents(
         kind: 1,
+        since: newestCachedTime, // Only fetch events newer than cached
         limit: _pageSize,
-        useCache: false, // Force relay query to get fresh events
+        useCache: true, // Allow cache, but 'since' will fetch new events from network
       );
 
       // Filter out comments (events with 'e' tags are replies/comments)

@@ -251,6 +251,7 @@ class ProfileState with ChangeNotifier {
   }
 
   /// Get profile for a public key
+  /// Loads from cache first, then fetches from network in background
   Future<ProfileData?> getProfile(String pubkey) async {
     if (_profileService == null) {
       debugPrint('Profile service not initialized');
@@ -269,14 +270,54 @@ class ProfileState with ChangeNotifier {
       return tempProfile;
     }
 
-    // Check if we already have it cached
+    // Check if we already have it cached in memory
     if (_profiles.containsKey(pubkey)) {
       return _profiles[pubkey];
     }
 
-    // Get or create local username first (so we can show it immediately)
+    // STEP 1: Load from DB cache first (immediate display)
+    try {
+      final cachedProfiles = await _profileService!.getProfilesFromCacheOnly(
+        [pubkey],
+      );
+
+      if (cachedProfiles.containsKey(pubkey) && cachedProfiles[pubkey] != null) {
+        final cachedProfile = cachedProfiles[pubkey]!;
+        _profiles[pubkey] = cachedProfile;
+        safeNotifyListeners();
+        debugPrint('Loaded profile from cache for ${pubkey.substring(0, 8)}...');
+        
+        // Fetch fresh from network in background (don't block)
+        if (_isConnected) {
+          Future.microtask(() async {
+            try {
+              final freshProfile = await _profileService!.getProfile(pubkey);
+              if (freshProfile != null) {
+                // Update if we got new data (e.g., picture, updated name)
+                final existing = _profiles[pubkey];
+                if (existing == null ||
+                    (freshProfile.picture != null && existing.picture == null) ||
+                    (freshProfile.name != null && existing.name == null)) {
+                  _profiles[pubkey] = freshProfile;
+                  safeNotifyListeners();
+                }
+              }
+            } catch (e) {
+              debugPrint('Failed to refresh profile from network: $e');
+              // Don't show error - cache is already displayed
+            }
+          });
+        }
+        
+        return cachedProfile;
+      }
+    } catch (e) {
+      debugPrint('Failed to load profile from cache: $e');
+      // Continue to fallback
+    }
+
+    // STEP 2: Fallback to local username if no cache (immediate display)
     final localUsername = await _getOrCreateLocalUsername(pubkey);
-    // Create a temporary profile with the local username
     final tempProfile = ProfileData(
       pubkey: pubkey,
       name: localUsername,
@@ -286,60 +327,56 @@ class ProfileState with ChangeNotifier {
     _profiles[pubkey] = tempProfile;
     safeNotifyListeners();
 
-    try {
-      _isLoading = true;
-      safeNotifyListeners();
-
-      final profile = await _profileService!.getProfile(pubkey);
-
-      if (profile != null) {
-        // Check if profile has a real name (not just pubkey prefix)
-        final realUsername = profile.getUsername();
-        final hasRealName =
-            (profile.name != null && profile.name!.isNotEmpty) ||
-            (profile.displayName != null && profile.displayName!.isNotEmpty);
-
-        if (hasRealName && realUsername != pubkey.substring(0, 8)) {
-          // Real profile with actual name found, update local username
-          await _updateLocalUsername(pubkey, realUsername);
-          _profiles[pubkey] = profile;
-        } else {
-          // Profile found but no real name - merge network profile fields
-          // (like picture, about, etc.) with the local username
-          final mergedProfile = ProfileData(
-            pubkey: pubkey,
-            name: localUsername,
-            displayName: localUsername,
-            about: profile.about,
-            picture: profile.picture,
-            banner: profile.banner,
-            website: profile.website,
-            nip05: profile.nip05,
-            mlsHpkePublicKey: profile.mlsHpkePublicKey,
-            rawData: {
-              ...profile.rawData,
-              'name': localUsername,
-              'display_name': localUsername,
-            },
-          );
-          _profiles[pubkey] = mergedProfile;
-        }
-      } else {
-        // Profile not found on network, keep using local username
-        // tempProfile is already set
-      }
-
-      _isLoading = false;
-      safeNotifyListeners();
-
-      return _profiles[pubkey];
-    } catch (e) {
-      _isLoading = false;
-      debugPrint('Error getting profile: $e');
-      // Keep the local username profile
-      safeNotifyListeners();
+    // STEP 3: Fetch from network in background (don't block)
+    if (!_isConnected) {
       return tempProfile;
     }
+
+    Future.microtask(() async {
+      try {
+        final profile = await _profileService!.getProfile(pubkey);
+
+        if (profile != null) {
+          // Check if profile has a real name (not just pubkey prefix)
+          final realUsername = profile.getUsername();
+          final hasRealName =
+              (profile.name != null && profile.name!.isNotEmpty) ||
+              (profile.displayName != null && profile.displayName!.isNotEmpty);
+
+          if (hasRealName && realUsername != pubkey.substring(0, 8)) {
+            // Real profile with actual name found, update local username
+            await _updateLocalUsername(pubkey, realUsername);
+            _profiles[pubkey] = profile;
+          } else {
+            // Profile found but no real name - merge network profile fields
+            // (like picture, about, etc.) with the local username
+            final mergedProfile = ProfileData(
+              pubkey: pubkey,
+              name: localUsername,
+              displayName: localUsername,
+              about: profile.about,
+              picture: profile.picture,
+              banner: profile.banner,
+              website: profile.website,
+              nip05: profile.nip05,
+              mlsHpkePublicKey: profile.mlsHpkePublicKey,
+              rawData: {
+                ...profile.rawData,
+                'name': localUsername,
+                'display_name': localUsername,
+              },
+            );
+            _profiles[pubkey] = mergedProfile;
+          }
+          safeNotifyListeners();
+        }
+      } catch (e) {
+        debugPrint('Error getting profile from network: $e');
+        // Keep the local username profile - already displayed
+      }
+    });
+
+    return tempProfile;
   }
 
   /// Get profile fresh from relay, bypassing cache
