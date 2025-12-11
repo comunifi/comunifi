@@ -268,12 +268,6 @@ class _PostItemContent extends StatefulWidget {
   final NostrEventModel event;
   final String displayName;
 
-  /// Wide screen breakpoint (same as feed_screen.dart)
-  static const double wideScreenBreakpoint = 1000;
-
-  /// Sidebar width (same as feed_screen.dart)
-  static const double sidebarWidth = 320;
-
   const _PostItemContent({
     required this.event,
     required this.displayName,
@@ -455,18 +449,7 @@ class _PostItemContentState extends State<_PostItemContent> {
 
   @override
   Widget build(BuildContext context) {
-    // Calculate max width based on feed area (screen width minus sidebars on wide screens)
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isWideScreen = screenWidth > _PostItemContent.wideScreenBreakpoint;
-    final maxContentWidth = isWideScreen
-        ? screenWidth - (_PostItemContent.sidebarWidth * 2)
-        : screenWidth;
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxContentWidth),
-        child: Container(
+    return Container(
           padding: const EdgeInsets.all(16.0),
           decoration: const BoxDecoration(
             border: Border(
@@ -535,8 +518,6 @@ class _PostItemContentState extends State<_PostItemContent> {
               ),
             ],
           ),
-        ),
-      ),
     );
   }
 
@@ -598,12 +579,6 @@ class _CommentItemState extends State<_CommentItem> {
 class _CommentItemContent extends StatefulWidget {
   final NostrEventModel event;
   final String displayName;
-
-  /// Wide screen breakpoint (same as feed_screen.dart)
-  static const double wideScreenBreakpoint = 1000;
-
-  /// Sidebar width (same as feed_screen.dart)
-  static const double sidebarWidth = 320;
 
   const _CommentItemContent({
     required this.event,
@@ -786,18 +761,7 @@ class _CommentItemContentState extends State<_CommentItemContent> {
 
   @override
   Widget build(BuildContext context) {
-    // Calculate max width based on feed area (screen width minus sidebars on wide screens)
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isWideScreen = screenWidth > _CommentItemContent.wideScreenBreakpoint;
-    final maxContentWidth = isWideScreen
-        ? screenWidth - (_CommentItemContent.sidebarWidth * 2)
-        : screenWidth;
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxContentWidth),
-        child: Container(
+    return Container(
           padding: const EdgeInsets.all(16.0),
           decoration: const BoxDecoration(
             border: Border(
@@ -856,8 +820,6 @@ class _CommentItemContentState extends State<_CommentItemContent> {
               ),
             ],
           ),
-        ),
-      ),
     );
   }
 }
@@ -1041,6 +1003,7 @@ class _ComposeCommentWidget extends StatelessWidget {
                         maxLines: null,
                         minLines: 1,
                         textInputAction: TextInputAction.newline,
+                        autofocus: true,
                         padding: const EdgeInsets.symmetric(
                           horizontal: 12.0,
                           vertical: 8.0,

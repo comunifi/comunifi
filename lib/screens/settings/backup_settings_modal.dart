@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:comunifi/screens/recovery/send_recovery_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
@@ -28,6 +30,7 @@ class _BackupSettingsModalState extends State<BackupSettingsModal> {
   BackupStatus? _backupStatus;
   String? _errorMessage;
   String? _successMessage;
+  final GlobalKey _saveRecoveryLinkButtonKey = GlobalKey();
 
   @override
   void initState() {
@@ -129,8 +132,22 @@ class _BackupSettingsModalState extends State<BackupSettingsModal> {
       // Create recovery link
       final recoveryLink = payload.toRecoveryLink();
 
+      // Get button position for macOS
+      Rect? sharePositionOrigin;
+      if (Platform.isMacOS) {
+        final box = _saveRecoveryLinkButtonKey.currentContext?.findRenderObject() as RenderBox?;
+        if (box != null) {
+          final position = box.localToGlobal(Offset.zero);
+          sharePositionOrigin = position & box.size;
+        }
+      }
+
       // Show share sheet
-      await Share.share(recoveryLink, subject: 'Comunifi Recovery Link');
+      await Share.share(
+        recoveryLink,
+        subject: 'Comunifi Recovery Link',
+        sharePositionOrigin: sharePositionOrigin,
+      );
 
       if (mounted) {
         setState(() {
@@ -401,6 +418,7 @@ class _BackupSettingsModalState extends State<BackupSettingsModal> {
                               ),
                             ),
                             _SettingsTile(
+                              key: _saveRecoveryLinkButtonKey,
                               icon: CupertinoIcons.link,
                               iconColor: CupertinoColors.systemIndigo,
                               title: 'Save Recovery Link',
@@ -563,6 +581,7 @@ class _SettingsTile extends StatelessWidget {
   final bool isLoading;
 
   const _SettingsTile({
+    super.key,
     required this.icon,
     required this.iconColor,
     required this.title,
