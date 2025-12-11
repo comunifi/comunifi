@@ -1067,7 +1067,11 @@ class GroupState with ChangeNotifier {
 
   /// Get all members of a group from NIP-29 events (kind 39001 admins + kind 39002 members)
   /// Returns a list of NIP29GroupMember with pubkeys and roles
-  Future<List<NIP29GroupMember>> getGroupMembers(String groupIdHex) async {
+  /// If [forceRefresh] is true, bypasses the event cache to fetch fresh data from the relay
+  Future<List<NIP29GroupMember>> getGroupMembers(
+    String groupIdHex, {
+    bool forceRefresh = false,
+  }) async {
     if (_nostrService == null || !_isConnected) {
       return [];
     }
@@ -1081,7 +1085,7 @@ class GroupState with ChangeNotifier {
         tags: [groupIdHex],
         tagKey: 'd',
         limit: 1,
-        useCache: true,
+        useCache: !forceRefresh,
       );
 
       if (adminEvents.isNotEmpty) {
@@ -1101,7 +1105,7 @@ class GroupState with ChangeNotifier {
         tags: [groupIdHex],
         tagKey: 'd',
         limit: 1,
-        useCache: true,
+        useCache: !forceRefresh,
       );
 
       if (memberEvents.isNotEmpty) {

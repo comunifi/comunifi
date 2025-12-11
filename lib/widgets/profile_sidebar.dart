@@ -349,7 +349,12 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
         final newUsername = profile.getUsername();
 
         // Schedule state update after build if values changed
-        if (newPicture != _currentProfilePictureUrl && !_hasLoadedProfile) {
+        // Allow updates if: first load OR picture actually changed from a non-null value
+        final shouldUpdatePicture =
+            newPicture != _currentProfilePictureUrl &&
+            (!_hasLoadedProfile ||
+                (_currentProfilePictureUrl != null && newPicture != null));
+        if (shouldUpdatePicture) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted && !_isUploadingPhoto) {
               setState(() {

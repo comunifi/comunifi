@@ -263,7 +263,8 @@ class ProfileState with ChangeNotifier {
         displayName: localUsername,
         rawData: {'name': localUsername, 'display_name': localUsername},
       );
-      _profiles[pubkey] = tempProfile;
+      // Don't cache temp profile - subsequent calls when service is ready
+      // will properly fetch from DB cache (which has the complete profile with picture)
       safeNotifyListeners();
       return tempProfile;
     }
@@ -975,19 +976,25 @@ class ProfileState with ChangeNotifier {
       );
 
       // Publish to the relay
-      await _nostrService!.publishEvent(eventModel.toJson());
+      final published = await _nostrService!.publishEvent(eventModel.toJson());
 
       // Immediately cache the event in the database so it persists after app restart
       await _nostrService!.cacheEvent(eventModel);
 
       debugPrint(
-        'Published and cached updated profile event with picture: $pictureUrl',
+        'Published (immediate: $published) and cached updated profile event with picture: $pictureUrl',
       );
 
-      // Update our cached profile
+      // Update our cached profile - use the same profile data for consistency
       final newProfile = ProfileData.fromEvent(eventModel);
       _profiles[finalPubkey] = newProfile;
+
+      // Notify all listeners so UI updates everywhere
       safeNotifyListeners();
+
+      debugPrint(
+        'Updated profile cache for ${finalPubkey.substring(0, 8)}... with picture',
+      );
     } catch (e) {
       debugPrint('Failed to update profile picture: $e');
       rethrow;

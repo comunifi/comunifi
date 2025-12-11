@@ -1091,6 +1091,7 @@ class NostrService {
           kind: kind,
           authors: authors,
           tags: tags,
+          tagKey: tagKey,
           since: since,
           until: until,
           limit: limit,
@@ -1202,6 +1203,7 @@ class NostrService {
     required int kind,
     List<String>? authors,
     List<String>? tags,
+    String? tagKey,
     DateTime? since,
     DateTime? until,
     int? limit,
@@ -1221,10 +1223,12 @@ class NostrService {
     }
 
     // If tags is provided, extract tag key and value
-    // Check if tags look like group IDs (hex strings of 32 or 64 chars) - use 'g' tag
-    // Otherwise assume they're hashtags (tag 't')
     if (tags != null && tags.isNotEmpty) {
-      if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
+      // Use specified tagKey if provided, otherwise auto-detect
+      if (tagKey != null) {
+        queryTagKey = tagKey;
+        queryTagValue = tags.first;
+      } else if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
         // Looks like group IDs, use 'g' tag
         queryTagKey = 'g';
         queryTagValue = tags.first;

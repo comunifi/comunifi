@@ -73,9 +73,13 @@ class _MembersSidebarState extends State<MembersSidebar> {
     }
   }
 
-  Future<void> _loadMembers(GroupState groupState, String groupIdHex) async {
-    // Skip if already loading this group
-    if (_lastGroupIdHex == groupIdHex && !_isLoadingMembers) {
+  Future<void> _loadMembers(
+    GroupState groupState,
+    String groupIdHex, {
+    bool forceRefresh = false,
+  }) async {
+    // Skip if already loading this group (unless forcing refresh)
+    if (_lastGroupIdHex == groupIdHex && !_isLoadingMembers && !forceRefresh) {
       return;
     }
 
@@ -88,16 +92,19 @@ class _MembersSidebarState extends State<MembersSidebar> {
     }
 
     try {
-      final members = await groupState.getGroupMembers(groupIdHex);
+      final members = await groupState.getGroupMembers(
+        groupIdHex,
+        forceRefresh: forceRefresh,
+      );
       final isAdmin = await groupState.isGroupAdmin(groupIdHex);
-      
+
       if (mounted) {
         setState(() {
           _members = members;
           _isLoadingMembers = false;
           _isAdmin = isAdmin;
         });
-        
+
         // Load join requests if user is admin
         if (isAdmin) {
           _loadJoinRequests(groupState, groupIdHex);
@@ -112,7 +119,10 @@ class _MembersSidebarState extends State<MembersSidebar> {
     }
   }
 
-  Future<void> _loadJoinRequests(GroupState groupState, String groupIdHex) async {
+  Future<void> _loadJoinRequests(
+    GroupState groupState,
+    String groupIdHex,
+  ) async {
     if (!_isAdmin) return;
 
     if (mounted) {
@@ -243,7 +253,8 @@ class _MembersSidebarState extends State<MembersSidebar> {
         bool isSelf = false;
         if (profile != null) {
           final currentUserPubkey = await groupState.getNostrPublicKey();
-          if (currentUserPubkey != null && profile.pubkey == currentUserPubkey) {
+          if (currentUserPubkey != null &&
+              profile.pubkey == currentUserPubkey) {
             isSelf = true;
           }
         }
@@ -344,11 +355,11 @@ class _MembersSidebarState extends State<MembersSidebar> {
 
         // Check if membership cache was invalidated (e.g., new member joined)
         final currentCacheVersion = groupState.membershipCacheVersion;
-        final shouldReloadForCacheChange = 
+        final shouldReloadForCacheChange =
             _lastMembershipCacheVersion != currentCacheVersion &&
             _lastMembershipCacheVersion != -1 &&
             _lastGroupIdHex == groupIdHex;
-        
+
         if (shouldReloadForCacheChange) {
           _lastMembershipCacheVersion = currentCacheVersion;
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -356,7 +367,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
             setState(() {
               _isLoadingMembers = true;
             });
-            _loadMembers(groupState, groupIdHex);
+            _loadMembers(groupState, groupIdHex, forceRefresh: true);
           });
         }
 
@@ -373,7 +384,10 @@ class _MembersSidebarState extends State<MembersSidebar> {
             children: [
               // Header
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
                 decoration: const BoxDecoration(
                   border: Border(
                     bottom: BorderSide(
@@ -432,11 +446,14 @@ class _MembersSidebarState extends State<MembersSidebar> {
                         ),
                       )
                     else
-                      ..._members.map((member) => _NIP29MemberTile(
-                            member: member,
-                            isCurrentUser: member.pubkey == _currentUserPubkey,
-                            profileState: profileState,
-                          )),
+                      ..._members.map(
+                        (member) => _NIP29MemberTile(
+                          key: ValueKey(member.pubkey),
+                          member: member,
+                          isCurrentUser: member.pubkey == _currentUserPubkey,
+                          profileState: profileState,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -447,12 +464,15 @@ class _MembersSidebarState extends State<MembersSidebar> {
     );
   }
 
-  Widget _buildJoinRequestsSection(GroupState groupState, ProfileState profileState) {
+  Widget _buildJoinRequestsSection(
+    GroupState groupState,
+    ProfileState profileState,
+  ) {
     final hasRequests = _joinRequests.isNotEmpty;
-    
+
     return Container(
       decoration: BoxDecoration(
-        color: hasRequests 
+        color: hasRequests
             ? CupertinoColors.systemYellow.withOpacity(0.15)
             : CupertinoColors.systemGrey6,
         borderRadius: BorderRadius.circular(12),
@@ -479,7 +499,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                 children: [
                   Icon(
                     CupertinoIcons.person_badge_plus,
-                    color: hasRequests 
+                    color: hasRequests
                         ? CupertinoColors.systemOrange
                         : CupertinoColors.secondaryLabel,
                     size: 20,
@@ -491,7 +511,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
-                        color: hasRequests 
+                        color: hasRequests
                             ? CupertinoColors.label
                             : CupertinoColors.secondaryLabel,
                       ),
@@ -513,10 +533,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
           ),
           // Expandable content
           if (_isJoinRequestsExpanded) ...[
-            Container(
-              height: 0.5,
-              color: CupertinoColors.separator,
-            ),
+            Container(height: 0.5, color: CupertinoColors.separator),
             if (_joinRequests.isEmpty)
               const Padding(
                 padding: EdgeInsets.all(16),
@@ -533,12 +550,19 @@ class _MembersSidebarState extends State<MembersSidebar> {
               Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
-                  children: _joinRequests.map((request) => _JoinRequestTile(
-                    request: request,
-                    profileState: profileState,
-                    isApproving: _approvingPubkeys.contains(request.pubkey),
-                    onApprove: () => _approveJoinRequest(request.pubkey),
-                  )).toList(),
+                  children: _joinRequests
+                      .map(
+                        (request) => _JoinRequestTile(
+                          key: ValueKey(request.pubkey),
+                          request: request,
+                          profileState: profileState,
+                          isApproving: _approvingPubkeys.contains(
+                            request.pubkey,
+                          ),
+                          onApprove: () => _approveJoinRequest(request.pubkey),
+                        ),
+                      )
+                      .toList(),
                 ),
               ),
           ],
@@ -596,10 +620,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
           ),
           // Expandable invite form
           if (_isExpanded) ...[
-            Container(
-              height: 0.5,
-              color: CupertinoColors.separator,
-            ),
+            Container(height: 0.5, color: CupertinoColors.separator),
             Padding(
               padding: const EdgeInsets.all(12),
               child: Column(
@@ -688,7 +709,10 @@ class _MembersSidebarState extends State<MembersSidebar> {
                         ? const CupertinoActivityIndicator(
                             color: CupertinoColors.white,
                           )
-                        : const Text('Send Invite', style: TextStyle(fontSize: 14)),
+                        : const Text(
+                            'Send Invite',
+                            style: TextStyle(fontSize: 14),
+                          ),
                   ),
                 ],
               ),
@@ -707,6 +731,7 @@ class _NIP29MemberTile extends StatefulWidget {
   final ProfileState profileState;
 
   const _NIP29MemberTile({
+    super.key,
     required this.member,
     required this.isCurrentUser,
     required this.profileState,
@@ -717,23 +742,37 @@ class _NIP29MemberTile extends StatefulWidget {
 }
 
 class _NIP29MemberTileState extends State<_NIP29MemberTile> {
-  String? _username;
-  String? _profilePicture;
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadProfile();
+    _ensureProfileLoaded();
   }
 
-  Future<void> _loadProfile() async {
+  @override
+  void didUpdateWidget(_NIP29MemberTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.member.pubkey != widget.member.pubkey) {
+      _ensureProfileLoaded();
+    }
+  }
+
+  Future<void> _ensureProfileLoaded() async {
     try {
-      final profile = await widget.profileState.getProfile(widget.member.pubkey);
+      // Trigger profile load (will update ProfileState cache)
+      final profile = await widget.profileState.getProfile(
+        widget.member.pubkey,
+      );
+
+      // If no picture in cache, always try fetching fresh from relay
+      // This handles cases where the relay wasn't connected during initial fetch
+      if (profile?.picture == null) {
+        await widget.profileState.getProfileFresh(widget.member.pubkey);
+      }
+
       if (mounted) {
         setState(() {
-          _username = profile?.getUsername();
-          _profilePicture = profile?.picture;
           _isLoading = false;
         });
       }
@@ -753,7 +792,11 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
 
   @override
   Widget build(BuildContext context) {
-    final displayName = _username ?? _formatPubkey(widget.member.pubkey);
+    // Read profile from ProfileState cache directly so updates are reflected immediately
+    final cachedProfile = widget.profileState.profiles[widget.member.pubkey];
+    final displayName =
+        cachedProfile?.getUsername() ?? _formatPubkey(widget.member.pubkey);
+    final profilePicture = cachedProfile?.picture;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -779,14 +822,14 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: CupertinoColors.systemGrey4,
-              image: _profilePicture != null
+              image: profilePicture != null
                   ? DecorationImage(
-                      image: NetworkImage(_profilePicture!),
+                      image: NetworkImage(profilePicture),
                       fit: BoxFit.cover,
                     )
                   : null,
             ),
-            child: _profilePicture == null
+            child: profilePicture == null
                 ? const Icon(
                     CupertinoIcons.person_fill,
                     size: 20,
@@ -885,8 +928,7 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
             ),
           ),
           // Loading indicator
-          if (_isLoading)
-            const CupertinoActivityIndicator(radius: 8),
+          if (_isLoading) const CupertinoActivityIndicator(radius: 8),
         ],
       ),
     );
@@ -901,6 +943,7 @@ class _JoinRequestTile extends StatefulWidget {
   final VoidCallback onApprove;
 
   const _JoinRequestTile({
+    super.key,
     required this.request,
     required this.profileState,
     required this.isApproving,
@@ -912,23 +955,37 @@ class _JoinRequestTile extends StatefulWidget {
 }
 
 class _JoinRequestTileState extends State<_JoinRequestTile> {
-  String? _username;
-  String? _profilePicture;
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadProfile();
+    _ensureProfileLoaded();
   }
 
-  Future<void> _loadProfile() async {
+  @override
+  void didUpdateWidget(_JoinRequestTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.request.pubkey != widget.request.pubkey) {
+      _ensureProfileLoaded();
+    }
+  }
+
+  Future<void> _ensureProfileLoaded() async {
     try {
-      final profile = await widget.profileState.getProfile(widget.request.pubkey);
+      // Trigger profile load (will update ProfileState cache)
+      final profile = await widget.profileState.getProfile(
+        widget.request.pubkey,
+      );
+
+      // If no picture in cache, always try fetching fresh from relay
+      // This handles cases where the relay wasn't connected during initial fetch
+      if (profile?.picture == null) {
+        await widget.profileState.getProfileFresh(widget.request.pubkey);
+      }
+
       if (mounted) {
         setState(() {
-          _username = profile?.getUsername();
-          _profilePicture = profile?.picture;
           _isLoading = false;
         });
       }
@@ -963,7 +1020,11 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
 
   @override
   Widget build(BuildContext context) {
-    final displayName = _username ?? _formatPubkey(widget.request.pubkey);
+    // Read profile from ProfileState cache directly so updates are reflected immediately
+    final cachedProfile = widget.profileState.profiles[widget.request.pubkey];
+    final displayName =
+        cachedProfile?.getUsername() ?? _formatPubkey(widget.request.pubkey);
+    final profilePicture = cachedProfile?.picture;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -971,10 +1032,7 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
       decoration: BoxDecoration(
         color: CupertinoColors.systemBackground,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: CupertinoColors.separator,
-          width: 0.5,
-        ),
+        border: Border.all(color: CupertinoColors.separator, width: 0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -988,14 +1046,14 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: CupertinoColors.systemGrey4,
-                  image: _profilePicture != null
+                  image: profilePicture != null
                       ? DecorationImage(
-                          image: NetworkImage(_profilePicture!),
+                          image: NetworkImage(profilePicture),
                           fit: BoxFit.cover,
                         )
                       : null,
                 ),
-                child: _profilePicture == null
+                child: profilePicture == null
                     ? const Icon(
                         CupertinoIcons.person_fill,
                         size: 18,
@@ -1038,7 +1096,8 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
             ],
           ),
           // Reason (if any)
-          if (widget.request.reason != null && widget.request.reason!.isNotEmpty) ...[
+          if (widget.request.reason != null &&
+              widget.request.reason!.isNotEmpty) ...[
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.all(8),
