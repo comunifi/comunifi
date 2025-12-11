@@ -388,11 +388,11 @@ class _MembersSidebarState extends State<MembersSidebar> {
           });
         }
 
-        // Load members if group changed
+        // Load members if group changed - always force refresh for fresh data
         if (_lastGroupIdHex != groupIdHex) {
           _lastMembershipCacheVersion = currentCacheVersion;
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            _loadMembers(groupState, groupIdHex);
+            _loadMembers(groupState, groupIdHex, forceRefresh: true);
           });
         }
 

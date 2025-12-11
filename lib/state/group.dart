@@ -2183,6 +2183,46 @@ class GroupState with ChangeNotifier {
             },
           );
 
+      // Fetch past Welcome messages we might have missed (e.g., app was closed when invited)
+      try {
+        final pastWelcomes = await _nostrService!.requestPastEvents(
+          kind: kindMlsWelcome,
+          tags: [ourPubkey],
+          tagKey: 'p',
+          limit: 50,
+          useCache: false, // Always check relay for fresh data
+        );
+
+        debugPrint(
+          'Fetched ${pastWelcomes.length} past Welcome messages to process',
+        );
+
+        for (final welcomeEvent in pastWelcomes) {
+          // Extract group ID from 'g' tag
+          String? groupIdHex;
+          for (final tag in welcomeEvent.tags) {
+            if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+              groupIdHex = tag[1].toLowerCase();
+              break;
+            }
+          }
+
+          // Only process if we don't already have this group
+          if (groupIdHex != null && !_mlsGroups.containsKey(groupIdHex)) {
+            debugPrint(
+              'Processing missed Welcome for group: ${groupIdHex.substring(0, 8)}...',
+            );
+            try {
+              await handleWelcomeInvitation(welcomeEvent);
+            } catch (e) {
+              debugPrint('Failed to process past Welcome: $e');
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Failed to fetch past Welcome messages: $e');
+      }
+
       // Listen for MLS Commit messages (kind 1061) addressed to us
       // These are sent when a new member is added to a group we're already in
       _nostrService!
