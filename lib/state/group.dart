@@ -16,6 +16,7 @@ import 'package:comunifi/services/mls/group_state/group_state.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/mls/crypto/default_crypto.dart';
 import 'package:comunifi/services/db/app_db.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 // Import MlsGroupTable for listing groups
 import 'package:comunifi/services/mls/storage/secure_storage.dart'
@@ -146,6 +147,17 @@ class GroupState with ChangeNotifier {
 
   // Timer for daily automatic backup
   Timer? _dailyBackupTimer;
+
+  // Secure storage for onboarding completion flag
+  static const FlutterSecureStorage _onboardingStorage = FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      encryptedSharedPreferences: true,
+    ),
+    iOptions: IOSOptions(
+      accessibility: KeychainAccessibility.first_unlock_this_device,
+    ),
+  );
+  static const String _onboardingCompleteKey = 'onboarding_complete';
 
   // Last daily backup check time
   DateTime? _lastDailyBackupCheck;
@@ -2864,6 +2876,34 @@ class GroupState with ChangeNotifier {
     // Wait for keys group to be initialized first
     await waitForKeysGroupInit();
     return await getNostrPublicKey() != null;
+  }
+
+  /// Check if onboarding is complete
+  /// Onboarding is complete if a flag has been set indicating the user
+  /// has reached the main app (feed screen) at least once.
+  /// This prevents bypassing onboarding if user refreshes during the flow.
+  Future<bool> isOnboardingComplete() async {
+    // Wait for keys group to be initialized first
+    await waitForKeysGroupInit();
+    
+    // Must have keys
+    final hasKeys = await getNostrPublicKey() != null;
+    if (!hasKeys) {
+      return false;
+    }
+
+    // Check if onboarding completion flag is set
+    final flag = await _onboardingStorage.read(key: _onboardingCompleteKey);
+    return flag == 'true';
+  }
+
+  /// Mark onboarding as complete
+  /// This should be called when the user first reaches the feed screen
+  Future<void> markOnboardingComplete() async {
+    await _onboardingStorage.write(
+      key: _onboardingCompleteKey,
+      value: 'true',
+    );
   }
 
   /// Derive HPKE key pair from Nostr private key

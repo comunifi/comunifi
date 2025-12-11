@@ -96,8 +96,13 @@ class _RecoveryConfirmationScreenState
     }
   }
 
-  void _continue() {
-    context.go('/feed');
+  void _continue() async {
+    // Mark onboarding as complete before navigating
+    final groupState = context.read<GroupState>();
+    await groupState.markOnboardingComplete();
+    if (mounted) {
+      context.go('/feed');
+    }
   }
 
   @override
