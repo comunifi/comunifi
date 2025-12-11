@@ -1035,20 +1035,41 @@ class _UsernameButtonState extends State<_UsernameButton> {
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             color: CupertinoColors.systemGrey4,
-            image: profilePicture != null
-                ? DecorationImage(
-                    image: NetworkImage(profilePicture),
-                    fit: BoxFit.cover,
-                  )
-                : null,
           ),
-          child: profilePicture == null
-              ? const Icon(
+          child: profilePicture != null
+              ? ClipOval(
+                  child: Image.network(
+                    profilePicture,
+                    width: 28,
+                    height: 28,
+                    fit: BoxFit.cover,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) {
+                        return child;
+                      }
+                      return Container(
+                        width: 28,
+                        height: 28,
+                        color: CupertinoColors.systemGrey4,
+                        child: Center(
+                          child: CupertinoActivityIndicator(radius: 6),
+                        ),
+                      );
+                    },
+                    errorBuilder: (context, error, stackTrace) {
+                      return const Icon(
+                        CupertinoIcons.person_fill,
+                        size: 16,
+                        color: CupertinoColors.systemGrey,
+                      );
+                    },
+                  ),
+                )
+              : const Icon(
                   CupertinoIcons.person_fill,
                   size: 16,
                   color: CupertinoColors.systemGrey,
-                )
-              : null,
+                ),
         ),
       ],
     );
@@ -1553,20 +1574,44 @@ class _EventItemContentWidget extends StatelessWidget {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: CupertinoColors.systemGrey4,
-                            image: groupPicture != null
-                                ? DecorationImage(
-                                    image: NetworkImage(groupPicture),
-                                    fit: BoxFit.cover,
-                                  )
-                                : null,
                           ),
-                          child: groupPicture == null
-                              ? const Icon(
+                          child: groupPicture != null
+                              ? ClipOval(
+                                  child: Image.network(
+                                    groupPicture,
+                                    width: 24,
+                                    height: 24,
+                                    fit: BoxFit.cover,
+                                    loadingBuilder:
+                                        (context, child, loadingProgress) {
+                                          if (loadingProgress == null) {
+                                            return child;
+                                          }
+                                          return Container(
+                                            width: 24,
+                                            height: 24,
+                                            color: CupertinoColors.systemGrey4,
+                                            child: Center(
+                                              child: CupertinoActivityIndicator(
+                                                radius: 5,
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return const Icon(
+                                        CupertinoIcons.person_2_fill,
+                                        size: 14,
+                                        color: CupertinoColors.systemGrey,
+                                      );
+                                    },
+                                  ),
+                                )
+                              : const Icon(
                                   CupertinoIcons.person_2_fill,
                                   size: 12,
                                   color: CupertinoColors.systemGrey,
-                                )
-                              : null,
+                                ),
                         ),
                         const SizedBox(width: 8),
                         // Group name
@@ -1879,6 +1924,109 @@ class _RichContentText extends StatelessWidget {
   }
 }
 
+/// Author avatar that displays profile photo by pubkey
+class _AuthorAvatar extends StatefulWidget {
+  final String pubkey;
+  final double size;
+
+  const _AuthorAvatar({required this.pubkey, this.size = 32});
+
+  @override
+  State<_AuthorAvatar> createState() => _AuthorAvatarState();
+}
+
+class _AuthorAvatarState extends State<_AuthorAvatar> {
+  String? _profilePictureUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfilePicture();
+  }
+
+  Future<void> _loadProfilePicture() async {
+    try {
+      final profileState = context.read<ProfileState>();
+      final profile = await profileState.getProfile(widget.pubkey);
+      if (mounted && profile?.picture != null) {
+        setState(() {
+          _profilePictureUrl = profile!.picture;
+        });
+      }
+    } catch (e) {
+      // Silently fail - will show placeholder
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Listen to ProfileState changes for this specific pubkey
+    // This ensures the avatar updates when the profile picture changes
+    final profile = context.select<ProfileState, ProfileData?>(
+      (state) => state.profiles[widget.pubkey],
+    );
+
+    // Update local state if profile picture changed
+    final newPictureUrl = profile?.picture;
+    if (newPictureUrl != null && newPictureUrl != _profilePictureUrl) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {
+            _profilePictureUrl = newPictureUrl;
+          });
+        }
+      });
+    }
+
+    return Container(
+      width: widget.size,
+      height: widget.size,
+      decoration: BoxDecoration(
+        color: CupertinoColors.systemGrey4,
+        shape: BoxShape.circle,
+      ),
+      child: _profilePictureUrl != null
+          ? ClipOval(
+              child: Image.network(
+                _profilePictureUrl!,
+                width: widget.size,
+                height: widget.size,
+                fit: BoxFit.cover,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) {
+                    return child;
+                  }
+                  // Still loading - show spinner
+                  return Container(
+                    width: widget.size,
+                    height: widget.size,
+                    color: CupertinoColors.systemGrey4,
+                    child: Center(
+                      child: CupertinoActivityIndicator(
+                        radius: widget.size * 0.2,
+                      ),
+                    ),
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  // Image failed to load
+                  return Icon(
+                    CupertinoIcons.person_fill,
+                    size: widget.size * 0.6,
+                    color: CupertinoColors.systemGrey,
+                  );
+                },
+              ),
+            )
+          : Icon(
+              CupertinoIcons.person_fill,
+              size: widget.size * 0.6,
+              color: CupertinoColors.systemGrey,
+            ),
+    );
+  }
+}
+
 /// Mention badge that displays username with profile photo
 class _MentionBadge extends StatefulWidget {
   final String username;
@@ -1935,20 +2083,42 @@ class _MentionBadgeState extends State<_MentionBadge> {
               decoration: BoxDecoration(
                 color: CupertinoColors.systemGrey4,
                 shape: BoxShape.circle,
-                image: _profilePictureUrl != null
-                    ? DecorationImage(
-                        image: NetworkImage(_profilePictureUrl!),
-                        fit: BoxFit.cover,
-                      )
-                    : null,
               ),
-              child: _profilePictureUrl == null
-                  ? const Icon(
+              child: _profilePictureUrl != null
+                  ? ClipOval(
+                      child: Image.network(
+                        _profilePictureUrl!,
+                        width: 16,
+                        height: 16,
+                        fit: BoxFit.cover,
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) {
+                            return child;
+                          }
+                          // Still loading - show spinner
+                          return Container(
+                            width: 16,
+                            height: 16,
+                            color: CupertinoColors.systemGrey4,
+                            child: Center(
+                              child: CupertinoActivityIndicator(radius: 3),
+                            ),
+                          );
+                        },
+                        errorBuilder: (context, error, stackTrace) {
+                          return const Icon(
+                            CupertinoIcons.person_fill,
+                            size: 10,
+                            color: CupertinoColors.systemGrey,
+                          );
+                        },
+                      ),
+                    )
+                  : const Icon(
                       CupertinoIcons.person_fill,
                       size: 10,
                       color: CupertinoColors.systemGrey,
-                    )
-                  : null,
+                    ),
             ),
             const SizedBox(width: 4),
             Text(
