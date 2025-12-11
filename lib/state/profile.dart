@@ -424,6 +424,89 @@ class ProfileState with ChangeNotifier {
     }
   }
 
+  /// Load profiles with cache-first pattern:
+  /// 1. Load from local cache immediately and update UI
+  /// 2. Fetch from relay in background
+  /// 3. Update UI when fresh data arrives
+  ///
+  /// This is ideal for members sidebar and group switching where we want
+  /// immediate display of cached data while refreshing in background.
+  Future<void> loadProfilesWithRefresh(List<String> pubkeys) async {
+    if (pubkeys.isEmpty) return;
+
+    if (_profileService == null) {
+      debugPrint('Profile service not initialized, cannot load profiles');
+      return;
+    }
+
+    try {
+      // Step 1: Load from local cache immediately (fast)
+      final cachedProfiles = await _profileService!.getProfilesFromCacheOnly(
+        pubkeys,
+      );
+
+      // Update in-memory cache with cached data
+      bool hasUpdates = false;
+      for (final entry in cachedProfiles.entries) {
+        if (entry.value != null) {
+          // Only update if we don't have this profile or cached one is newer
+          final existing = _profiles[entry.key];
+          if (existing == null || entry.value!.picture != null) {
+            _profiles[entry.key] = entry.value;
+            hasUpdates = true;
+          }
+        }
+      }
+
+      // Notify listeners immediately so UI updates with cached data
+      if (hasUpdates) {
+        safeNotifyListeners();
+      }
+
+      // Step 2: Fetch fresh from relay in background (don't await in main flow)
+      _refreshProfilesFromRelay(pubkeys);
+    } catch (e) {
+      debugPrint('Error loading profiles with refresh: $e');
+    }
+  }
+
+  /// Background refresh of profiles from relay
+  Future<void> _refreshProfilesFromRelay(List<String> pubkeys) async {
+    if (_profileService == null) return;
+
+    try {
+      final freshProfiles = await _profileService!.getProfilesFresh(pubkeys);
+
+      // Step 3: Update cache with fresh data and notify
+      bool hasUpdates = false;
+      for (final entry in freshProfiles.entries) {
+        if (entry.value != null) {
+          final existing = _profiles[entry.key];
+          // Update if profile is new or has more data (e.g., picture)
+          if (existing == null ||
+              (entry.value!.picture != null && existing.picture == null) ||
+              (entry.value!.name != null && existing.name == null)) {
+            _profiles[entry.key] = entry.value;
+            hasUpdates = true;
+
+            // Also update local username if we got a real name
+            final hasRealName =
+                entry.value!.name != null || entry.value!.displayName != null;
+            if (hasRealName) {
+              _updateLocalUsername(entry.key, entry.value!.getUsername());
+            }
+          }
+        }
+      }
+
+      if (hasUpdates) {
+        safeNotifyListeners();
+      }
+    } catch (e) {
+      debugPrint('Error refreshing profiles from relay: $e');
+    }
+  }
+
   /// Get the stored Nostr public key
   Future<String?> getNostrPublicKey() async {
     if (_keysGroup == null || _dbService?.database == null) {

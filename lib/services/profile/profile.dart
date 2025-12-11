@@ -13,6 +13,7 @@ class ProfileData {
   final String? banner;
   final String? website;
   final String? nip05;
+
   /// MLS HPKE public key (hex-encoded) for encrypted group invitations
   final String? mlsHpkePublicKey;
   final Map<String, dynamic> rawData;
@@ -158,26 +159,109 @@ class ProfileService {
     }
   }
 
+  /// Get profile from local cache only (fast, no network)
+  /// Returns null if not in cache
+  Future<ProfileData?> getProfileFromCacheOnly(String pubkey) async {
+    try {
+      final cachedEvents = await _nostrService.queryCachedEvents(
+        pubkey: pubkey,
+        kind: 0,
+        limit: 1,
+      );
+
+      if (cachedEvents.isNotEmpty) {
+        cachedEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        return ProfileData.fromEvent(cachedEvents.first);
+      }
+
+      return null;
+    } catch (e) {
+      debugPrint('Error getting cached profile for $pubkey: $e');
+      return null;
+    }
+  }
+
+  /// Get multiple profiles from local cache only (fast, no network)
+  Future<Map<String, ProfileData?>> getProfilesFromCacheOnly(
+    List<String> pubkeys,
+  ) async {
+    final Map<String, ProfileData?> profiles = {};
+
+    final futures = pubkeys.map((pubkey) async {
+      return MapEntry(pubkey, await getProfileFromCacheOnly(pubkey));
+    });
+
+    final results = await Future.wait(futures);
+    for (final entry in results) {
+      profiles[entry.key] = entry.value;
+    }
+
+    return profiles;
+  }
+
+  /// Get multiple profiles fresh from relay (for background refresh)
+  Future<Map<String, ProfileData?>> getProfilesFresh(
+    List<String> pubkeys,
+  ) async {
+    if (pubkeys.isEmpty) return {};
+
+    try {
+      if (!_nostrService.isConnected) {
+        debugPrint('Not connected to relay, cannot fetch fresh profiles');
+        return {};
+      }
+
+      final remoteEvents = await _nostrService.requestPastEvents(
+        kind: 0,
+        authors: pubkeys,
+        limit: pubkeys.length,
+        useCache: false,
+      );
+
+      final Map<String, ProfileData?> profiles = {};
+
+      // Group events by pubkey and get the most recent for each
+      final eventsByPubkey = <String, List<dynamic>>{};
+      for (final event in remoteEvents) {
+        eventsByPubkey.putIfAbsent(event.pubkey, () => []).add(event);
+      }
+
+      for (final pubkey in pubkeys) {
+        final events = eventsByPubkey[pubkey];
+        if (events != null && events.isNotEmpty) {
+          events.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+          profiles[pubkey] = ProfileData.fromEvent(events.first);
+        }
+      }
+
+      return profiles;
+    } catch (e) {
+      debugPrint('Error fetching fresh profiles: $e');
+      return {};
+    }
+  }
+
   /// Check if a profile exists for a public key (locally or on relay)
   Future<bool> hasProfile(String pubkey) async {
     final profile = await getProfile(pubkey);
-    return profile != null && (profile.name != null || profile.displayName != null);
+    return profile != null &&
+        (profile.name != null || profile.displayName != null);
   }
 
   /// Get multiple profiles at once
   Future<Map<String, ProfileData?>> getProfiles(List<String> pubkeys) async {
     final Map<String, ProfileData?> profiles = {};
-    
+
     // Fetch all profiles in parallel
     final futures = pubkeys.map((pubkey) async {
       return MapEntry(pubkey, await getProfile(pubkey));
     });
-    
+
     final results = await Future.wait(futures);
     for (final entry in results) {
       profiles[entry.key] = entry.value;
     }
-    
+
     return profiles;
   }
 
@@ -226,7 +310,7 @@ class ProfileService {
         // Get the most recent profile event
         remoteEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         final profile = ProfileData.fromEvent(remoteEvents.first);
-        
+
         // Double-check the username matches (in case of tag collision)
         if (profile.getUsername().toLowerCase() == normalizedSearch) {
           return profile;
@@ -237,7 +321,7 @@ class ProfileService {
         // Get the most recent profile event
         remoteEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         final profile = ProfileData.fromEvent(remoteEvents.first);
-        
+
         // Double-check the username matches (in case of tag collision)
         if (profile.getUsername().toLowerCase() == normalizedSearch) {
           return profile;
@@ -255,24 +339,27 @@ class ProfileService {
   /// [username] - The username to check
   /// [currentUserPubkey] - The pubkey of the current user (username is available if it's their own)
   /// Returns true if username is available, false if taken by another user
-  Future<bool> isUsernameAvailable(String username, String currentUserPubkey) async {
+  Future<bool> isUsernameAvailable(
+    String username,
+    String currentUserPubkey,
+  ) async {
     if (username.isEmpty) {
       return false;
     }
 
     try {
       final profile = await searchByUsername(username);
-      
+
       // If no profile found, username is available
       if (profile == null) {
         return true;
       }
-      
+
       // If profile belongs to current user, username is available (they can keep their own)
       if (profile.pubkey == currentUserPubkey) {
         return true;
       }
-      
+
       // Username is taken by another user
       return false;
     } catch (e) {
@@ -281,4 +368,3 @@ class ProfileService {
     }
   }
 }
-

@@ -33,11 +33,42 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   bool _isPublishing = false;
   String? _publishError;
 
+  // Track pubkeys we've already triggered loading for
+  final Set<String> _loadedProfilePubkeys = {};
+
   @override
   void dispose() {
     _scrollController.dispose();
     _commentController.dispose();
     super.dispose();
+  }
+
+  /// Load profiles for post author and all comment authors using cache-first pattern
+  void _loadProfiles(
+    ProfileState profileState,
+    NostrEventModel? post,
+    List<NostrEventModel> comments,
+  ) {
+    final pubkeysToLoad = <String>[];
+
+    // Add post author if not already loaded
+    if (post != null && !_loadedProfilePubkeys.contains(post.pubkey)) {
+      pubkeysToLoad.add(post.pubkey);
+      _loadedProfilePubkeys.add(post.pubkey);
+    }
+
+    // Add comment authors if not already loaded
+    for (final comment in comments) {
+      if (!_loadedProfilePubkeys.contains(comment.pubkey)) {
+        pubkeysToLoad.add(comment.pubkey);
+        _loadedProfilePubkeys.add(comment.pubkey);
+      }
+    }
+
+    // Trigger cache-first loading for new pubkeys
+    if (pubkeysToLoad.isNotEmpty) {
+      profileState.loadProfilesWithRefresh(pubkeysToLoad);
+    }
   }
 
   Future<void> _publishComment() async {
@@ -76,9 +107,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     return Consumer2<PostDetailState, ProfileState>(
       builder: (context, postDetailState, profileState, child) {
         return CupertinoPageScaffold(
-          navigationBar: const CupertinoNavigationBar(
-            middle: Text('Post'),
-          ),
+          navigationBar: const CupertinoNavigationBar(middle: Text('Post')),
           child: SafeArea(
             child: Builder(
               builder: (context) {
@@ -110,10 +139,17 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                 }
 
                 if (postDetailState.post == null) {
-                  return const Center(
-                    child: Text('Post not found'),
-                  );
+                  return const Center(child: Text('Post not found'));
                 }
+
+                // Load profiles for post author and comment authors
+                // Uses cache-first pattern: load from cache immediately,
+                // then refresh from relay in background
+                _loadProfiles(
+                  profileState,
+                  postDetailState.post,
+                  postDetailState.comments,
+                );
 
                 return GestureDetector(
                   onTap: () => FocusScope.of(context).unfocus(),
@@ -131,9 +167,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                             ),
                             // Post content
                             SliverToBoxAdapter(
-                              child: _PostItem(
-                                event: postDetailState.post!,
-                              ),
+                              child: _PostItem(event: postDetailState.post!),
                             ),
                             // Comments header
                             SliverToBoxAdapter(
@@ -187,17 +221,17 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                               )
                             else
                               SliverList(
-                                delegate: SliverChildBuilderDelegate(
-                                  (context, index) {
-                                    if (index < postDetailState.comments.length) {
-                                      return _CommentItem(
-                                        event: postDetailState.comments[index],
-                                      );
-                                    }
-                                    return const SizedBox.shrink();
-                                  },
-                                  childCount: postDetailState.comments.length,
-                                ),
+                                delegate: SliverChildBuilderDelegate((
+                                  context,
+                                  index,
+                                ) {
+                                  if (index < postDetailState.comments.length) {
+                                    return _CommentItem(
+                                      event: postDetailState.comments[index],
+                                    );
+                                  }
+                                  return const SizedBox.shrink();
+                                }, childCount: postDetailState.comments.length),
                               ),
                           ],
                         ),
@@ -274,10 +308,7 @@ class _PostItemContent extends StatefulWidget {
   /// Sidebar width (same as feed_screen.dart)
   static const double sidebarWidth = 320;
 
-  const _PostItemContent({
-    required this.event,
-    required this.displayName,
-  });
+  const _PostItemContent({required this.event, required this.displayName});
 
   @override
   State<_PostItemContent> createState() => _PostItemContentState();
@@ -315,7 +346,9 @@ class _PostItemContentState extends State<_PostItemContent> {
       if (_isGroupEvent) {
         // Subscribe to real-time reaction updates for group events
         final groupState = context.read<GroupState>();
-        _groupReactionSubscription = groupState.reactionUpdates.listen((update) {
+        _groupReactionSubscription = groupState.reactionUpdates.listen((
+          update,
+        ) {
           if (update.eventId == widget.event.id && mounted) {
             _loadReactionData();
           }
@@ -323,8 +356,9 @@ class _PostItemContentState extends State<_PostItemContent> {
       } else {
         // Subscribe to real-time reaction updates for regular events
         final postDetailState = context.read<PostDetailState>();
-        _postReactionSubscription =
-            postDetailState.reactionUpdates.listen((update) {
+        _postReactionSubscription = postDetailState.reactionUpdates.listen((
+          update,
+        ) {
           if (update.eventId == widget.event.id && mounted) {
             _loadReactionData();
           }
@@ -511,10 +545,9 @@ class _PostItemContentState extends State<_PostItemContent> {
                 },
               ),
               // Quoted post preview (if this is a quote post)
-              if (widget.event.isQuotePost && widget.event.quotedEventId != null)
-                QuotedPostPreview(
-                  quotedEventId: widget.event.quotedEventId!,
-                ),
+              if (widget.event.isQuotePost &&
+                  widget.event.quotedEventId != null)
+                QuotedPostPreview(quotedEventId: widget.event.quotedEventId!),
               const SizedBox(height: 8),
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
@@ -605,10 +638,7 @@ class _CommentItemContent extends StatefulWidget {
   /// Sidebar width (same as feed_screen.dart)
   static const double sidebarWidth = 320;
 
-  const _CommentItemContent({
-    required this.event,
-    required this.displayName,
-  });
+  const _CommentItemContent({required this.event, required this.displayName});
 
   @override
   State<_CommentItemContent> createState() => _CommentItemContentState();
@@ -646,7 +676,9 @@ class _CommentItemContentState extends State<_CommentItemContent> {
       if (_isGroupEvent) {
         // Subscribe to real-time reaction updates for group events
         final groupState = context.read<GroupState>();
-        _groupReactionSubscription = groupState.reactionUpdates.listen((update) {
+        _groupReactionSubscription = groupState.reactionUpdates.listen((
+          update,
+        ) {
           if (update.eventId == widget.event.id && mounted) {
             _loadReactionData();
           }
@@ -654,8 +686,9 @@ class _CommentItemContentState extends State<_CommentItemContent> {
       } else {
         // Subscribe to real-time reaction updates for regular events
         final postDetailState = context.read<PostDetailState>();
-        _postReactionSubscription =
-            postDetailState.reactionUpdates.listen((update) {
+        _postReactionSubscription = postDetailState.reactionUpdates.listen((
+          update,
+        ) {
           if (update.eventId == widget.event.id && mounted) {
             _loadReactionData();
           }
@@ -889,9 +922,7 @@ class _RichContentText extends StatelessWidget {
     for (final match in matches) {
       // Add text before the URL
       if (match.start > lastEnd) {
-        spans.add(TextSpan(
-          text: content.substring(lastEnd, match.start),
-        ));
+        spans.add(TextSpan(text: content.substring(lastEnd, match.start)));
       }
 
       // Add the URL as a clickable span
@@ -902,25 +933,25 @@ class _RichContentText extends StatelessWidget {
       // Clean trailing punctuation
       final cleanUrl = _cleanUrl(url);
       final originalUrl = match.group(0) ?? '';
-      
-      spans.add(TextSpan(
-        text: originalUrl,
-        style: TextStyle(
-          color: CupertinoColors.systemBlue.resolveFrom(context),
-          decoration: TextDecoration.underline,
+
+      spans.add(
+        TextSpan(
+          text: originalUrl,
+          style: TextStyle(
+            color: CupertinoColors.systemBlue.resolveFrom(context),
+            decoration: TextDecoration.underline,
+          ),
+          recognizer: TapGestureRecognizer()
+            ..onTap = () => _launchUrl(cleanUrl),
         ),
-        recognizer: TapGestureRecognizer()
-          ..onTap = () => _launchUrl(cleanUrl),
-      ));
+      );
 
       lastEnd = match.end;
     }
 
     // Add remaining text after last URL
     if (lastEnd < content.length) {
-      spans.add(TextSpan(
-        text: content.substring(lastEnd),
-      ));
+      spans.add(TextSpan(text: content.substring(lastEnd)));
     }
 
     // If no URLs found, just return the plain text
@@ -932,7 +963,19 @@ class _RichContentText extends StatelessWidget {
   }
 
   String _cleanUrl(String url) {
-    final trailingChars = ['.', ',', '!', '?', ')', ']', '}', ';', ':', '"', "'"];
+    final trailingChars = [
+      '.',
+      ',',
+      '!',
+      '?',
+      ')',
+      ']',
+      '}',
+      ';',
+      ':',
+      '"',
+      "'",
+    ];
     while (url.isNotEmpty && trailingChars.contains(url[url.length - 1])) {
       url = url.substring(0, url.length - 1);
     }
@@ -1021,9 +1064,8 @@ class _ComposeCommentWidget extends StatelessWidget {
                       onKeyEvent: (node, event) {
                         final isDesktop =
                             defaultTargetPlatform == TargetPlatform.macOS ||
-                                defaultTargetPlatform ==
-                                    TargetPlatform.windows ||
-                                defaultTargetPlatform == TargetPlatform.linux;
+                            defaultTargetPlatform == TargetPlatform.windows ||
+                            defaultTargetPlatform == TargetPlatform.linux;
                         if (isDesktop &&
                             event is KeyDownEvent &&
                             event.logicalKey == LogicalKeyboardKey.enter &&
@@ -1086,4 +1128,3 @@ class _ComposeCommentWidget extends StatelessWidget {
     );
   }
 }
-

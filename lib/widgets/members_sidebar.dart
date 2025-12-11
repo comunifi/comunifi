@@ -105,6 +105,16 @@ class _MembersSidebarState extends State<MembersSidebar> {
           _isAdmin = isAdmin;
         });
 
+        // Load member profiles with cache-first pattern:
+        // 1. Load from local cache immediately >> update sidebar
+        // 2. Fetch from relay async in background
+        // 3. Update sidebar when fresh data arrives
+        if (members.isNotEmpty) {
+          final profileState = context.read<ProfileState>();
+          final pubkeys = members.map((m) => m.pubkey).toList();
+          profileState.loadProfilesWithRefresh(pubkeys);
+        }
+
         // Load join requests if user is admin
         if (isAdmin) {
           _loadJoinRequests(groupState, groupIdHex);
@@ -138,6 +148,13 @@ class _MembersSidebarState extends State<MembersSidebar> {
           _joinRequests = requests;
           _isLoadingJoinRequests = false;
         });
+
+        // Load requester profiles with cache-first pattern
+        if (requests.isNotEmpty) {
+          final profileState = context.read<ProfileState>();
+          final pubkeys = requests.map((r) => r.pubkey).toList();
+          profileState.loadProfilesWithRefresh(pubkeys);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -742,48 +759,8 @@ class _NIP29MemberTile extends StatefulWidget {
 }
 
 class _NIP29MemberTileState extends State<_NIP29MemberTile> {
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _ensureProfileLoaded();
-  }
-
-  @override
-  void didUpdateWidget(_NIP29MemberTile oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.member.pubkey != widget.member.pubkey) {
-      _ensureProfileLoaded();
-    }
-  }
-
-  Future<void> _ensureProfileLoaded() async {
-    try {
-      // Trigger profile load (will update ProfileState cache)
-      final profile = await widget.profileState.getProfile(
-        widget.member.pubkey,
-      );
-
-      // If no picture in cache, always try fetching fresh from relay
-      // This handles cases where the relay wasn't connected during initial fetch
-      if (profile?.picture == null) {
-        await widget.profileState.getProfileFresh(widget.member.pubkey);
-      }
-
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
+  // Profile loading is now handled at sidebar level via loadProfilesWithRefresh()
+  // which loads from cache first, then refreshes from relay in background
 
   String _formatPubkey(String pubkey) {
     if (pubkey.length <= 16) return pubkey;
@@ -927,8 +904,6 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
               ],
             ),
           ),
-          // Loading indicator
-          if (_isLoading) const CupertinoActivityIndicator(radius: 8),
         ],
       ),
     );
@@ -955,48 +930,8 @@ class _JoinRequestTile extends StatefulWidget {
 }
 
 class _JoinRequestTileState extends State<_JoinRequestTile> {
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _ensureProfileLoaded();
-  }
-
-  @override
-  void didUpdateWidget(_JoinRequestTile oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.request.pubkey != widget.request.pubkey) {
-      _ensureProfileLoaded();
-    }
-  }
-
-  Future<void> _ensureProfileLoaded() async {
-    try {
-      // Trigger profile load (will update ProfileState cache)
-      final profile = await widget.profileState.getProfile(
-        widget.request.pubkey,
-      );
-
-      // If no picture in cache, always try fetching fresh from relay
-      // This handles cases where the relay wasn't connected during initial fetch
-      if (profile?.picture == null) {
-        await widget.profileState.getProfileFresh(widget.request.pubkey);
-      }
-
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
+  // Profile loading is now handled at sidebar level via loadProfilesWithRefresh()
+  // which loads from cache first, then refreshes from relay in background
 
   String _formatPubkey(String pubkey) {
     if (pubkey.length <= 16) return pubkey;
@@ -1079,8 +1014,6 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        if (_isLoading)
-                          const CupertinoActivityIndicator(radius: 6),
                       ],
                     ),
                     Text(
