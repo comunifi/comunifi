@@ -28,7 +28,6 @@ import 'package:comunifi/models/nostr_event.dart'
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
         kindGroupAdmins,
-        kindGroupMembers,
         kindJoinRequest,
         kindMlsCommit,
         kindMlsWelcome,
@@ -1078,12 +1077,13 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Get all members of a group from NIP-29 events (kind 39001 admins + kind 39002 members)
+  /// Get all members of a group from NIP-29 events
   /// Returns a list of NIP29GroupMember with pubkeys and roles
   /// If [forceRefresh] is true, bypasses the event cache to fetch fresh data from the relay
   ///
-  /// Falls back to aggregating kind 9000 (put-user) and kind 9001 (remove-user) events
-  /// directly if relay-generated events (39001/39002) are empty or incomplete.
+  /// Always aggregates kind 9000 (put-user) and kind 9001 (remove-user) events directly
+  /// since many relays don't properly generate kind 39001/39002 aggregated lists.
+  /// Admin roles are extracted from kind 39001 or from kind 9000 events with role tags.
   Future<List<NIP29GroupMember>> getGroupMembers(
     String groupIdHex, {
     bool forceRefresh = false,
@@ -1095,7 +1095,8 @@ class GroupState with ChangeNotifier {
     try {
       final members = <String, NIP29GroupMember>{};
 
-      // Query kind 39001 (group admins) - these have roles
+      // First, get admin roles from kind 39001 (if available)
+      // This preserves admin/moderator designations
       final adminEvents = await _nostrService!.requestPastEvents(
         kind: kindGroupAdmins,
         tags: [groupIdHex],
@@ -1104,48 +1105,36 @@ class GroupState with ChangeNotifier {
         useCache: !forceRefresh,
       );
 
+      final adminRoles = <String, String>{};
       if (adminEvents.isNotEmpty) {
         final adminEvent = adminEvents.first;
         for (final tag in adminEvent.tags) {
           if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
             final pubkey = tag[1];
-            final role = tag.length >= 3 ? tag[2] : null;
-            members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
+            final role = tag.length >= 3 ? tag[2] : 'admin';
+            adminRoles[pubkey] = role;
           }
         }
       }
 
-      // Query kind 39002 (group members) - regular members without roles
-      final memberEvents = await _nostrService!.requestPastEvents(
-        kind: kindGroupMembers,
-        tags: [groupIdHex],
-        tagKey: 'd',
-        limit: 1,
-        useCache: !forceRefresh,
+      // Always aggregate from kind 9000/9001 events directly
+      // This is the authoritative source since many relays don't generate 39001/39002
+      final aggregatedMembers = await _aggregateMembershipFromEvents(
+        groupIdHex,
+        forceRefresh: forceRefresh,
       );
 
-      if (memberEvents.isNotEmpty) {
-        final memberEvent = memberEvents.first;
-        for (final tag in memberEvent.tags) {
-          if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
-            final pubkey = tag[1];
-            // Only add if not already in admins (to preserve admin role)
-            if (!members.containsKey(pubkey)) {
-              members[pubkey] = NIP29GroupMember(pubkey: pubkey);
-            }
-          }
-        }
-      }
+      debugPrint(
+        'getGroupMembers($groupIdHex): aggregated ${aggregatedMembers.length} members from kind 9000/9001',
+      );
 
-      // Fallback: If relay-generated events are empty/incomplete, aggregate
-      // kind 9000 (put-user) and kind 9001 (remove-user) events directly.
-      // Many relays don't properly generate kind 39001/39002 aggregated lists.
-      if (members.isEmpty) {
-        final aggregatedMembers = await _aggregateMembershipFromEvents(
-          groupIdHex,
-          forceRefresh: forceRefresh,
-        );
-        members.addAll(aggregatedMembers);
+      // Merge: use aggregated members but apply admin roles from kind 39001
+      for (final entry in aggregatedMembers.entries) {
+        final pubkey = entry.key;
+        final member = entry.value;
+        // Prefer role from kind 39001 if available, otherwise use role from kind 9000
+        final role = adminRoles[pubkey] ?? member.role;
+        members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
       }
 
       // Sort: admins first, then by pubkey
@@ -1189,6 +1178,10 @@ class GroupState with ChangeNotifier {
         useCache: !forceRefresh,
       );
 
+      debugPrint(
+        '_aggregateMembershipFromEvents($groupIdHex): found ${putUserEvents.length} put-user events',
+      );
+
       // Query all kind 9001 (remove-user) events for this group
       final removeUserEvents = await _nostrService!.requestPastEvents(
         kind: kindRemoveUser,
@@ -1217,6 +1210,10 @@ class GroupState with ChangeNotifier {
         }
       }
 
+      debugPrint(
+        '_aggregateMembershipFromEvents: extracted ${latestPutByUser.length} unique users from put-user events',
+      );
+
       // Process remove-user events
       for (final event in removeUserEvents) {
         for (final tag in event.tags) {
@@ -1242,6 +1239,10 @@ class GroupState with ChangeNotifier {
           members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
         }
       }
+
+      debugPrint(
+        '_aggregateMembershipFromEvents: final member count: ${members.length}',
+      );
 
       return members;
     } catch (e) {
