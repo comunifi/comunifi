@@ -1549,6 +1549,14 @@ class GroupState with ChangeNotifier {
       }
 
       _groups = loadedGroups;
+
+      // Refresh _activeGroup reference if it was set
+      // This prevents stale references after reloading groups from storage
+      if (_activeGroup != null) {
+        final activeGroupIdHex = _groupIdToHex(_activeGroup!.id);
+        _activeGroup = _mlsGroups[activeGroupIdHex];
+      }
+
       _isLoading = false;
       safeNotifyListeners();
     } catch (e) {

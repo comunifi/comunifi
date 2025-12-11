@@ -193,20 +193,31 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
       // Find matching local MLS group - use O(1) cached lookup
       final matchingGroup = groupState.getGroupByHexId(normalizedGroupId);
 
-      // Only show groups that have local MLS state (can actually be accessed)
-      // Groups without local MLS state can't be decrypted or interacted with
-      if (matchingGroup == null) {
+      // Check if user is the group creator
+      final isCreator = announcement.pubkey == _userNostrPubkey;
+
+      // Show groups if:
+      // 1. Has local MLS state (can decrypt messages), OR
+      // 2. User is the creator (should be able to see their own groups)
+      if (matchingGroup == null && !isCreator) {
         debugPrint(
-          'GroupsSidebar: Skipping group ${announcement.name} ($normalizedGroupId) - no local MLS state',
+          'GroupsSidebar: Skipping group ${announcement.name} ($normalizedGroupId) - no local MLS state and not creator',
         );
         continue;
+      }
+
+      if (matchingGroup == null && isCreator) {
+        debugPrint(
+          'GroupsSidebar: Including group ${announcement.name} ($normalizedGroupId) - creator but no local MLS state (needs recovery)',
+        );
       }
 
       allGroups.add(
         _GroupItem(
           announcement: announcement,
-          mlsGroup: matchingGroup,
-          isMyGroup: false,
+          mlsGroup:
+              matchingGroup, // May be null for creator groups needing recovery
+          isMyGroup: isCreator,
         ),
       );
     }
@@ -336,19 +347,30 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                     itemBuilder: (context, index) {
                       final item = allGroups[index];
                       final announcement = item.announcement;
-                      final mlsGroup = item.mlsGroup!; // Always non-null now
+                      final mlsGroup = item
+                          .mlsGroup; // May be null for groups needing recovery
 
                       final activeGroupId = groupState.activeGroup?.id.bytes
                           .toString();
-                      final groupId = mlsGroup.id.bytes.toString();
+                      final groupId = mlsGroup?.id.bytes.toString();
                       final isActive =
-                          activeGroupId != null && activeGroupId == groupId;
+                          activeGroupId != null &&
+                          groupId != null &&
+                          activeGroupId == groupId;
 
-                      final groupName = announcement?.name ?? mlsGroup.name;
+                      final groupName = announcement?.name ?? mlsGroup?.name;
                       final pictureUrl = announcement?.picture;
+                      final needsRecovery = mlsGroup == null;
 
                       return _GroupIconButton(
-                        onTap: () => _selectGroup(mlsGroup),
+                        onTap: mlsGroup != null
+                            ? () => _selectGroup(mlsGroup)
+                            : () {
+                                // Show recovery needed message
+                                debugPrint(
+                                  'Group ${announcement?.name} needs MLS recovery',
+                                );
+                              },
                         onLongPress: announcement != null
                             ? () => _showEditGroupModal(announcement)
                             : null,
@@ -358,6 +380,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                           pictureUrl: pictureUrl,
                           isActive: isActive,
                           isMember: true,
+                          needsRecovery: needsRecovery,
                         ),
                       );
                     },
@@ -539,21 +562,24 @@ class _GroupIconButton extends StatelessWidget {
 
 /// Circular group avatar with name label
 class _GroupAvatar extends StatelessWidget {
-  final String name;
+  final String? name;
   final String? pictureUrl;
   final bool isActive;
   final bool isMember;
   final bool showLabel;
+  final bool needsRecovery;
 
   const _GroupAvatar({
-    required this.name,
+    this.name,
     this.pictureUrl,
     required this.isActive,
     required this.isMember,
     this.showLabel = true,
+    this.needsRecovery = false,
   });
 
-  String _getInitials(String name) {
+  String _getInitials(String? name) {
+    if (name == null || name.isEmpty) return '?';
     final words = name.trim().split(RegExp(r'\s+'));
     if (words.isEmpty) return '?';
     if (words.length == 1) {
@@ -564,55 +590,87 @@ class _GroupAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Use orange color for groups needing recovery
+    final avatarColor = needsRecovery
+        ? CupertinoColors.systemOrange
+        : (isMember
+              ? CupertinoColors.systemIndigo
+              : CupertinoColors.systemGrey4);
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            color: isMember
-                ? CupertinoColors.systemIndigo
-                : CupertinoColors.systemGrey4,
-            borderRadius: BorderRadius.circular(isActive ? 16 : 28),
-            image: pictureUrl != null
-                ? DecorationImage(
-                    image: NetworkImage(pictureUrl!),
-                    fit: BoxFit.cover,
-                  )
-                : null,
-            boxShadow: isActive
-                ? [
-                    BoxShadow(
-                      color: CupertinoColors.systemIndigo.withOpacity(0.5),
-                      blurRadius: 8,
-                      spreadRadius: 1,
-                    ),
-                  ]
-                : null,
-          ),
-          child: pictureUrl == null
-              ? Center(
-                  child: Text(
-                    _getInitials(name),
-                    style: TextStyle(
-                      color: isMember
-                          ? CupertinoColors.white
-                          : CupertinoColors.systemGrey,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 18,
+        Stack(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: avatarColor,
+                borderRadius: BorderRadius.circular(isActive ? 16 : 28),
+                image: pictureUrl != null
+                    ? DecorationImage(
+                        image: NetworkImage(pictureUrl!),
+                        fit: BoxFit.cover,
+                      )
+                    : null,
+                boxShadow: isActive
+                    ? [
+                        BoxShadow(
+                          color: avatarColor.withOpacity(0.5),
+                          blurRadius: 8,
+                          spreadRadius: 1,
+                        ),
+                      ]
+                    : null,
+              ),
+              child: pictureUrl == null
+                  ? Center(
+                      child: Text(
+                        _getInitials(name),
+                        style: TextStyle(
+                          color: isMember || needsRecovery
+                              ? CupertinoColors.white
+                              : CupertinoColors.systemGrey,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 18,
+                        ),
+                      ),
+                    )
+                  : null,
+            ),
+            // Warning badge for groups needing recovery
+            if (needsRecovery)
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  width: 18,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemOrange,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: CupertinoColors.systemBackground,
+                      width: 2,
                     ),
                   ),
-                )
-              : null,
+                  child: const Icon(
+                    CupertinoIcons.exclamationmark,
+                    size: 12,
+                    color: CupertinoColors.white,
+                  ),
+                ),
+              ),
+          ],
         ),
         if (showLabel) ...[
           const SizedBox(height: 2),
           SizedBox(
             width: 72,
             child: Text(
-              name,
+              name ?? 'Unknown',
               style: TextStyle(
                 fontSize: 10,
                 fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
