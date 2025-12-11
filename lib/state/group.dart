@@ -4298,7 +4298,7 @@ class GroupState with ChangeNotifier {
         String? groupIdHex;
         for (final tag in event.tags) {
           if (tag.length >= 2 && tag[0] == 'h') {
-            groupIdHex = tag[1];
+            groupIdHex = tag[1].toLowerCase(); // Normalize to lowercase
             break;
           }
         }
@@ -4317,7 +4317,7 @@ class GroupState with ChangeNotifier {
         String? groupIdHex;
         for (final tag in event.tags) {
           if (tag.length >= 2 && tag[0] == 'h') {
-            groupIdHex = tag[1];
+            groupIdHex = tag[1].toLowerCase(); // Normalize to lowercase
             break;
           }
         }
@@ -4341,6 +4341,18 @@ class GroupState with ChangeNotifier {
         // Member if no removal or put is after removal
         memberships[groupIdHex] =
             removeTime == null || putTime.isAfter(removeTime);
+      }
+
+      debugPrint(
+        'getUserGroupMemberships: found ${putEvents.length} put-user events, ${removeEvents.length} remove-user events',
+      );
+      debugPrint(
+        'getUserGroupMemberships: ${memberships.length} groups where user is a member',
+      );
+      for (final entry in memberships.entries) {
+        if (entry.value) {
+          debugPrint('  - Member of group: ${entry.key}');
+        }
       }
 
       // Cache the result

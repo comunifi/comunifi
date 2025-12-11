@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
@@ -154,6 +154,10 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
   List<_GroupItem> _buildGroupList(GroupState groupState) {
     final allGroups = <_GroupItem>[];
 
+    debugPrint(
+      'GroupsSidebar._buildGroupList: ${groupState.discoveredGroups.length} discovered groups, ${_memberships.length} memberships, ${groupState.groups.length} local MLS groups',
+    );
+
     // Filter groups based on NIP-29 membership (kind 9000/9001 events)
     // Exclude personal groups
     for (final announcement in groupState.discoveredGroups) {
@@ -169,24 +173,32 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
         continue;
       }
 
+      // Normalize group ID to lowercase for consistent comparison
+      final normalizedGroupId = groupIdHex.toLowerCase();
+
       // Check NIP-29 membership: user is member if latest kind 9000 (put-user)
       // is after latest kind 9001 (remove-user), or no 9001 exists
-      final isMember = _memberships[groupIdHex] ?? false;
+      // Try both original and lowercase for case-insensitive matching
+      final isMember =
+          _memberships[groupIdHex] ?? _memberships[normalizedGroupId] ?? false;
 
       // Skip groups user is not a member of
       if (!isMember) {
+        debugPrint(
+          'GroupsSidebar: Skipping group ${announcement.name} ($normalizedGroupId) - not in memberships',
+        );
         continue;
       }
 
       // Find matching local MLS group - use O(1) cached lookup
-      // Normalize to lowercase for consistent comparison
-      final matchingGroup = groupState.getGroupByHexId(
-        groupIdHex.toLowerCase(),
-      );
+      final matchingGroup = groupState.getGroupByHexId(normalizedGroupId);
 
       // Only show groups that have local MLS state (can actually be accessed)
       // Groups without local MLS state can't be decrypted or interacted with
       if (matchingGroup == null) {
+        debugPrint(
+          'GroupsSidebar: Skipping group ${announcement.name} ($normalizedGroupId) - no local MLS state',
+        );
         continue;
       }
 
@@ -251,10 +263,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
             decoration: BoxDecoration(
               color: CupertinoColors.systemBackground,
               border: Border(
-                right: BorderSide(
-                  color: CupertinoColors.separator,
-                  width: 0.5,
-                ),
+                right: BorderSide(color: CupertinoColors.separator, width: 0.5),
               ),
             ),
             child: Column(
@@ -621,7 +630,6 @@ class _GroupAvatar extends StatelessWidget {
     );
   }
 }
-
 
 /// Modal for editing group metadata
 class _EditGroupModal extends StatefulWidget {
