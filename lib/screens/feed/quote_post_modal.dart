@@ -90,102 +90,134 @@ class _QuotePostModalState extends State<QuotePostModal> {
     final username = profile?.getUsername();
     final displayName = username ?? _truncatePubkey(widget.quotedEvent.pubkey);
 
-    return CupertinoPageScaffold(
-      backgroundColor: CupertinoColors.systemBackground,
-      navigationBar: CupertinoNavigationBar(
-        leading: CupertinoButton(
-          padding: EdgeInsets.zero,
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        middle: const Text('Quote Post'),
-        trailing: CupertinoButton(
-          padding: EdgeInsets.zero,
-          onPressed: _isPublishing ? null : _publishQuotePost,
-          child: _isPublishing
-              ? const CupertinoActivityIndicator()
-              : const Text(
-                  'Post',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-        ),
+    return Container(
+      decoration: const BoxDecoration(
+        color: CupertinoColors.systemBackground,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (_error != null) ...[
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: CupertinoColors.systemRed.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(8),
+        top: false,
+        child: Column(
+          children: [
+            // Handle bar
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemGrey4,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Header
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minSize: 0,
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancel'),
                   ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _error!,
-                          style: const TextStyle(
-                            color: CupertinoColors.systemRed,
-                            fontSize: 14,
+                  const Text(
+                    'Quote Post',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minSize: 0,
+                    onPressed: _isPublishing ? null : _publishQuotePost,
+                    child: _isPublishing
+                        ? const CupertinoActivityIndicator()
+                        : const Text(
+                            'Post',
+                            style: TextStyle(fontWeight: FontWeight.w600),
                           ),
+                  ),
+                ],
+              ),
+            ),
+            Container(height: 0.5, color: CupertinoColors.separator),
+            // Content
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_error != null) ...[
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemRed.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _error!,
+                                style: const TextStyle(
+                                  color: CupertinoColors.systemRed,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
+                            CupertinoButton(
+                              padding: EdgeInsets.zero,
+                              minSize: 0,
+                              onPressed: () {
+                                setState(() {
+                                  _error = null;
+                                });
+                              },
+                              child: const Icon(
+                                CupertinoIcons.xmark_circle_fill,
+                                color: CupertinoColors.systemRed,
+                                size: 20,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      CupertinoButton(
-                        padding: EdgeInsets.zero,
-                        minSize: 0,
-                        onPressed: () {
-                          setState(() {
-                            _error = null;
-                          });
-                        },
-                        child: const Icon(
-                          CupertinoIcons.xmark_circle_fill,
-                          color: CupertinoColors.systemRed,
-                          size: 20,
-                        ),
-                      ),
+                      const SizedBox(height: 16),
                     ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-              ],
-              // Compose area
-              Expanded(
-                child: CupertinoTextField(
-                  controller: _controller,
-                  placeholder: 'Add your comment...',
-                  maxLines: null,
-                  expands: true,
-                  textAlignVertical: TextAlignVertical.top,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: CupertinoColors.systemGrey6,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  autofocus: true,
+                    // Compose area
+                    CupertinoTextField(
+                      controller: _controller,
+                      placeholder: 'Add your comment...',
+                      maxLines: 6,
+                      minLines: 3,
+                      textAlignVertical: TextAlignVertical.top,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: CupertinoColors.systemGrey6,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      autofocus: true,
+                    ),
+                    const SizedBox(height: 16),
+                    // Quoted post preview
+                    const Text(
+                      'Quoting',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                        color: CupertinoColors.secondaryLabel,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    QuotedPostPreviewStatic(
+                      quotedEvent: widget.quotedEvent,
+                      displayName: displayName,
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 16),
-              // Quoted post preview
-              const Text(
-                'Quoting',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                  color: CupertinoColors.secondaryLabel,
-                ),
-              ),
-              const SizedBox(height: 8),
-              QuotedPostPreviewStatic(
-                quotedEvent: widget.quotedEvent,
-                displayName: displayName,
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

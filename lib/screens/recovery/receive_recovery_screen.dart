@@ -235,16 +235,11 @@ class _ReceiveRecoveryScreenState extends State<ReceiveRecoveryScreen> {
         middle: const Text('Recover Account'),
       ),
       child: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 500),
-            child: _isInitializing
-                ? const CupertinoActivityIndicator()
-                : _isRestoring
-                ? _buildRestoringView()
-                : _buildMainView(),
-          ),
-        ),
+        child: _isInitializing
+            ? const Center(child: CupertinoActivityIndicator())
+            : _isRestoring
+            ? Center(child: _buildRestoringView())
+            : _buildMainView(),
       ),
     );
   }
@@ -276,6 +271,11 @@ class _ReceiveRecoveryScreenState extends State<ReceiveRecoveryScreen> {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 500),
+            child: Column(
+              children: [
         // Error message
         if (_error != null) ...[
           Container(
@@ -439,6 +439,10 @@ class _ReceiveRecoveryScreenState extends State<ReceiveRecoveryScreen> {
                 ],
               ),
             ],
+          ),
+        ),
+              ],
+            ),
           ),
         ),
       ],

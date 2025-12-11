@@ -38,15 +38,16 @@ void main() async {
   final hasPendingRecovery =
       DeepLinkService.instance.pendingRecoveryPayload != null;
 
-  // Check if user has identity to determine initial route
-  final hasIdentity = await _groupState.hasNostrIdentity();
+  // Check if onboarding is complete to determine initial route
+  // This checks not just for keys, but also that onboarding flow has been completed
+  final isOnboardingComplete = await _groupState.isOnboardingComplete();
 
   // If there's a pending recovery, go to recovery screen
-  // Otherwise, normal flow based on identity
+  // Otherwise, normal flow based on onboarding completion
   String initialLocation;
   if (hasPendingRecovery) {
     initialLocation = '/recovery/restore';
-  } else if (hasIdentity) {
+  } else if (isOnboardingComplete) {
     initialLocation = '/feed';
   } else {
     initialLocation = '/';

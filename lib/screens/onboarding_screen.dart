@@ -192,7 +192,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       onPressed: _isLoggingIn ? null : _createAccount,
                       child: _isLoggingIn
                           ? const CupertinoActivityIndicator(
-                              color: CupertinoColors.white,
+                              color: CupertinoColors.black,
                             )
                           : const Row(
                               mainAxisAlignment: MainAxisAlignment.center,

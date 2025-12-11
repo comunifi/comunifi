@@ -15,6 +15,7 @@ import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:comunifi/screens/feed/edit_group_modal.dart';
 import 'package:comunifi/screens/feed/group_settings_modal.dart';
+import 'package:comunifi/screens/feed/create_group_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
 import 'package:comunifi/widgets/members_sidebar.dart';
@@ -862,10 +863,17 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   feedState.hashtagFilter == null)
                 _WelcomeCard(
                   onCreateGroup: () {
-                    // Open left sidebar to show create group option
-                    setState(() {
-                      _isLeftSidebarOpen = true;
-                    });
+                    showCupertinoModalPopup(
+                      context: context,
+                      builder: (context) => CreateGroupModal(
+                        onCreated: () {
+                          // Refresh groups after creation
+                          final groupState = context.read<GroupState>();
+                          groupState.invalidateMembershipCache();
+                          groupState.refreshDiscoveredGroups(limit: 1000);
+                        },
+                      ),
+                    );
                   },
                   onExploreGroups: () {
                     groupState.setExploreMode(true);
@@ -1116,6 +1124,7 @@ class _EventItemContentState extends State<_EventItemContent> {
   bool _isReacting = false;
   bool _wasLoading = false;
   StreamSubscription<GroupReactionUpdate>? _reactionSubscription;
+  StreamSubscription<String>? _commentUpdateSubscription;
 
   /// Get group ID from event's 'g' tag (for encrypted group messages)
   String? get _groupIdHex {
@@ -1141,6 +1150,18 @@ class _EventItemContentState extends State<_EventItemContent> {
     _loadCommentCount();
     _loadReactionData();
 
+    // Subscribe to real-time comment updates
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final feedState = context.read<FeedState>();
+      _commentUpdateSubscription = feedState.commentUpdates.listen((postId) {
+        if (postId == widget.event.id && mounted) {
+          // Reload comment count when we receive an update for this post
+          _loadCommentCount();
+        }
+      });
+    });
+
     // Subscribe to real-time reaction updates for group events
     if (_isGroupEvent) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1161,8 +1182,9 @@ class _EventItemContentState extends State<_EventItemContent> {
     // Unregister reloaders
     _FeedScreenState._commentCountReloaders.remove(widget.event.id);
     _FeedScreenState._reactionDataReloaders.remove(widget.event.id);
-    // Cancel reaction subscription
+    // Cancel subscriptions
     _reactionSubscription?.cancel();
+    _commentUpdateSubscription?.cancel();
     super.dispose();
   }
 
@@ -1340,7 +1362,7 @@ class _EventItemContentState extends State<_EventItemContent> {
     showCupertinoModalPopup(
       context: context,
       builder: (modalContext) => SizedBox(
-        height: MediaQuery.of(context).size.height * 0.9,
+        height: MediaQuery.of(context).size.height * 0.5,
         child: QuotePostModal(
           quotedEvent: widget.event,
           isConnected: isConnected,

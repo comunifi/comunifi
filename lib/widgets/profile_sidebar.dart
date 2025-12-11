@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
@@ -48,6 +49,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
 
   // Device linking state
   bool _isGeneratingRecoveryLink = false;
+  final GlobalKey _saveRecoveryLinkButtonKey = GlobalKey();
 
   @override
   void initState() {
@@ -309,7 +311,23 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
       }
 
       final recoveryLink = payload.toRecoveryLink();
-      await Share.share(recoveryLink, subject: 'Comunifi Recovery Link');
+
+      // Get button position for macOS
+      Rect? sharePositionOrigin;
+      if (Platform.isMacOS) {
+        final box = _saveRecoveryLinkButtonKey.currentContext?.findRenderObject() as RenderBox?;
+        if (box != null) {
+          final position = box.localToGlobal(Offset.zero);
+          sharePositionOrigin = position & box.size;
+        }
+      }
+
+      // Show share sheet
+      await Share.share(
+        recoveryLink,
+        subject: 'Comunifi Recovery Link',
+        sharePositionOrigin: sharePositionOrigin,
+      );
     } catch (e) {
       if (mounted) {
         showCupertinoDialog(
@@ -399,7 +417,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
               children: [
                 const Text(
                   'Profile',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
                 if (widget.showCloseButton) ...[
                   const Spacer(),
@@ -782,6 +800,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                       ),
                       const SizedBox(height: 8),
                       CupertinoButton(
+                        key: _saveRecoveryLinkButtonKey,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         color: CupertinoColors.systemGrey5,
                         borderRadius: BorderRadius.circular(8),
