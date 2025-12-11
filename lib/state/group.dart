@@ -248,6 +248,24 @@ class GroupState with ChangeNotifier {
       // Initialize backup service (after nostrService and db are ready)
       await _initializeBackupService();
 
+      // Load saved groups from cache immediately (works offline)
+      // This ensures groups are available even when not connected
+      await _loadSavedGroups();
+
+      // Load group announcements from cache for instant display
+      try {
+        final cachedAnnouncements = await loadGroupAnnouncementsFromCache();
+        if (cachedAnnouncements.isNotEmpty) {
+          setDiscoveredGroupsFromCache(cachedAnnouncements);
+          debugPrint(
+            'Loaded ${cachedAnnouncements.length} group announcements from cache',
+          );
+        }
+      } catch (e) {
+        debugPrint('Failed to load group announcements from cache: $e');
+        // Continue - not critical
+      }
+
       // Connect to relay
       await _nostrService!.connect((connected) async {
         if (connected) {
@@ -261,7 +279,7 @@ class GroupState with ChangeNotifier {
           // Ensure locally cached key is synced to relay
           await _ensureKeyIsSyncedToRelay();
 
-          // Load saved groups first
+          // Refresh groups from relay (will update cache)
           await _loadSavedGroups();
           await _startListeningForGroupEvents();
           // Sync group announcements to local DB
@@ -273,6 +291,7 @@ class GroupState with ChangeNotifier {
           _isConnected = false;
           _errorMessage = 'Failed to connect to relay';
           safeNotifyListeners();
+          // Groups are already loaded from cache above, so UI will still work offline
         }
       });
     } catch (e) {

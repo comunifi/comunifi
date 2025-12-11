@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:auto_updater/auto_updater.dart';
@@ -5,7 +6,9 @@ import 'package:comunifi/routes/routes.dart';
 import 'package:comunifi/services/deep_link/deep_link_service.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/state.dart';
+import 'package:comunifi/widgets/offline_indicator.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
 
 /// Global route observer for detecting when screens become visible
@@ -15,50 +18,63 @@ final RouteObserver<ModalRoute<void>> routeObserver =
 /// Global GroupState instance (created before app runs to check identity)
 late final GroupState _groupState;
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+void main() {
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize deep link service early to capture initial links
-  await DeepLinkService.instance.initialize();
+    // Initialize deep link service early to capture initial links
+    await DeepLinkService.instance.initialize();
 
-  // Configure auto-updater (macOS only)
-  if (Platform.isMacOS) {
-    await autoUpdater.setFeedURL(
-      'https://github.com/comunifi/comunifi/releases/latest/download/appcast.xml',
+    // Configure auto-updater (macOS only) - don't block on network errors
+    if (Platform.isMacOS) {
+      try {
+        await autoUpdater.setFeedURL(
+          'https://github.com/comunifi/comunifi/releases/latest/download/appcast.xml',
+        );
+        await autoUpdater.setScheduledCheckInterval(3600); // Check hourly
+        await autoUpdater.checkForUpdates(inBackground: true);
+      } catch (e) {
+        // Don't block app startup if auto-updater fails (e.g., offline)
+        debugPrint('Auto-updater initialization failed (non-critical): $e');
+      }
+    }
+
+    // Create GroupState and wait for keys group initialization
+    // This loads from cache and works offline
+    _groupState = GroupState();
+    await _groupState.waitForKeysGroupInit();
+
+    // Check for pending recovery from deep link
+    final hasPendingRecovery =
+        DeepLinkService.instance.pendingRecoveryPayload != null;
+
+    // Check if onboarding is complete to determine initial route
+    // This checks not just for keys, but also that onboarding flow has been completed
+    final isOnboardingComplete = await _groupState.isOnboardingComplete();
+
+    // If there's a pending recovery, go to recovery screen
+    // Otherwise, normal flow based on onboarding completion
+    String initialLocation;
+    if (hasPendingRecovery) {
+      initialLocation = '/recovery/restore';
+    } else if (isOnboardingComplete) {
+      initialLocation = '/feed';
+    } else {
+      initialLocation = '/';
+    }
+
+    runApp(
+      provideAppState(
+        Comunifi(initialLocation: initialLocation),
+        groupState: _groupState,
+      ),
     );
-    await autoUpdater.setScheduledCheckInterval(3600); // Check hourly
-    await autoUpdater.checkForUpdates(inBackground: true);
-  }
-
-  // Create GroupState and wait for keys group initialization
-  _groupState = GroupState();
-  await _groupState.waitForKeysGroupInit();
-
-  // Check for pending recovery from deep link
-  final hasPendingRecovery =
-      DeepLinkService.instance.pendingRecoveryPayload != null;
-
-  // Check if onboarding is complete to determine initial route
-  // This checks not just for keys, but also that onboarding flow has been completed
-  final isOnboardingComplete = await _groupState.isOnboardingComplete();
-
-  // If there's a pending recovery, go to recovery screen
-  // Otherwise, normal flow based on onboarding completion
-  String initialLocation;
-  if (hasPendingRecovery) {
-    initialLocation = '/recovery/restore';
-  } else if (isOnboardingComplete) {
-    initialLocation = '/feed';
-  } else {
-    initialLocation = '/';
-  }
-
-  runApp(
-    provideAppState(
-      Comunifi(initialLocation: initialLocation),
-      groupState: _groupState,
-    ),
-  );
+  }, (error, stack) {
+    // Handle any uncaught errors
+    debugPrint('Uncaught error in main: $error');
+    debugPrint('Stack trace: $stack');
+    // In production, you might want to report this to a crash reporting service
+  });
 }
 
 class Comunifi extends StatefulWidget {
@@ -116,6 +132,8 @@ class _ComunifiState extends State<Comunifi> {
           backgroundColor: CupertinoColors.systemBackground,
           child: Column(
             children: [
+              // Offline indicator banner at the top
+              const OfflineIndicator(),
               Expanded(
                 child: child != null
                     ? CupertinoTheme(data: theme, child: child)
