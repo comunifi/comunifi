@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
+import 'package:comunifi/screens/post/post_detail_modal.dart';
 
 class CommentBubble extends StatelessWidget {
   final String eventId;
@@ -19,7 +20,19 @@ class CommentBubble extends StatelessWidget {
       padding: EdgeInsets.zero,
       minSize: 0,
       onPressed: () {
-        context.push('/post/$eventId');
+        final screenWidth = MediaQuery.of(context).size.width;
+        final isWideScreen = screenWidth > 1000;
+        
+        if (isWideScreen) {
+          // Desktop: show as modal
+          showCupertinoModalPopup(
+            context: context,
+            builder: (modalContext) => PostDetailModal(postId: eventId),
+          );
+        } else {
+          // Mobile: navigate to screen
+          context.push('/post/$eventId');
+        }
       },
       child: Row(
         mainAxisSize: MainAxisSize.min,

@@ -6,6 +6,7 @@ import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/post_detail.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart';
+import 'package:comunifi/screens/post/post_detail_modal.dart';
 
 /// Widget that displays a preview of a quoted post
 /// Tapping it navigates to the full post
@@ -163,7 +164,19 @@ class _QuotedPostPreviewState extends State<QuotedPostPreview> {
 
     return GestureDetector(
       onTap: () {
-        context.push('/post/${_quotedEvent!.id}');
+        final screenWidth = MediaQuery.of(context).size.width;
+        final isWideScreen = screenWidth > 1000;
+        
+        if (isWideScreen) {
+          // Desktop: show as modal
+          showCupertinoModalPopup(
+            context: context,
+            builder: (modalContext) => PostDetailModal(postId: _quotedEvent!.id),
+          );
+        } else {
+          // Mobile: navigate to screen
+          context.push('/post/${_quotedEvent!.id}');
+        }
       },
       child: Container(
         margin: const EdgeInsets.only(top: 8),
