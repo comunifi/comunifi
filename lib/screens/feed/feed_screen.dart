@@ -15,6 +15,7 @@ import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
 import 'package:comunifi/screens/feed/edit_group_modal.dart';
 import 'package:comunifi/screens/feed/group_settings_modal.dart';
+import 'package:comunifi/screens/feed/create_group_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
 import 'package:comunifi/widgets/members_sidebar.dart';
@@ -862,10 +863,17 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   feedState.hashtagFilter == null)
                 _WelcomeCard(
                   onCreateGroup: () {
-                    // Open left sidebar to show create group option
-                    setState(() {
-                      _isLeftSidebarOpen = true;
-                    });
+                    showCupertinoModalPopup(
+                      context: context,
+                      builder: (context) => CreateGroupModal(
+                        onCreated: () {
+                          // Refresh groups after creation
+                          final groupState = context.read<GroupState>();
+                          groupState.invalidateMembershipCache();
+                          groupState.refreshDiscoveredGroups(limit: 1000);
+                        },
+                      ),
+                    );
                   },
                   onExploreGroups: () {
                     groupState.setExploreMode(true);
