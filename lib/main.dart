@@ -6,7 +6,7 @@ import 'package:comunifi/routes/routes.dart';
 import 'package:comunifi/services/deep_link/deep_link_service.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/state.dart';
-import 'package:comunifi/widgets/offline_indicator.dart';
+import 'package:comunifi/widgets/titlebar.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
@@ -133,7 +133,7 @@ class _ComunifiState extends State<Comunifi> {
           child: Column(
             children: [
               // Offline indicator banner at the top
-              const OfflineIndicator(),
+              const Titlebar(),
               Expanded(
                 child: child != null
                     ? CupertinoTheme(data: theme, child: child)
