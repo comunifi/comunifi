@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
@@ -15,6 +14,7 @@ import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
+import 'package:comunifi/services/secure_storage/secure_storage.dart';
 
 /// Shared secure storage key for Nostr private key
 const String _nostrPrivateKeyStorageKey = 'comunifi_nostr_private_key';
@@ -167,11 +167,11 @@ class FeedState with ChangeNotifier {
   }
 
   Future<void> _ensureNostrKey() async {
-    const storage = FlutterSecureStorage();
-
     // First, check if we have a key in shared secure storage
     try {
-      final existingKey = await storage.read(key: _nostrPrivateKeyStorageKey);
+      final existingKey = await secureStorage.read(
+        key: _nostrPrivateKeyStorageKey,
+      );
       if (existingKey != null && existingKey.isNotEmpty) {
         final keyPair = NostrKeyPairs(private: existingKey);
         debugPrint(
@@ -203,7 +203,7 @@ class FeedState with ChangeNotifier {
             final privateKey = keyData['private'] as String?;
             if (privateKey != null && privateKey.isNotEmpty) {
               // Migrate to shared secure storage
-              await storage.write(
+              await secureStorage.write(
                 key: _nostrPrivateKeyStorageKey,
                 value: privateKey,
               );
@@ -233,7 +233,10 @@ class FeedState with ChangeNotifier {
     final keyPair = NostrKeyPairs(private: privateKeyHex);
 
     // Store in shared secure storage
-    await storage.write(key: _nostrPrivateKeyStorageKey, value: privateKeyHex);
+    await secureStorage.write(
+      key: _nostrPrivateKeyStorageKey,
+      value: privateKeyHex,
+    );
 
     // Also store in MLS-encrypted storage for backward compatibility
     if (_keysGroup != null) {
@@ -807,10 +810,10 @@ class FeedState with ChangeNotifier {
 
   /// Get the stored Nostr private key from shared secure storage
   Future<String?> _getNostrPrivateKey() async {
-    const storage = FlutterSecureStorage();
-
     try {
-      final privateKey = await storage.read(key: _nostrPrivateKeyStorageKey);
+      final privateKey = await secureStorage.read(
+        key: _nostrPrivateKeyStorageKey,
+      );
       if (privateKey != null && privateKey.isNotEmpty) {
         return privateKey;
       }
@@ -837,7 +840,7 @@ class FeedState with ChangeNotifier {
 
           // Migrate to secure storage
           if (privateKey != null && privateKey.isNotEmpty) {
-            await storage.write(
+            await secureStorage.write(
               key: _nostrPrivateKeyStorageKey,
               value: privateKey,
             );

@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sqflite_common/sqflite.dart';
 import '../group_state/group_state.dart';
 import '../crypto/crypto.dart' as mls_crypto;
@@ -10,28 +9,12 @@ import '../ratchet_tree/ratchet_tree.dart';
 import '../key_schedule/key_schedule.dart';
 import '../storage/storage.dart';
 import 'package:comunifi/services/db/db.dart';
+import 'package:comunifi/services/secure_storage/secure_storage.dart';
 
 /// Secure storage for MLS sensitive data (private keys and secrets)
 /// Uses flutter_secure_storage which leverages platform secure storage
 /// (Keychain on iOS, Keystore on Android)
 class MlsSecureStorage {
-  static const FlutterSecureStorage _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(
-      biometricPromptTitle: 'Unlock to access MLS data',
-      biometricPromptSubtitle: 'Use your biometric to unlock the MLS data',
-    ),
-    iOptions: IOSOptions(
-      synchronizable: false,
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-    mOptions: MacOsOptions(
-      // Keep data local to this device (not synced to iCloud)
-      synchronizable: false,
-      // Accessible after first unlock - persists across app restarts
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-  );
-
   /// Save private keys for a group
   Future<void> savePrivateKeys(
     GroupId groupId,
@@ -42,21 +25,21 @@ class MlsSecureStorage {
     final keyPrefix = 'mls_private_keys_$groupIdHex';
 
     if (identityPrivateKey != null) {
-      await _storage.write(
+      await secureStorage.write(
         key: '${keyPrefix}_identity',
         value: base64Encode(identityPrivateKey.bytes),
       );
     } else {
-      await _storage.delete(key: '${keyPrefix}_identity');
+      await secureStorage.delete(key: '${keyPrefix}_identity');
     }
 
     if (leafHpkePrivateKey != null) {
-      await _storage.write(
+      await secureStorage.write(
         key: '${keyPrefix}_hpke',
         value: base64Encode(leafHpkePrivateKey.bytes),
       );
     } else {
-      await _storage.delete(key: '${keyPrefix}_hpke');
+      await secureStorage.delete(key: '${keyPrefix}_hpke');
     }
   }
 
@@ -67,8 +50,10 @@ class MlsSecureStorage {
     final groupIdHex = _groupIdToHex(groupId);
     final keyPrefix = 'mls_private_keys_$groupIdHex';
 
-    final identityKeyStr = await _storage.read(key: '${keyPrefix}_identity');
-    final hpkeKeyStr = await _storage.read(key: '${keyPrefix}_hpke');
+    final identityKeyStr = await secureStorage.read(
+      key: '${keyPrefix}_identity',
+    );
+    final hpkeKeyStr = await secureStorage.read(key: '${keyPrefix}_hpke');
 
     mls_crypto.PrivateKey? identityPrivateKey;
     if (identityKeyStr != null) {
@@ -93,14 +78,14 @@ class MlsSecureStorage {
   ) async {
     final groupIdHex = _groupIdToHex(groupId);
     final key = 'mls_epoch_secrets_$groupIdHex';
-    await _storage.write(key: key, value: base64Encode(epochSecretsBytes));
+    await secureStorage.write(key: key, value: base64Encode(epochSecretsBytes));
   }
 
   /// Load epoch secrets for a group
   Future<Uint8List?> loadEpochSecrets(GroupId groupId) async {
     final groupIdHex = _groupIdToHex(groupId);
     final key = 'mls_epoch_secrets_$groupIdHex';
-    final value = await _storage.read(key: key);
+    final value = await secureStorage.read(key: key);
     if (value == null) return null;
     return base64Decode(value);
   }
@@ -109,15 +94,21 @@ class MlsSecureStorage {
   Future<void> deleteGroup(GroupId groupId) async {
     final groupIdHex = _groupIdToHex(groupId);
     final keyPrefix = 'mls_private_keys_$groupIdHex';
-    await _storage.delete(key: '${keyPrefix}_identity');
-    await _storage.delete(key: '${keyPrefix}_hpke');
-    await _storage.delete(key: 'mls_epoch_secrets_$groupIdHex');
+    await secureStorage.delete(key: '${keyPrefix}_identity');
+    await secureStorage.delete(key: '${keyPrefix}_hpke');
+    await secureStorage.delete(key: 'mls_epoch_secrets_$groupIdHex');
   }
 
   /// Delete ALL secure storage data
   /// WARNING: This will permanently delete all MLS keys and secrets
   Future<void> deleteAll() async {
-    await _storage.deleteAll();
+    await secureStorage.deleteAll(
+      aOptions: androidOptions,
+      iOptions: iosOptions,
+      mOptions: macOsOptions,
+      wOptions: windowsOptions,
+      lOptions: linuxOptions,
+    );
     debugPrint('Deleted all secure storage data');
   }
 

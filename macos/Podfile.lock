@@ -72,7 +72,7 @@ SPEC CHECKSUMS:
   app_links: c3185399a5cabc2e610ee5ad52fb7269b84ff869
   auto_updater_macos: 3e3462c418fe4e731917eacd8d28eef7af84086d
   file_selector_macos: 3e56eaea051180007b900eacb006686fd54da150
-  flutter_secure_storage_darwin: 12d2375c690785d97a4e586f15f11be5ae35d5b0
+  flutter_secure_storage_darwin: 557817588b80e60213cbecb573c45c76b788018d
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   mobile_scanner: 0a05256215b047af27b9495db3b77640055e8824
   package_info_plus: 12f1c5c2cfe8727ca46cbd0b26677728972d9a5b

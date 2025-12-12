@@ -18,7 +18,7 @@ import 'package:comunifi/services/mls/crypto/default_crypto.dart';
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/db/db.dart' show getDBPath;
 import 'package:path_provider/path_provider.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:comunifi/services/secure_storage/secure_storage.dart';
 
 // Import MlsGroupTable for listing groups
 import 'package:comunifi/services/mls/storage/secure_storage.dart'
@@ -152,13 +152,7 @@ class GroupState with ChangeNotifier {
   // Timer for daily automatic backup
   Timer? _dailyBackupTimer;
 
-  // Secure storage for onboarding completion flag
-  static const FlutterSecureStorage _onboardingStorage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-    iOptions: IOSOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-  );
+  // Onboarding completion key for secure storage
   static const String _onboardingCompleteKey = 'onboarding_complete';
 
   // Last daily backup check time
@@ -3224,14 +3218,14 @@ class GroupState with ChangeNotifier {
     }
 
     // Check if onboarding completion flag is set
-    final flag = await _onboardingStorage.read(key: _onboardingCompleteKey);
+    final flag = await secureStorage.read(key: _onboardingCompleteKey);
     return flag == 'true';
   }
 
   /// Mark onboarding as complete
   /// This should be called when the user first reaches the feed screen
   Future<void> markOnboardingComplete() async {
-    await _onboardingStorage.write(key: _onboardingCompleteKey, value: 'true');
+    await secureStorage.write(key: _onboardingCompleteKey, value: 'true');
   }
 
   /// Derive HPKE key pair from Nostr private key
