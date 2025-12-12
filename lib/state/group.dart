@@ -16,6 +16,8 @@ import 'package:comunifi/services/mls/group_state/group_state.dart';
 import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/mls/crypto/default_crypto.dart';
 import 'package:comunifi/services/db/app_db.dart';
+import 'package:comunifi/services/db/db.dart' show getDBPath;
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 // Import MlsGroupTable for listing groups
@@ -5499,6 +5501,7 @@ class GroupState with ChangeNotifier {
   /// This will:
   /// - Delete all local databases
   /// - Delete all keychain/secure storage values
+  /// - Delete encrypted media cache
   /// - Set Nostr profile to empty values
   ///
   /// WARNING: This is irreversible unless the user has a recovery link!
@@ -5509,19 +5512,53 @@ class GroupState with ChangeNotifier {
       // 1. Clear Nostr profile (set to empty values)
       await _clearNostrProfile();
 
-      // 2. Delete all secure storage (keychain) data
+      // 2. Disconnect services to stop background operations
+      await _disconnectAllServices();
+
+      // 3. Delete all secure storage (keychain) data
       await _deleteAllSecureStorage();
 
-      // 3. Delete all databases
+      // 4. Delete all databases
       await _deleteAllDatabases();
 
-      // 4. Clear in-memory state
+      // 5. Clear encrypted media cache (filesystem)
+      await _deleteEncryptedMediaCache();
+
+      // 6. Clear in-memory state
       _clearInMemoryState();
 
       debugPrint('All app data deleted successfully');
     } catch (e) {
       debugPrint('Error deleting app data: $e');
       rethrow;
+    }
+  }
+
+  /// Disconnect all services to stop background operations
+  Future<void> _disconnectAllServices() async {
+    try {
+      // Disconnect NostrService to stop pending queue flush and other operations
+      if (_nostrService != null) {
+        await _nostrService!.disconnect(permanent: true);
+        debugPrint('NostrService disconnected');
+      }
+
+      // Cancel group event subscription
+      _groupEventSubscription?.cancel();
+      _groupEventSubscription = null;
+
+      // Cancel message event subscription
+      _messageEventSubscription?.cancel();
+      _messageEventSubscription = null;
+
+      // Cancel daily backup timer
+      _dailyBackupTimer?.cancel();
+      _dailyBackupTimer = null;
+
+      debugPrint('All services disconnected');
+    } catch (e) {
+      debugPrint('Error disconnecting services: $e');
+      // Continue even if this fails
     }
   }
 
@@ -5588,6 +5625,21 @@ class GroupState with ChangeNotifier {
     }
   }
 
+  /// Delete encrypted media cache directory
+  Future<void> _deleteEncryptedMediaCache() async {
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final cacheDir = Directory('${appDir.path}/encrypted_media_cache');
+      if (await cacheDir.exists()) {
+        await cacheDir.delete(recursive: true);
+        debugPrint('Encrypted media cache deleted');
+      }
+    } catch (e) {
+      debugPrint('Error deleting encrypted media cache: $e');
+      // Continue even if this fails
+    }
+  }
+
   /// Delete all databases
   Future<void> _deleteAllDatabases() async {
     try {
@@ -5601,6 +5653,25 @@ class GroupState with ChangeNotifier {
       if (_eventDbService != null) {
         await _eventDbService!.deleteDB();
         debugPrint('Event database deleted');
+      }
+
+      // Delete additional databases that aren't directly referenced here
+      final additionalDatabases = [
+        'feed_keys',
+        'mls_debug',
+        'pending_events',
+        'post_detail_keys',
+        'profile_keys',
+      ];
+
+      for (final dbName in additionalDatabases) {
+        try {
+          final dbPath = await getDBPath(dbName);
+          await deleteDatabase(dbPath);
+          debugPrint('$dbName database deleted');
+        } catch (e) {
+          debugPrint('Error deleting $dbName database: $e');
+        }
       }
 
       debugPrint('All databases deleted');
@@ -5622,9 +5693,20 @@ class GroupState with ChangeNotifier {
     _dailyBackupTimer?.cancel();
     _dailyBackupTimer = null;
     _backupService = null;
+    _dbService = null;
+    _eventDbService = null;
+    _mlsStorage = null;
+    _mlsService = null;
     _isConnected = false;
     safeNotifyListeners();
     debugPrint('In-memory state cleared');
+  }
+
+  /// Reinitialize the group service after data deletion
+  Future<void> reinitialize() async {
+    debugPrint('Reinitializing GroupState...');
+    await _initialize();
+    debugPrint('GroupState reinitialized');
   }
 }
 

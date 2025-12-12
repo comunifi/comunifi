@@ -159,6 +159,25 @@ class ProfileState with ChangeNotifier {
     super.dispose();
   }
 
+  /// Permanently shutdown the profile service (used before deleting all app data)
+  Future<void> shutdown() async {
+    _mounted = false;
+    await _nostrService?.disconnect(permanent: true);
+    _nostrService = null;
+    _dbService = null;
+    _isConnected = false;
+    debugPrint('ProfileState shutdown complete');
+  }
+
+  /// Reinitialize the profile service after data deletion
+  Future<void> reinitialize() async {
+    _mounted = true;
+    _profiles.clear();
+    _errorMessage = null;
+    await _initialize();
+    debugPrint('ProfileState reinitialized');
+  }
+
   // state variables here
   bool _isConnected = false;
   bool _isLoading = false;
@@ -277,16 +296,19 @@ class ProfileState with ChangeNotifier {
 
     // STEP 1: Load from DB cache first (immediate display)
     try {
-      final cachedProfiles = await _profileService!.getProfilesFromCacheOnly(
-        [pubkey],
-      );
+      final cachedProfiles = await _profileService!.getProfilesFromCacheOnly([
+        pubkey,
+      ]);
 
-      if (cachedProfiles.containsKey(pubkey) && cachedProfiles[pubkey] != null) {
+      if (cachedProfiles.containsKey(pubkey) &&
+          cachedProfiles[pubkey] != null) {
         final cachedProfile = cachedProfiles[pubkey]!;
         _profiles[pubkey] = cachedProfile;
         safeNotifyListeners();
-        debugPrint('Loaded profile from cache for ${pubkey.substring(0, 8)}...');
-        
+        debugPrint(
+          'Loaded profile from cache for ${pubkey.substring(0, 8)}...',
+        );
+
         // Fetch fresh from network in background (don't block)
         if (_isConnected) {
           Future.microtask(() async {
@@ -296,7 +318,8 @@ class ProfileState with ChangeNotifier {
                 // Update if we got new data (e.g., picture, updated name)
                 final existing = _profiles[pubkey];
                 if (existing == null ||
-                    (freshProfile.picture != null && existing.picture == null) ||
+                    (freshProfile.picture != null &&
+                        existing.picture == null) ||
                     (freshProfile.name != null && existing.name == null)) {
                   _profiles[pubkey] = freshProfile;
                   safeNotifyListeners();
@@ -308,7 +331,7 @@ class ProfileState with ChangeNotifier {
             }
           });
         }
-        
+
         return cachedProfile;
       }
     } catch (e) {

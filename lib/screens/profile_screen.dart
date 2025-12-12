@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
+import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/screens/settings/backup_settings_modal.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -829,8 +830,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
     });
 
     try {
+      // Shutdown all services with NostrService instances first
+      // to prevent auto-reconnect after database deletion
+      FeedState? feedState;
+      ProfileState? profileState;
+
+      try {
+        feedState = context.read<FeedState>();
+        await feedState.shutdown();
+      } catch (_) {}
+
+      try {
+        profileState = context.read<ProfileState>();
+        await profileState.shutdown();
+      } catch (_) {}
+
       final groupState = context.read<GroupState>();
       await groupState.deleteAllAppData();
+
+      // Reinitialize all services so "New Account" works
+      await groupState.reinitialize();
+      await feedState?.reinitialize();
+      await profileState?.reinitialize();
 
       // Navigate to onboarding screen
       if (mounted) {

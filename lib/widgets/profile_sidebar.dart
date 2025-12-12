@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
+import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/services/profile/profile.dart' show ProfileData;
 import 'package:comunifi/screens/recovery/send_recovery_screen.dart';
 
@@ -315,7 +316,9 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
       // Get button position for macOS
       Rect? sharePositionOrigin;
       if (Platform.isMacOS) {
-        final box = _saveRecoveryLinkButtonKey.currentContext?.findRenderObject() as RenderBox?;
+        final box =
+            _saveRecoveryLinkButtonKey.currentContext?.findRenderObject()
+                as RenderBox?;
         if (box != null) {
           final position = box.localToGlobal(Offset.zero);
           sharePositionOrigin = position & box.size;
@@ -474,28 +477,33 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                         width: 100,
                                         height: 100,
                                         fit: BoxFit.cover,
-                                        loadingBuilder: (context, child, loadingProgress) {
-                                          if (loadingProgress == null) {
-                                            return child;
-                                          }
-                                          return Container(
-                                            width: 100,
-                                            height: 100,
-                                            color: CupertinoColors.systemGrey4,
-                                            child: Center(
-                                              child: CupertinoActivityIndicator(
-                                                radius: 15,
-                                              ),
-                                            ),
-                                          );
-                                        },
-                                        errorBuilder: (context, error, stackTrace) {
-                                          return const Icon(
-                                            CupertinoIcons.person_fill,
-                                            size: 50,
-                                            color: CupertinoColors.systemGrey,
-                                          );
-                                        },
+                                        loadingBuilder:
+                                            (context, child, loadingProgress) {
+                                              if (loadingProgress == null) {
+                                                return child;
+                                              }
+                                              return Container(
+                                                width: 100,
+                                                height: 100,
+                                                color:
+                                                    CupertinoColors.systemGrey4,
+                                                child: Center(
+                                                  child:
+                                                      CupertinoActivityIndicator(
+                                                        radius: 15,
+                                                      ),
+                                                ),
+                                              );
+                                            },
+                                        errorBuilder:
+                                            (context, error, stackTrace) {
+                                              return const Icon(
+                                                CupertinoIcons.person_fill,
+                                                size: 50,
+                                                color:
+                                                    CupertinoColors.systemGrey,
+                                              );
+                                            },
                                       ),
                                     )
                                   : const Icon(
@@ -1003,8 +1011,28 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
     });
 
     try {
+      // Shutdown all services with NostrService instances first
+      // to prevent auto-reconnect after database deletion
+      FeedState? feedState;
+      ProfileState? profileState;
+
+      try {
+        feedState = context.read<FeedState>();
+        await feedState.shutdown();
+      } catch (_) {}
+
+      try {
+        profileState = context.read<ProfileState>();
+        await profileState.shutdown();
+      } catch (_) {}
+
       final groupState = context.read<GroupState>();
       await groupState.deleteAllAppData();
+
+      // Reinitialize all services so "New Account" works
+      await groupState.reinitialize();
+      await feedState?.reinitialize();
+      await profileState?.reinitialize();
 
       // Navigate to onboarding screen
       if (mounted) {
