@@ -2,6 +2,18 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart';
 import 'package:sqflite_common/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+/// Initialize the database factory for the current platform.
+/// Must be called before any database operations on desktop platforms.
+Future<void> initializeDatabaseFactory() async {
+  if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
+    // Initialize FFI for desktop platforms
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+    debugPrint('Database factory initialized for desktop (FFI)');
+  }
+}
 
 abstract class DBTable {
   final Database _db;

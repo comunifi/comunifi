@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:auto_updater/auto_updater.dart';
 import 'package:comunifi/routes/routes.dart';
+import 'package:comunifi/services/db/db.dart';
 import 'package:comunifi/services/deep_link/deep_link_service.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/state.dart';
@@ -10,6 +11,7 @@ import 'package:comunifi/widgets/titlebar.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
+import 'package:window_manager/window_manager.dart';
 
 /// Global route observer for detecting when screens become visible
 final RouteObserver<ModalRoute<void>> routeObserver =
@@ -21,6 +23,27 @@ late final GroupState _groupState;
 void main() {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+
+    // Initialize window manager for Windows (hide native title bar)
+    if (Platform.isWindows) {
+      await windowManager.ensureInitialized();
+      const windowOptions = WindowOptions(
+        size: Size(1280, 800),
+        minimumSize: Size(400, 600),
+        center: true,
+        backgroundColor: Color(0x00000000),
+        skipTaskbar: false,
+        titleBarStyle: TitleBarStyle.hidden,
+      );
+      await windowManager.waitUntilReadyToShow(windowOptions, () async {
+        await windowManager.show();
+        await windowManager.focus();
+      });
+    }
+
+    // Initialize database factory for desktop platforms (Windows/Linux)
+    // Must be called before any database operations
+    await initializeDatabaseFactory();
 
     // Initialize deep link service early to capture initial links
     await DeepLinkService.instance.initialize();
