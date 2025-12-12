@@ -784,7 +784,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   error: _publishError,
                   onPublish: _publishMessage,
                   placeholder:
-                      'Write a message to ${groupState.activeGroup!.name}...',
+                      'Write a message',
                   onErrorDismiss: () {
                     setState(() {
                       _publishError = null;

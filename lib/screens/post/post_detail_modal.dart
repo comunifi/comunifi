@@ -64,14 +64,13 @@ class _PostDetailModalState extends State<PostDetailModal> {
       value: _postDetailState,
       child: Align(
         alignment: Alignment.bottomCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 600),
-          child: Container(
-            height: MediaQuery.of(context).size.height * 0.85,
-            decoration: const BoxDecoration(
-              color: CupertinoColors.systemBackground,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-            ),
+        child: Container(
+          width: double.infinity,
+          height: MediaQuery.of(context).size.height * 0.85,
+          decoration: const BoxDecoration(
+            color: CupertinoColors.systemBackground,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
             child: SafeArea(
               top: false,
               child: Column(
@@ -116,7 +115,6 @@ class _PostDetailModalState extends State<PostDetailModal> {
             ),
           ),
         ),
-      ),
-    );
+      );
   }
 }
