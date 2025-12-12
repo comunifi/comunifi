@@ -28,7 +28,6 @@ void main() {
     if (Platform.isWindows) {
       await windowManager.ensureInitialized();
       const windowOptions = WindowOptions(
-        size: Size(1280, 800),
         minimumSize: Size(400, 600),
         center: true,
         backgroundColor: Color(0x00000000),
