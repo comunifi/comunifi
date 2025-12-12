@@ -836,6 +836,7 @@ class GroupState with ChangeNotifier {
     _messageEventSubscription?.cancel();
     _encryptedEnvelopeSubscription?.cancel();
     _reactionUpdateController.close();
+    _commentUpdateController.close();
     _nostrService?.disconnect();
     _dbService?.database?.close();
     _eventDbService?.database?.close();
@@ -2270,6 +2271,16 @@ class GroupState with ChangeNotifier {
       );
       if (!hasGroupTag) continue;
 
+      // Check if this is a comment (has 'e' tag for reply) - skip comments from main feed
+      final isComment = event.tags.any(
+        (tag) => tag.isNotEmpty && tag[0] == 'e' && tag.length > 1,
+      );
+      if (isComment) {
+        // Emit to comment stream for post detail views
+        _commentUpdateController.add(event);
+        continue;
+      }
+
       // Add if we don't already have it
       if (!_groupMessages.any((e) => e.id == event.id)) {
         _groupMessages.add(event);
@@ -2518,14 +2529,32 @@ class GroupState with ChangeNotifier {
 
   /// Handle a decrypted kind 1 post from any group
   void _handleDecryptedPost(NostrEventModel post, String groupIdHex) {
-    // Cache to database
+    // Check if this is a comment (has 'e' tag for reply)
+    bool isComment = false;
+    for (final tag in post.tags) {
+      if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+        isComment = true;
+        break;
+      }
+    }
+
+    // Cache to database (both posts and comments)
     if (_eventTable != null) {
       _eventTable!.insert(post).catchError((e) {
         debugPrint('Failed to cache decrypted post: $e');
       });
     }
 
-    // Add to unified messages list (all groups)
+    // If it's a comment, emit to comment stream but don't add to main feed
+    if (isComment) {
+      _commentUpdateController.add(post);
+      debugPrint(
+        'Emitted comment ${post.id.substring(0, 8)}... to comment stream (not added to feed)',
+      );
+      return;
+    }
+
+    // Add posts (not comments) to unified messages list (all groups)
     if (!_allDecryptedMessages.any((e) => e.id == post.id)) {
       _allDecryptedMessages.insert(0, post);
       debugPrint(
@@ -2665,16 +2694,35 @@ class GroupState with ChangeNotifier {
               // Skip kind 7 reactions - they are handled by _startListeningForAllGroupEvents()
               if (event.kind == 7) return;
 
-              // Handle kind 1 messages
+              // Check if this is a comment (has 'e' tag for reply)
+              bool isComment = false;
+              for (final tag in event.tags) {
+                if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+                  isComment = true;
+                  break;
+                }
+              }
+
+              // If it's a comment, emit to comment stream but don't add to main feed
+              if (isComment) {
+                _commentUpdateController.add(event);
+                debugPrint(
+                  '>>> GROUP LISTENER: Emitted comment ${event.id.substring(0, 8)}... to comment stream (not added to feed)',
+                );
+                return;
+              }
+
+              // Handle kind 1 posts (not comments) - add to main feed
               if (!_groupMessages.any((e) => e.id == event.id)) {
                 _groupMessages.insert(0, event);
                 debugPrint(
-                  '>>> GROUP LISTENER: Added event ${event.id.substring(0, 8)}... to groupMessages',
+                  '>>> GROUP LISTENER: Added post ${event.id.substring(0, 8)}... to groupMessages',
                 );
                 // Also add to unified messages list (for main feed view)
                 if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
                   _allDecryptedMessages.insert(0, event);
                 }
+                
                 safeNotifyListeners();
               } else {
                 debugPrint(
@@ -2931,6 +2979,109 @@ class GroupState with ChangeNotifier {
       debugPrint('Quoting event: ${quotedEvent.id}');
     } catch (e) {
       debugPrint('Failed to publish quote post: $e');
+      rethrow;
+    }
+  }
+
+  /// Publish an encrypted comment to a specific group
+  /// Comment is a kind 1 event with both 'g' tag (for group) and 'e' tag (for reply)
+  /// The comment will be encrypted with MLS and sent as kind 1059 envelope
+  Future<void> publishGroupComment(
+    String content,
+    String postId,
+    String groupIdHex,
+  ) async {
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception(
+          'No Nostr key found. Please ensure keys are initialized.',
+        );
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Find the MLS group by hex ID
+      MlsGroup? targetGroup;
+      for (final group in _groups) {
+        if (_groupIdToHex(group.id) == groupIdHex) {
+          targetGroup = group;
+          break;
+        }
+      }
+
+      if (targetGroup == null) {
+        throw Exception('Group not found for ID: $groupIdHex');
+      }
+
+      // Extract URLs and generate 'r' tags (Nostr convention for URL references)
+      final urlTags = _linkPreviewService.generateUrlTags(content);
+
+      // Build tags list with both group ID and reply reference
+      final baseTags = <List<String>>[
+        ['g', groupIdHex], // Group ID tag
+        ['e', postId, '', 'reply'], // Reply reference to the post
+        ...urlTags, // Add URL reference tags
+      ];
+
+      // Create a normal Nostr event (kind 1 = text note / comment)
+      final commentCreatedAt = DateTime.now();
+      final commentTags = await addClientTagsWithSignature(
+        baseTags,
+        createdAt: commentCreatedAt,
+      );
+
+      final nostrEvent = NostrEvent.fromPartialData(
+        kind: 1, // Text note (comment)
+        content: content,
+        keyPairs: keyPair,
+        tags: commentTags,
+        createdAt: commentCreatedAt,
+      );
+
+      final eventModel = NostrEventModel(
+        id: nostrEvent.id,
+        pubkey: nostrEvent.pubkey,
+        kind: nostrEvent.kind,
+        content: nostrEvent.content,
+        tags: nostrEvent.tags,
+        sig: nostrEvent.sig,
+        createdAt: nostrEvent.createdAt,
+      );
+
+      // Get recipient pubkey (use our own pubkey)
+      final recipientPubkey = eventModel.pubkey;
+
+      // Publish to the relay - will be automatically encrypted and wrapped in kind 1059
+      await _nostrService!.publishEvent(
+        eventModel.toJson(),
+        mlsGroupId: groupIdHex,
+        recipientPubkey: recipientPubkey,
+        keyPairs: keyPair,
+      );
+
+      // Cache the decrypted event to database immediately
+      if (_eventTable != null) {
+        _eventTable!.insert(eventModel).catchError((e) {
+          debugPrint('Failed to cache group comment: $e');
+        });
+      }
+
+      // Emit the comment to the stream for immediate UI update
+      _commentUpdateController.add(eventModel);
+
+      debugPrint(
+        'Posted encrypted comment to group $groupIdHex on post $postId: ${eventModel.id}',
+      );
+      if (urlTags.isNotEmpty) {
+        debugPrint('Added ${urlTags.length} URL reference tag(s)');
+      }
+    } catch (e) {
+      debugPrint('Failed to publish group comment: $e');
       rethrow;
     }
   }
@@ -4746,6 +4897,15 @@ class GroupState with ChangeNotifier {
   /// Stream of reaction updates for real-time UI updates
   Stream<GroupReactionUpdate> get reactionUpdates =>
       _reactionUpdateController.stream;
+
+  // Stream controller for decrypted comment updates (for live comment feeds)
+  final _commentUpdateController =
+      StreamController<NostrEventModel>.broadcast();
+
+  /// Stream of decrypted comments for real-time UI updates
+  /// Emits comments when they are decrypted from kind 1059 envelopes
+  Stream<NostrEventModel> get decryptedCommentUpdates =>
+      _commentUpdateController.stream;
 
   /// Publish a reaction (kind 7) to a group post
   /// The reaction is encrypted with MLS and wrapped in kind 1059

@@ -12,11 +12,22 @@ import 'package:comunifi/services/link_preview/link_preview.dart';
 /// Shared secure storage key for Nostr private key (same as FeedState)
 const String _nostrPrivateKeyStorageKey = 'comunifi_nostr_private_key';
 
+/// Callback type for publishing encrypted comments to a group
+typedef PublishGroupCommentCallback =
+    Future<void> Function(String content, String postId, String groupIdHex);
+
+/// Callback type for adding decrypted comments from group
+typedef AddDecryptedCommentCallback = void Function(NostrEventModel comment);
+
 class PostDetailState with ChangeNotifier {
   final String postId;
   NostrService? _nostrService;
   StreamSubscription<NostrEventModel>? _eventSubscription;
   StreamSubscription<NostrEventModel>? _reactionSubscription;
+
+  /// Callback for publishing encrypted comments to a group
+  /// Set this from the UI layer using GroupState's publishing method
+  PublishGroupCommentCallback? onPublishGroupComment;
 
   // Stream controller for reaction updates on this post
   final _reactionUpdateController =
@@ -95,6 +106,7 @@ class PostDetailState with ChangeNotifier {
   String? _errorMessage;
   NostrEventModel? _post;
   List<NostrEventModel> _comments = [];
+  String? _groupIdHex; // Group ID from post's 'g' tag (if this is a group post)
 
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
@@ -102,6 +114,8 @@ class PostDetailState with ChangeNotifier {
   String? get errorMessage => _errorMessage;
   NostrEventModel? get post => _post;
   List<NostrEventModel> get comments => _comments;
+  String? get groupIdHex => _groupIdHex;
+  bool get isGroupPost => _groupIdHex != null;
 
   Future<void> _loadPost() async {
     if (_nostrService == null || !_isConnected) return;
@@ -114,6 +128,7 @@ class PostDetailState with ChangeNotifier {
       final cachedPost = await _nostrService!.getCachedEvent(postId);
       if (cachedPost != null) {
         _post = cachedPost;
+        _extractGroupId(cachedPost);
         _isLoading = false;
         safeNotifyListeners();
         return;
@@ -141,6 +156,11 @@ class PostDetailState with ChangeNotifier {
         );
       }
 
+      // Extract group ID from post (if it's a group post)
+      if (_post != null) {
+        _extractGroupId(_post!);
+      }
+
       _isLoading = false;
       safeNotifyListeners();
     } catch (e) {
@@ -148,6 +168,18 @@ class PostDetailState with ChangeNotifier {
       _errorMessage = 'Failed to load post: $e';
       safeNotifyListeners();
     }
+  }
+
+  /// Extract the group ID from the post's 'g' tag if it exists
+  void _extractGroupId(NostrEventModel post) {
+    for (final tag in post.tags) {
+      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+        _groupIdHex = tag[1];
+        debugPrint('Post is a group post with group ID: $_groupIdHex');
+        return;
+      }
+    }
+    _groupIdHex = null;
   }
 
   Future<void> _loadComments() async {
@@ -355,11 +387,25 @@ class PostDetailState with ChangeNotifier {
 
   /// Publish a comment (kind 1 event with 'e' tag referencing the post)
   /// Automatically extracts URLs from content and adds 'r' tags (Nostr convention)
+  /// For group posts, uses MLS encryption via the onPublishGroupComment callback
   Future<void> publishComment(String content) async {
     if (!_isConnected || _nostrService == null) {
       throw Exception('Not connected to relay. Please connect first.');
     }
 
+    // For group posts, use encrypted publishing via callback
+    if (isGroupPost && _groupIdHex != null) {
+      if (onPublishGroupComment == null) {
+        throw Exception(
+          'Cannot publish encrypted comment: no group publishing callback set.',
+        );
+      }
+      await onPublishGroupComment!(content, postId, _groupIdHex!);
+      debugPrint('Published encrypted comment to group $_groupIdHex');
+      return;
+    }
+
+    // For regular posts, publish unencrypted comment
     try {
       final privateKey = await _getNostrPrivateKey();
       if (privateKey == null || privateKey.isEmpty) {
@@ -417,6 +463,28 @@ class PostDetailState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to publish comment: $e');
       rethrow;
+    }
+  }
+
+  /// Add a decrypted comment from the group listener
+  /// Called by the UI when a new encrypted comment is decrypted by GroupState
+  void addDecryptedComment(NostrEventModel comment) {
+    // Check if this comment is for this post
+    bool isForThisPost = false;
+    for (final tag in comment.tags) {
+      if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+        if (tag[1] == postId) {
+          isForThisPost = true;
+          break;
+        }
+      }
+    }
+
+    if (isForThisPost && !_comments.any((e) => e.id == comment.id)) {
+      _comments.add(comment);
+      _comments.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      safeNotifyListeners();
+      debugPrint('Added decrypted comment ${comment.id} to post $postId');
     }
   }
 
