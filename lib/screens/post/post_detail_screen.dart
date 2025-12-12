@@ -505,28 +505,30 @@ class _PostItemContentState extends State<_PostItemContent> {
           bottom: BorderSide(color: CupertinoColors.separator, width: 0.5),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                widget.displayName,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                AuthorAvatar(pubkey: widget.event.pubkey),
+                const SizedBox(width: 8),
+                Text(
+                  widget.displayName,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                _formatDate(widget.event.createdAt),
-                style: const TextStyle(
-                  color: CupertinoColors.secondaryLabel,
-                  fontSize: 12,
+                const SizedBox(width: 8),
+                Text(
+                  _formatDate(widget.event.createdAt),
+                  style: const TextStyle(
+                    color: CupertinoColors.secondaryLabel,
+                    fontSize: 12,
+                  ),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
           const SizedBox(height: 8),
           _RichContentText(content: widget.event.content),
           // Display attached images (NIP-92 imeta)
