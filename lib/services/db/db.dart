@@ -38,7 +38,8 @@ abstract class DBService {
       await _db!.close();
     }
 
-    this.name = '$name.db';
+    final debugSuffix = kDebugMode ? '_debug' : '';
+    this.name = '$name$debugSuffix.db';
     final dbPath = kIsWeb
         ? this.name
         : join(await getDatabasesPath(), this.name);
@@ -78,5 +79,7 @@ abstract class DBService {
 }
 
 Future<String> getDBPath(String name) async {
-  return kIsWeb ? '$name.db' : join(await getDatabasesPath(), '$name.db');
+  final debugSuffix = kDebugMode ? '_debug' : '';
+  final dbName = '$name$debugSuffix.db';
+  return kIsWeb ? dbName : join(await getDatabasesPath(), dbName);
 }
