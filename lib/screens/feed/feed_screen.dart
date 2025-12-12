@@ -162,13 +162,10 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
           debugPrint(
             'FeedScreen: Ensuring user profile with pubkey: ${pubkey.substring(0, 8)}...',
           );
-          // Get HPKE public key for MLS invitations
-          final hpkePublicKeyHex = await groupState.getHpkePublicKeyHex();
           // Use GroupState's keys to ensure profile exists
           await profileState.ensureUserProfile(
             pubkey: pubkey,
             privateKey: privateKey,
-            hpkePublicKeyHex: hpkePublicKeyHex,
           );
           debugPrint('FeedScreen: Profile ensured');
         } else {

@@ -1179,7 +1179,6 @@ class ProfileState with ChangeNotifier {
       final existingBanner = existingProfile?.banner;
       final existingWebsite = existingProfile?.website;
       final existingNip05 = existingProfile?.nip05;
-      final existingMlsHpkePublicKey = existingProfile?.mlsHpkePublicKey;
 
       final keyPair = NostrKeyPairs(private: finalPrivateKey);
 
@@ -1203,9 +1202,6 @@ class ProfileState with ChangeNotifier {
       }
       if (existingNip05 != null) {
         profileData['nip05'] = existingNip05;
-      }
-      if (existingMlsHpkePublicKey != null) {
-        profileData['mls_hpke_public_key'] = existingMlsHpkePublicKey;
       }
 
       final profileJson = jsonEncode(profileData);

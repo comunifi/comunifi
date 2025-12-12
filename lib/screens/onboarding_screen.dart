@@ -70,13 +70,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         throw Exception('Failed to initialize account keys');
       }
 
-      // Get HPKE public key for MLS invitations
-      final hpkePublicKeyHex = await groupState.getHpkePublicKeyHex();
-
       await profileState.ensureUserProfile(
         pubkey: pubkey,
         privateKey: privateKey,
-        hpkePublicKeyHex: hpkePublicKeyHex,
       );
 
       // Announce the personal group to the relay

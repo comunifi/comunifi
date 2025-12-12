@@ -182,54 +182,92 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
 
   List<_GroupItem> _buildGroupList(GroupState groupState) {
     final allGroups = <_GroupItem>[];
+    final addedGroupIds = <String>{};
 
-    debugPrint(
-      'GroupsSidebar._buildGroupList: ${groupState.discoveredGroups.length} discovered groups, ${_memberships.length} memberships',
-    );
+    // HYBRID APPROACH:
+    // 1. PRIMARY: Use local MLS groups (if you have the MLS group, you're a member via Welcome)
+    // 2. SECONDARY: Also check NIP-29 memberships (for groups where Welcome hasn't been processed yet)
 
-    // Filter groups based on NIP-29 membership (kind 9000/9001 events)
-    // Only show groups where user is a member (based on Nostr membership, not MLS)
-    // Exclude personal groups
+    // Step 1: Add all local MLS groups (excluding personal groups)
+    for (final mlsGroup in groupState.groups) {
+      final groupIdHex = mlsGroup.id.bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join()
+          .toLowerCase();
+
+      // Get announcement for metadata (name, picture, etc.)
+      final announcement = groupState.getGroupAnnouncementByHexId(groupIdHex);
+
+      // Skip personal groups
+      if (announcement != null) {
+        final isPersonalGroup =
+            announcement.isPersonal &&
+            announcement.personalPubkey == _userNostrPubkey;
+        if (isPersonalGroup) {
+          continue;
+        }
+      } else {
+        // No announcement - skip if it looks like a personal group by name
+        if (_userNostrPubkey != null &&
+            mlsGroup.name.toLowerCase().contains(_userNostrPubkey!.substring(0, 8).toLowerCase())) {
+          continue;
+        }
+      }
+
+      final isCreator = announcement?.pubkey == _userNostrPubkey;
+      addedGroupIds.add(groupIdHex);
+
+      allGroups.add(
+        _GroupItem(
+          announcement: announcement,
+          mlsGroup: mlsGroup,
+          isMyGroup: isCreator,
+        ),
+      );
+    }
+
+    // Step 2: Also add groups from NIP-29 memberships (in case MLS group not loaded yet)
     for (final announcement in groupState.discoveredGroups) {
       final groupIdHex = announcement.mlsGroupId;
       if (groupIdHex == null) continue;
 
-      // Skip personal groups (identified by the 'personal' tag in group announcement)
+      final normalizedGroupId = groupIdHex.toLowerCase();
+
+      // Skip if already added from MLS groups
+      if (addedGroupIds.contains(normalizedGroupId)) {
+        continue;
+      }
+
+      // Skip personal groups
       final isPersonalGroup =
           announcement.isPersonal &&
           announcement.personalPubkey == _userNostrPubkey;
-
       if (isPersonalGroup) {
         continue;
       }
 
-      // Normalize group ID to lowercase for consistent comparison
-      final normalizedGroupId = groupIdHex.toLowerCase();
-
-      // Check NIP-29 membership: user is member if latest kind 9000 (put-user)
-      // is after latest kind 9001 (remove-user), or no 9001 exists
-      // Try both original and lowercase for case-insensitive matching
+      // Check NIP-29 membership
       final isMember =
           _memberships[groupIdHex] ?? _memberships[normalizedGroupId] ?? false;
-
-      // Only show groups where user is a member (based on Nostr membership)
       if (!isMember) {
         continue;
       }
 
-      // Show all groups where user is a member (don't require MLS group)
-      // MLS group may be null if user hasn't received Welcome message yet
-      final matchingGroup = groupState.getGroupByHexId(normalizedGroupId);
+      // This group has NIP-29 membership but no MLS group yet (Welcome pending)
       final isCreator = announcement.pubkey == _userNostrPubkey;
 
       allGroups.add(
         _GroupItem(
           announcement: announcement,
-          mlsGroup: matchingGroup, // May be null - that's OK, we show based on Nostr membership
+          mlsGroup: null, // No MLS group yet
           isMyGroup: isCreator,
         ),
       );
     }
+
+    debugPrint(
+      'GroupsSidebar._buildGroupList: ${groupState.groups.length} MLS groups, ${_memberships.length} memberships, showing ${allGroups.length}',
+    );
 
     // Sort by creation date (newest first)
     allGroups.sort((a, b) {
