@@ -36,16 +36,16 @@ class _PostDetailModalState extends State<PostDetailModal> {
     try {
       _groupState = context.read<GroupState>();
       _postDetailState.onPublishGroupComment = _groupState!.publishGroupComment;
-      
+
       // Subscribe to decrypted comments for live updates
       _commentSubscription?.cancel();
-      _commentSubscription = _groupState!.decryptedCommentUpdates.listen(
-        (comment) {
-          // Forward the comment to PostDetailState
-          // It will filter for comments relevant to this post
-          _postDetailState.addDecryptedComment(comment);
-        },
-      );
+      _commentSubscription = _groupState!.decryptedCommentUpdates.listen((
+        comment,
+      ) {
+        // Forward the comment to PostDetailState
+        // It will filter for comments relevant to this post
+        _postDetailState.addDecryptedComment(comment);
+      });
     } catch (e) {
       // GroupState not available in this context - comments will only work for non-group posts
     }
@@ -62,9 +62,10 @@ class _PostDetailModalState extends State<PostDetailModal> {
   Widget build(BuildContext context) {
     return ChangeNotifierProvider.value(
       value: _postDetailState,
-      child: Center(
+      child: Align(
+        alignment: Alignment.bottomCenter,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
+          constraints: const BoxConstraints(maxWidth: 600),
           child: Container(
             height: MediaQuery.of(context).size.height * 0.85,
             decoration: const BoxDecoration(
@@ -93,25 +94,23 @@ class _PostDetailModalState extends State<PostDetailModal> {
                       children: [
                         const Text(
                           'Post',
-                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                         CupertinoButton(
                           padding: EdgeInsets.zero,
                           minSize: 0,
                           onPressed: () => Navigator.of(context).pop(),
-                          child: const Icon(
-                            CupertinoIcons.xmark,
-                            size: 24,
-                          ),
+                          child: const Icon(CupertinoIcons.xmark, size: 24),
                         ),
                       ],
                     ),
                   ),
                   Container(height: 0.5, color: CupertinoColors.separator),
                   // Post detail content
-                  Expanded(
-                    child: PostDetailContent(postId: widget.postId),
-                  ),
+                  Expanded(child: PostDetailContent(postId: widget.postId)),
                 ],
               ),
             ),
