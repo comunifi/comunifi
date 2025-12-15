@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/main.dart' show routeObserver;
+import 'package:comunifi/state/app.dart';
 import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
@@ -87,7 +88,19 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
       // Fetch discovered groups (for group images, covers, etc.)
       // This ensures data is available even when sidebar isn't open (mobile)
       _fetchDiscoveredGroupsIfNeeded(groupState);
+
+      // Listen for profile tap events from the titlebar
+      final appState = context.read<AppState>();
+      appState.profileTapNotifier.addListener(_onProfileTap);
     });
+  }
+
+  void _onProfileTap() {
+    if (mounted) {
+      setState(() {
+        _isRightSidebarOpen = true;
+      });
+    }
   }
 
   /// Fetches discovered groups if connected and not yet fetched
@@ -202,6 +215,12 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _messageController.dispose();
+    // Remove profile tap listener
+    try {
+      context.read<AppState>().profileTapNotifier.removeListener(_onProfileTap);
+    } catch (_) {
+      // Context may not be available during dispose
+    }
     super.dispose();
   }
 
@@ -455,7 +474,6 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     ? CupertinoPageScaffold(
                         navigationBar: const CupertinoNavigationBar(
                           middle: Text('Explore Groups'),
-                          trailing: _UsernameButton(),
                         ),
                         child: SafeArea(
                           child: _ExploreGroupsView(
@@ -472,7 +490,6 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                           middle: Text(
                             _getGroupDisplayName(groupState, activeGroup),
                           ),
-                          trailing: _UsernameButton(),
                         ),
                         child: SafeArea(
                           child: _buildFeedContent(
@@ -568,13 +585,6 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     child: const Icon(CupertinoIcons.bars),
                   ),
                   middle: const Text('Explore Groups'),
-                  trailing: _UsernameButton(
-                    onTap: () {
-                      setState(() {
-                        _isRightSidebarOpen = true;
-                      });
-                    },
-                  ),
                 ),
                 child: SafeArea(
                   child: _ExploreGroupsView(
@@ -598,13 +608,6 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     child: const Icon(CupertinoIcons.bars),
                   ),
                   middle: Text(_getGroupDisplayName(groupState, activeGroup)),
-                  trailing: _UsernameButton(
-                    onTap: () {
-                      setState(() {
-                        _isRightSidebarOpen = true;
-                      });
-                    },
-                  ),
                 ),
                 child: SafeArea(
                   child: _buildFeedContent(feedState, groupState, activeGroup),
@@ -783,8 +786,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   isPublishing: _isPublishing,
                   error: _publishError,
                   onPublish: _publishMessage,
-                  placeholder:
-                      'Write a message',
+                  placeholder: 'Write a message',
                   onErrorDismiss: () {
                     setState(() {
                       _publishError = null;
@@ -977,114 +979,6 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
         );
       },
     );
-  }
-}
-
-class _UsernameButton extends StatefulWidget {
-  final VoidCallback? onTap;
-
-  const _UsernameButton({this.onTap});
-
-  @override
-  State<_UsernameButton> createState() => _UsernameButtonState();
-}
-
-class _UsernameButtonState extends State<_UsernameButton> {
-  String? _pubkey;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadPubkey();
-  }
-
-  Future<void> _loadPubkey() async {
-    final groupState = context.read<GroupState>();
-    final pubkey = await groupState.getNostrPublicKey();
-    if (mounted) {
-      setState(() {
-        _pubkey = pubkey;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_pubkey == null) {
-      return const SizedBox.shrink();
-    }
-
-    // Watch for profile changes
-    final profile = context.select<ProfileState, ProfileData?>(
-      (profileState) => profileState.profiles[_pubkey!],
-    );
-
-    final username =
-        profile?.getUsername() ??
-        (_pubkey!.length > 12
-            ? '${_pubkey!.substring(0, 6)}...${_pubkey!.substring(_pubkey!.length - 6)}'
-            : _pubkey!);
-
-    final profilePicture = profile?.picture;
-
-    final content = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          username,
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(width: 8),
-        Container(
-          width: 28,
-          height: 28,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: CupertinoColors.systemGrey4,
-          ),
-          child: profilePicture != null
-              ? ClipOval(
-                  child: Image.network(
-                    profilePicture,
-                    width: 28,
-                    height: 28,
-                    fit: BoxFit.cover,
-                    loadingBuilder: (context, child, loadingProgress) {
-                      if (loadingProgress == null) {
-                        return child;
-                      }
-                      return Container(
-                        width: 28,
-                        height: 28,
-                        color: CupertinoColors.systemGrey4,
-                        child: Center(
-                          child: CupertinoActivityIndicator(radius: 6),
-                        ),
-                      );
-                    },
-                    errorBuilder: (context, error, stackTrace) {
-                      return const Icon(
-                        CupertinoIcons.person_fill,
-                        size: 16,
-                        color: CupertinoColors.systemGrey,
-                      );
-                    },
-                  ),
-                )
-              : const Icon(
-                  CupertinoIcons.person_fill,
-                  size: 16,
-                  color: CupertinoColors.systemGrey,
-                ),
-        ),
-      ],
-    );
-
-    if (widget.onTap != null) {
-      return GestureDetector(onTap: widget.onTap, child: content);
-    }
-
-    return content;
   }
 }
 

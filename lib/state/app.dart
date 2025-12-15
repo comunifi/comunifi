@@ -20,9 +20,18 @@ class AppState with ChangeNotifier {
   // state variables here
   bool thisIsABool = false;
 
+  /// Notifier for profile tap events in the titlebar.
+  /// FeedScreen listens to this and opens the profile sidebar.
+  final ValueNotifier<int> profileTapNotifier = ValueNotifier<int>(0);
+
   // state methods here
   void toggleThisIsABool() {
     thisIsABool = !thisIsABool;
     safeNotifyListeners();
+  }
+
+  /// Call this when the profile button in the titlebar is tapped.
+  void onProfileTap() {
+    profileTapNotifier.value++;
   }
 }
