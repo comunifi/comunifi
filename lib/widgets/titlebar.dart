@@ -43,8 +43,7 @@ class _TitlebarState extends State<Titlebar> {
     return Consumer<GroupState>(
       builder: (context, groupState, child) {
         // State logic runs everywhere
-        // final isOffline = !groupState.isConnected;
-        final isOffline = groupState.isConnected;
+        final isOffline = !groupState.isConnected;
 
         // UI only on macOS + Windows
         if (!_isDesktop) {
