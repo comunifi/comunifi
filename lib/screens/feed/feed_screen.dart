@@ -2430,9 +2430,8 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
 
   void _showEditModal() {
     final groupIdHex = _groupIdToHex(widget.group);
-    final announcement = widget.groupState.discoveredGroups
-        .cast<GroupAnnouncement?>()
-        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
+    // Use getGroupAnnouncementByHexId which handles MLS to NIP-29 ID mapping
+    final announcement = widget.groupState.getGroupAnnouncementByHexId(groupIdHex);
 
     final effectiveAnnouncement =
         announcement ??
@@ -2449,9 +2448,8 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
 
   void _showSettingsModal() {
     final groupIdHex = _groupIdToHex(widget.group);
-    final announcement = widget.groupState.discoveredGroups
-        .cast<GroupAnnouncement?>()
-        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
+    // Use getGroupAnnouncementByHexId which handles MLS to NIP-29 ID mapping
+    final announcement = widget.groupState.getGroupAnnouncementByHexId(groupIdHex);
 
     final effectiveAnnouncement =
         announcement ??
@@ -2472,11 +2470,9 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
     final screenWidth = MediaQuery.of(context).size.width;
     final isNarrowScreen = screenWidth <= 1000;
 
-    // Get the announcement for this group
+    // Get the announcement for this group using proper ID mapping
     final groupIdHex = _groupIdToHex(widget.group);
-    final announcement = widget.groupState.discoveredGroups
-        .cast<GroupAnnouncement?>()
-        .firstWhere((a) => a?.mlsGroupId == groupIdHex, orElse: () => null);
+    final announcement = widget.groupState.getGroupAnnouncementByHexId(groupIdHex);
 
     return SliverPersistentHeader(
       pinned: true,

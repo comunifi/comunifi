@@ -33,7 +33,7 @@ When a user opens (selects) an MLS group, the group members are displayed in the
 
 Location: `lib/state/group.dart`
 
-Group members from NIP-29 events (kind 9000, 39001, 39002) are represented by `NIP29GroupMember`:
+Group members from NIP-29 events (kind 39001 for admins, kind 39002 for members) are represented by `NIP29GroupMember`:
 
 ```dart
 class NIP29GroupMember {
@@ -258,7 +258,7 @@ await activeGroup.removeMembers(removes);
 Members are tracked locally in the MLS group state. The canonical member list is determined by:
 
 1. **MLS state**: The ratchet tree tracks who can encrypt/decrypt messages
-2. **NIP-29 events**: `put-user` (kind 9000) and `delete-user` (kind 9001) events record membership changes on the relay
+2. **NIP-29 events**: Kind 39002 (group members) is the source of truth for the member list
 
 These should stay in sync, but the MLS state is authoritative for cryptographic operations.
 

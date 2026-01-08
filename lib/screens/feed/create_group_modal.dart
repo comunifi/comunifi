@@ -68,25 +68,39 @@ class _CreateGroupModalState extends State<CreateGroupModal> {
     });
 
     try {
-      String? pictureUrl;
-      if (_selectedPhotoBytes != null) {
-        setState(() => _isUploadingPhoto = true);
-        pictureUrl = await groupState.uploadMediaToOwnGroup(
-          _selectedPhotoBytes!,
-          'image/jpeg',
-        );
-        setState(() => _isUploadingPhoto = false);
-      }
-
       final about = _aboutController.text.trim();
+
+      // 1. Create the group first (without picture)
       final newGroup = await groupState.createGroup(
         name,
         about: about.isEmpty ? null : about,
-        picture: pictureUrl,
       );
 
-      // Navigate into the newly created group
+      // 2. Set it as active so uploadMedia works
       groupState.setActiveGroup(newGroup);
+
+      // 3. Upload image to the newly created group
+      String? pictureUrl;
+      if (_selectedPhotoBytes != null) {
+        setState(() => _isUploadingPhoto = true);
+        final uploadResult = await groupState.uploadMedia(
+          _selectedPhotoBytes!,
+          'image/jpeg',
+        );
+        pictureUrl = uploadResult.url;
+        setState(() => _isUploadingPhoto = false);
+
+        // 4. Update group metadata with the picture URL
+        final groupIdHex = newGroup.id.bytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+        await groupState.updateGroupMetadata(
+          groupIdHex: groupIdHex,
+          name: name,
+          about: about.isEmpty ? null : about,
+          picture: pictureUrl,
+        );
+      }
 
       widget.onCreated?.call();
       if (mounted) Navigator.of(context).pop();

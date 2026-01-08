@@ -22,6 +22,24 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 /// Function type for resolving MLS groups by group ID (hex string)
 typedef MlsGroupResolver = Future<MlsGroup?> Function(String groupIdHex);
 
+/// Result of publishing an event to the relay
+/// Contains the event ID, success status, and any message from the relay
+class PublishResult {
+  final String eventId;
+  final bool success;
+  final String message;
+
+  const PublishResult({
+    required this.eventId,
+    required this.success,
+    required this.message,
+  });
+
+  @override
+  String toString() =>
+      'PublishResult(eventId: $eventId, success: $success, message: $message)';
+}
+
 /// WebSocket-based Nostr service implementation with database caching
 class NostrService {
   final TorService _torService = TorService();
@@ -63,6 +81,15 @@ class NostrService {
 
   // Key pairs for re-signing queued encrypted events
   NostrKeyPairs? _keyPairs;
+
+  // Stream controller for publish results (OK messages from relay)
+  final StreamController<PublishResult> _publishResultController =
+      StreamController<PublishResult>.broadcast();
+
+  /// Stream of publish results from the relay
+  /// Listen to this stream to receive feedback on published events
+  /// including error messages like "only admins can...", "duplicate: already a member", etc.
+  Stream<PublishResult> get publishResults => _publishResultController.stream;
 
   NostrService(
     this._relayUrl, {
@@ -721,13 +748,21 @@ class NostrService {
     debugPrint('Relay notice: $notice');
   }
 
-  /// Handle OK messages
+  /// Handle OK messages from the relay
+  /// Emits to the publishResults stream so consumers can react to errors
   void _handleOkMessage(List<dynamic> data) {
     if (data.length < 4) return;
     final String eventId = data[1];
     final bool success = data[2];
     final String message = data[3];
     debugPrint('Event $eventId ${success ? 'accepted' : 'rejected'}: $message');
+
+    // Emit to the publish results stream
+    _publishResultController.add(PublishResult(
+      eventId: eventId,
+      success: success,
+      message: message,
+    ));
   }
 
   /// Generate a random subscription ID
@@ -989,10 +1024,13 @@ class NostrService {
   /// Events are automatically cached as they arrive
   /// [pTags] - Optional list of pubkeys to filter by recipient (#p tag)
   ///           Use this to receive events addressed to specific users (e.g., Welcome messages)
+  /// [tagKey] - Optional tag key to filter by (e.g., 'd' for addressable events, 'g' for group)
+  ///            If not provided, will auto-detect based on tag value format
   Stream<NostrEventModel> listenToEvents({
     required int kind,
     List<String>? authors,
     List<String>? tags,
+    String? tagKey,
     List<String>? pTags,
     DateTime? since,
     DateTime? until,
@@ -1022,10 +1060,10 @@ class NostrService {
     }
 
     if (tags != null && tags.isNotEmpty) {
-      // Support both 't' and 'g' tag filters
-      // If tags contain group IDs, use '#g' filter
-      // Otherwise, use '#t' filter
-      if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
+      // Use specified tagKey if provided, otherwise auto-detect
+      if (tagKey != null) {
+        filter['#$tagKey'] = tags;
+      } else if (tags.any((tag) => tag.length == 32 || tag.length == 64)) {
         // Looks like hex group IDs, use 'g' tag
         filter['#g'] = tags;
       } else {
@@ -1095,6 +1133,10 @@ class NostrService {
           since: since,
           until: until,
           limit: limit,
+        );
+
+        debugPrint(
+          'requestPastEvents: cache query for kind $kind, tagKey=$tagKey, tags=$tags returned ${cachedEvents.length} events',
         );
 
         // If we have cached events and no 'since' filter (meaning we want latest),
@@ -1183,6 +1225,7 @@ class NostrService {
 
     // Send the REQ message
     final List<dynamic> request = ['REQ', subscriptionId, filter];
+    debugPrint('requestPastEvents: sending REQ with filter: $filter');
     _sendMessage(request);
 
     // Set up EOSE handling

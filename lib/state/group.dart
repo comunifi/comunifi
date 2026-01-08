@@ -9,7 +9,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
-import 'package:comunifi/services/nostr/nostr.dart';
+import 'package:comunifi/services/nostr/nostr.dart' show NostrService;
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/services/mls/group_state/group_state.dart';
@@ -30,6 +30,8 @@ import 'package:comunifi/models/nostr_event.dart'
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
         kindGroupAdmins,
+        kindGroupMembers,
+        kindGroupMetadata,
         kindJoinRequest,
         kindMlsCommit,
         kindMlsWelcome,
@@ -52,6 +54,7 @@ import 'package:comunifi/services/whatsapp/whatsapp_import.dart';
 import 'package:comunifi/services/backup/backup_service.dart';
 import 'package:comunifi/services/backup/backup_models.dart';
 import 'package:comunifi/services/recovery/recovery_service.dart';
+import 'package:comunifi/services/db/preference.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -119,6 +122,10 @@ class GroupState with ChangeNotifier {
   AppDBService? _dbService;
   AppDBService? _eventDbService; // Separate DB for Nostr events
   NostrEventTable? _eventTable;
+  PreferenceTable? _preferenceTable;
+
+  // Migration key for one-time group list sync
+  static const _prefKeyGroupListMigration = 'group_list_migration_v1';
   MlsGroup? _personalGroup;
 
   // Completer for personal group initialization (needed before checking identity)
@@ -130,6 +137,11 @@ class GroupState with ChangeNotifier {
 
   // Map of group ID (hex) to MLS group for quick lookup
   final Map<String, MlsGroup> _mlsGroups = {};
+
+  // Map MLS group ID (hex) to NIP-29 group ID (hex)
+  // For groups we create, these are the same
+  // For groups we join via Welcome, they differ (MLS creates new group ID)
+  final Map<String, String> _mlsToNip29GroupId = {};
 
   // Map of group ID (hex) to group name from announcements (cached from DB)
   final Map<String, String> _groupNameCache = {};
@@ -269,6 +281,9 @@ class GroupState with ChangeNotifier {
           _errorMessage = null;
           safeNotifyListeners();
 
+          // Listen for publish results (relay errors)
+          _setupPublishResultListener();
+
           // Recover or generate Nostr key from relay (if needed)
           await _recoverOrGenerateNostrKey();
 
@@ -280,6 +295,8 @@ class GroupState with ChangeNotifier {
           await _startListeningForGroupEvents();
           // Sync group announcements to local DB
           _syncGroupAnnouncementsToDB();
+          // Run one-time group list migration for existing users
+          _runGroupListMigrationIfNeeded();
           // Note: Personal group creation is now handled in onboarding flow
           // Try to ensure user profile if callback is set
           _tryEnsureProfile();
@@ -850,10 +867,101 @@ class GroupState with ChangeNotifier {
       await _eventDbService!.init('nostr_events');
       _eventTable = NostrEventTable(_eventDbService!.database!);
       await _eventTable!.create(_eventDbService!.database!);
+
+      // Initialize preference table for migration flags
+      _preferenceTable = PreferenceTable(_eventDbService!.database!);
+      await _preferenceTable!.create(_eventDbService!.database!);
+
       debugPrint('Event database initialized for group announcements');
     } catch (e) {
       debugPrint('Failed to initialize event database: $e');
       // Continue without event DB - group name resolution will fall back to MLS groups
+    }
+  }
+
+  /// Run one-time migration to sync group list from relay (for existing users only)
+  /// This migration fetches all groups the user is a member of from the relay
+  /// and ensures they're in the local group list.
+  /// - For new users (no local groups): marks migration as done immediately
+  /// - For existing users: syncs groups from relay, then marks migration as done
+  Future<void> _runGroupListMigrationIfNeeded() async {
+    if (_preferenceTable == null || _nostrService == null || !_isConnected) {
+      debugPrint('Group list migration: prerequisites not ready');
+      return;
+    }
+
+    try {
+      // Check if local groups exist (loaded by _loadSavedGroups)
+      if (_groups.isEmpty) {
+        // New user - mark migration as done and skip
+        await _preferenceTable!.set(_prefKeyGroupListMigration, 'done');
+        debugPrint('Group list migration: new user, skipping');
+        return;
+      }
+
+      // Check if migration already ran
+      final migrationStatus =
+          await _preferenceTable!.get(_prefKeyGroupListMigration);
+      if (migrationStatus == 'done') {
+        debugPrint('Group list migration: already completed');
+        return;
+      }
+
+      debugPrint(
+        'Group list migration: starting for existing user with ${_groups.length} local groups',
+      );
+
+      // Get user's pubkey
+      final userPubkey = await getNostrPublicKey();
+      if (userPubkey == null) {
+        debugPrint('Group list migration: no pubkey available');
+        return;
+      }
+
+      // Fetch all kind 39002 (group-members) events where user is listed
+      // These are relay-generated events that list all members of each group
+      final memberEvents = await _nostrService!.requestPastEvents(
+        kind: kindGroupMembers,
+        limit: 1000,
+        useCache: false,
+      );
+
+      // Find groups where user is a member
+      final memberGroupIds = <String>{};
+      for (final event in memberEvents) {
+        // Get group ID from 'd' tag
+        String? groupIdHex;
+        bool isMember = false;
+
+        for (final tag in event.tags) {
+          if (tag.isEmpty) continue;
+          if (tag[0] == 'd' && tag.length > 1) {
+            groupIdHex = tag[1];
+          }
+          // Check if user's pubkey is in a 'p' tag
+          if (tag[0] == 'p' && tag.length > 1 && tag[1] == userPubkey) {
+            isMember = true;
+          }
+        }
+
+        if (groupIdHex != null && isMember) {
+          memberGroupIds.add(groupIdHex.toLowerCase());
+        }
+      }
+
+      debugPrint(
+        'Group list migration: found ${memberGroupIds.length} groups from relay',
+      );
+
+      // Refresh discovered groups to ensure we have metadata for all groups
+      await refreshDiscoveredGroups(limit: 1000);
+
+      // Mark migration as complete
+      await _preferenceTable!.set(_prefKeyGroupListMigration, 'done');
+      debugPrint('Group list migration: completed successfully');
+    } catch (e) {
+      debugPrint('Group list migration failed: $e');
+      // Don't mark as done on failure - will retry next time
     }
   }
 
@@ -971,18 +1079,34 @@ class GroupState with ChangeNotifier {
     if (_eventTable == null) return;
 
     try {
-      // Query all kind 9007 events (NIP-29 create-group) from DB
-      final events = await _eventTable!.query(
-        kind: kindCreateGroup,
+      // Query kind 39000 events (NIP-29 group metadata) from DB first
+      final metadataEvents = await _eventTable!.query(
+        kind: kindGroupMetadata,
         limit: 10000, // Load all cached events
       );
 
-      // Build cache from DB
-      for (final event in events) {
-        final announcement = _parseCreateGroupEvent(event);
+      // Build cache from 39000 events (preferred, relay-generated)
+      for (final event in metadataEvents) {
+        final announcement = _parseGroupMetadataEvent(event);
         if (announcement != null &&
             announcement.mlsGroupId != null &&
             announcement.name != null) {
+          _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+        }
+      }
+
+      // Also check kind 9007 events (create-group) as fallback
+      final createEvents = await _eventTable!.query(
+        kind: kindCreateGroup,
+        limit: 10000,
+      );
+
+      for (final event in createEvents) {
+        final announcement = _parseCreateGroupEvent(event);
+        if (announcement != null &&
+            announcement.mlsGroupId != null &&
+            announcement.name != null &&
+            !_groupNameCache.containsKey(announcement.mlsGroupId)) {
           _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
         }
       }
@@ -999,17 +1123,43 @@ class GroupState with ChangeNotifier {
     if (_eventTable == null) return [];
 
     try {
-      // Query all kind 9007 events (NIP-29 create-group) from DB
-      final events = await _eventTable!.query(
-        kind: kindCreateGroup,
+      // Query kind 39000 events (NIP-29 group metadata) from DB
+      final metadataEvents = await _eventTable!.query(
+        kind: kindGroupMetadata,
         limit: 10000, // Load all cached events
       );
 
       final announcements = <GroupAnnouncement>[];
-      for (final event in events) {
-        final announcement = _parseCreateGroupEvent(event);
-        if (announcement != null && announcement.mlsGroupId != null) {
+      final seenGroupIds = <String>{};
+
+      // Parse 39000 events first (preferred, relay-generated)
+      // Filter out personal groups (have 'p' tag)
+      for (final event in metadataEvents) {
+        final announcement = _parseGroupMetadataEvent(event);
+        if (announcement != null &&
+            announcement.mlsGroupId != null &&
+            !announcement.isPersonal) {
           announcements.add(announcement);
+          seenGroupIds.add(announcement.mlsGroupId!);
+        }
+      }
+
+      // Also check for kind 9007 events (create-group) as fallback
+      // for groups not yet having 39000 events cached
+      // Filter out personal groups (have 'personal' tag)
+      final createEvents = await _eventTable!.query(
+        kind: kindCreateGroup,
+        limit: 10000,
+      );
+
+      for (final event in createEvents) {
+        final announcement = _parseCreateGroupEvent(event);
+        if (announcement != null &&
+            announcement.mlsGroupId != null &&
+            !announcement.isPersonal &&
+            !seenGroupIds.contains(announcement.mlsGroupId)) {
+          announcements.add(announcement);
+          seenGroupIds.add(announcement.mlsGroupId!);
         }
       }
 
@@ -1031,6 +1181,10 @@ class GroupState with ChangeNotifier {
   void setDiscoveredGroupsFromCache(List<GroupAnnouncement> announcements) {
     _discoveredGroups = announcements;
     _rebuildAnnouncementCache();
+
+    // Migrate NIP-29 group ID mappings for existing groups
+    _migrateNip29GroupIdMappings();
+
     safeNotifyListeners();
   }
 
@@ -1043,7 +1197,7 @@ class GroupState with ChangeNotifier {
     }
 
     try {
-      debugPrint('Syncing group names from NIP-29 create-group events...');
+      debugPrint('Syncing group metadata from NIP-29 create-group events...');
 
       // Fetch create-group events (kind 9007) from relay
       final events = await _nostrService!.requestPastEvents(
@@ -1053,24 +1207,72 @@ class GroupState with ChangeNotifier {
       );
 
       int updatedCount = 0;
+      int metadataUpdatedCount = 0;
       for (final event in events) {
-        // Parse group ID from 'h' tag and name from 'name' tag
+        // Parse all metadata from tags
         String? groupIdHex;
         String? groupName;
+        String? picture;
+        String? about;
+        String? cover;
 
         for (final tag in event.tags) {
           if (tag.isNotEmpty && tag.length > 1) {
-            if (tag[0] == 'h') {
-              groupIdHex = tag[1];
-            } else if (tag[0] == 'name') {
-              groupName = tag[1];
+            switch (tag[0]) {
+              case 'h':
+                groupIdHex = tag[1];
+                break;
+              case 'name':
+                groupName = tag[1];
+                break;
+              case 'picture':
+                picture = tag[1];
+                break;
+              case 'about':
+                about = tag[1];
+                break;
+              case 'cover':
+                cover = tag[1];
+                break;
             }
           }
         }
 
         if (groupIdHex != null && groupName != null) {
-          // Update cache
+          // Update name cache
           _groupNameCache[groupIdHex] = groupName;
+
+          // Update announcement cache with missing metadata from kind 9007
+          final existing = _groupAnnouncementCache[groupIdHex];
+          if (existing != null) {
+            // Only update if we have new metadata that's missing in existing
+            if ((existing.picture == null && picture != null) ||
+                (existing.about == null && about != null) ||
+                (existing.cover == null && cover != null)) {
+              final updated = GroupAnnouncement(
+                eventId: existing.eventId,
+                pubkey: existing.pubkey,
+                name: existing.name ?? groupName,
+                about: existing.about ?? about,
+                picture: existing.picture ?? picture,
+                cover: existing.cover ?? cover,
+                mlsGroupId: existing.mlsGroupId,
+                createdAt: existing.createdAt,
+                isPersonal: existing.isPersonal,
+                personalPubkey: existing.personalPubkey,
+              );
+              _groupAnnouncementCache[groupIdHex] = updated;
+
+              // Also update in _discoveredGroups list
+              final index = _discoveredGroups.indexWhere(
+                (g) => g.mlsGroupId == groupIdHex,
+              );
+              if (index >= 0) {
+                _discoveredGroups[index] = updated;
+              }
+              metadataUpdatedCount++;
+            }
+          }
 
           // If this is a joined group, update its name in storage
           if (_mlsGroups.containsKey(groupIdHex) && _mlsStorage != null) {
@@ -1085,7 +1287,7 @@ class GroupState with ChangeNotifier {
       }
 
       debugPrint(
-        'Synced ${events.length} create-group events, updated $updatedCount joined groups',
+        'Synced ${events.length} create-group events, updated $updatedCount joined groups, $metadataUpdatedCount metadata updates',
       );
 
       // Reload groups to reflect name changes
@@ -1093,7 +1295,7 @@ class GroupState with ChangeNotifier {
         await _loadSavedGroups();
       }
     } catch (e) {
-      debugPrint('Failed to sync group names from create-group events: $e');
+      debugPrint('Failed to sync group metadata from create-group events: $e');
     }
   }
 
@@ -1112,19 +1314,25 @@ class GroupState with ChangeNotifier {
 
   /// Check if the current user is an admin of a specific group
   /// Uses NIP-29 kind 39001 (group admins list) events
-  Future<bool> isGroupAdmin(String groupIdHex) async {
+  ///
+  /// [mlsGroupIdHex] is the MLS group ID, which gets mapped to the NIP-29 group ID
+  Future<bool> isGroupAdmin(String mlsGroupIdHex) async {
     if (_nostrService == null || !_isConnected) {
       return false;
     }
+
+    // Get the NIP-29 group ID (may differ from MLS ID for joined groups)
+    final nip29GroupId = getNip29GroupId(mlsGroupIdHex);
 
     try {
       final pubkey = await getNostrPublicKey();
       if (pubkey == null) return false;
 
       // Query kind 39001 (group admins) events for this group
+      // Use NIP-29 group ID for the query
       final events = await _nostrService!.requestPastEvents(
         kind: kindGroupAdmins,
-        tags: [groupIdHex],
+        tags: [nip29GroupId],
         tagKey: 'd',
         limit: 1,
         useCache: true,
@@ -1154,30 +1362,50 @@ class GroupState with ChangeNotifier {
   /// Returns a list of NIP29GroupMember with pubkeys and roles
   /// If [forceRefresh] is true, bypasses the event cache to fetch fresh data from the relay
   ///
-  /// Always aggregates kind 9000 (put-user) and kind 9001 (remove-user) events directly
-  /// since many relays don't properly generate kind 39001/39002 aggregated lists.
-  /// Admin roles are extracted from kind 39001 or from kind 9000 events with role tags.
+  /// [mlsGroupIdHex] is the MLS group ID, which gets mapped to the NIP-29 group ID
+  /// for querying relay events.
+  ///
+  /// Fetches members from kind 39002 (group members) - the source of truth.
+  /// Admin roles are extracted from kind 39001 (group admins).
   Future<List<NIP29GroupMember>> getGroupMembers(
-    String groupIdHex, {
+    String mlsGroupIdHex, {
     bool forceRefresh = false,
   }) async {
     if (_nostrService == null || !_isConnected) {
       return [];
     }
 
+    // Get the NIP-29 group ID (may differ from MLS ID for joined groups)
+    final nip29GroupId = getNip29GroupId(mlsGroupIdHex);
+
     try {
       final members = <String, NIP29GroupMember>{};
 
-      // First, get admin roles from kind 39001 (if available)
-      // This preserves admin/moderator designations
-      final adminEvents = await _nostrService!.requestPastEvents(
-        kind: kindGroupAdmins,
-        tags: [groupIdHex],
+      debugPrint(
+        'getGroupMembers: querying kind 39002 for group $nip29GroupId (MLS: $mlsGroupIdHex, forceRefresh: $forceRefresh)',
+      );
+
+      // Query kind 39002 (group members) - source of truth for member list
+      // Use NIP-29 group ID for the query
+      final memberEvents = await _nostrService!.requestPastEvents(
+        kind: kindGroupMembers,
+        tags: [nip29GroupId],
         tagKey: 'd',
         limit: 1,
         useCache: !forceRefresh,
       );
 
+      // Query kind 39001 (group admins) for roles
+      // Use NIP-29 group ID for the query
+      final adminEvents = await _nostrService!.requestPastEvents(
+        kind: kindGroupAdmins,
+        tags: [nip29GroupId],
+        tagKey: 'd',
+        limit: 1,
+        useCache: !forceRefresh,
+      );
+
+      // Extract admin roles from kind 39001
       final adminRoles = <String, String>{};
       if (adminEvents.isNotEmpty) {
         final adminEvent = adminEvents.first;
@@ -1190,27 +1418,37 @@ class GroupState with ChangeNotifier {
         }
       }
 
-      // Always aggregate from kind 9000/9001 events directly
-      // This is the authoritative source since many relays don't generate 39001/39002
-      final aggregatedMembers = await _aggregateMembershipFromEvents(
-        groupIdHex,
-        forceRefresh: forceRefresh,
-      );
-
+      // Extract members from kind 39002
       debugPrint(
-        'getGroupMembers($groupIdHex): aggregated ${aggregatedMembers.length} members from kind 9000/9001',
+        'getGroupMembers($nip29GroupId): found ${memberEvents.length} kind 39002 events',
       );
 
-      // Merge: use aggregated members but apply admin roles from kind 39001
-      for (final entry in aggregatedMembers.entries) {
-        final pubkey = entry.key;
-        final member = entry.value;
-        // Prefer role from kind 39001 if available, otherwise use role from kind 9000
-        final role = adminRoles[pubkey] ?? member.role;
-        members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
+      if (memberEvents.isNotEmpty) {
+        final memberEvent = memberEvents.first;
+        debugPrint(
+          'getGroupMembers: processing event ${memberEvent.id.substring(0, 8)}... with ${memberEvent.tags.length} tags',
+        );
+
+        for (final tag in memberEvent.tags) {
+          if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
+            final pubkey = tag[1];
+            // Get role from kind 39002 p tag (third element if present)
+            final roleFrom39002 = tag.length >= 3 ? tag[2] : null;
+            // Prefer role from kind 39001 (admin/moderator), otherwise use role from 39002
+            final role = adminRoles[pubkey] ?? roleFrom39002;
+            members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
+            debugPrint(
+              'getGroupMembers: added member ${pubkey.substring(0, 8)}... with role: $role',
+            );
+          }
+        }
       }
 
-      // Sort: admins first, then by pubkey
+      debugPrint(
+        'getGroupMembers($nip29GroupId): total ${members.length} members',
+      );
+
+      // Sort: admins first, then moderators, then by pubkey
       final memberList = members.values.toList();
       memberList.sort((a, b) {
         if (a.isAdmin && !b.isAdmin) return -1;
@@ -1227,115 +1465,25 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Aggregate group membership by querying kind 9000 (put-user) and kind 9001 (remove-user)
-  /// events directly. This is a fallback when relay-generated kind 39001/39002 events
-  /// are not available.
-  ///
-  /// For each user, we compare the latest put-user vs remove-user timestamp.
-  /// If put-user is more recent (or no remove-user exists), the user is a member.
-  Future<Map<String, NIP29GroupMember>> _aggregateMembershipFromEvents(
-    String groupIdHex, {
-    bool forceRefresh = false,
-  }) async {
-    if (_nostrService == null || !_isConnected) {
-      return {};
-    }
-
-    try {
-      // Query all kind 9000 (put-user) events for this group
-      final putUserEvents = await _nostrService!.requestPastEvents(
-        kind: kindPutUser,
-        tags: [groupIdHex],
-        tagKey: 'h',
-        limit: 500,
-        useCache: !forceRefresh,
-      );
-
-      debugPrint(
-        '_aggregateMembershipFromEvents($groupIdHex): found ${putUserEvents.length} put-user events',
-      );
-
-      // Query all kind 9001 (remove-user) events for this group
-      final removeUserEvents = await _nostrService!.requestPastEvents(
-        kind: kindRemoveUser,
-        tags: [groupIdHex],
-        tagKey: 'h',
-        limit: 500,
-        useCache: !forceRefresh,
-      );
-
-      // Build maps of latest event per user
-      // Map<pubkey, (DateTime timestamp, String? role)>
-      final latestPutByUser = <String, (DateTime, String?)>{};
-      final latestRemoveByUser = <String, DateTime>{};
-
-      // Process put-user events
-      for (final event in putUserEvents) {
-        for (final tag in event.tags) {
-          if (tag.length >= 2 && tag[0] == 'p') {
-            final pubkey = tag[1];
-            final role = tag.length >= 3 ? tag[2] : null;
-            final existing = latestPutByUser[pubkey];
-            if (existing == null || event.createdAt.isAfter(existing.$1)) {
-              latestPutByUser[pubkey] = (event.createdAt, role);
-            }
-          }
-        }
-      }
-
-      debugPrint(
-        '_aggregateMembershipFromEvents: extracted ${latestPutByUser.length} unique users from put-user events',
-      );
-
-      // Process remove-user events
-      for (final event in removeUserEvents) {
-        for (final tag in event.tags) {
-          if (tag.length >= 2 && tag[0] == 'p') {
-            final pubkey = tag[1];
-            final existing = latestRemoveByUser[pubkey];
-            if (existing == null || event.createdAt.isAfter(existing)) {
-              latestRemoveByUser[pubkey] = event.createdAt;
-            }
-          }
-        }
-      }
-
-      // Determine current members: put-user is more recent than remove-user
-      final members = <String, NIP29GroupMember>{};
-      for (final entry in latestPutByUser.entries) {
-        final pubkey = entry.key;
-        final (putTime, role) = entry.value;
-        final removeTime = latestRemoveByUser[pubkey];
-
-        // User is a member if no remove-user or put-user is more recent
-        if (removeTime == null || putTime.isAfter(removeTime)) {
-          members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
-        }
-      }
-
-      debugPrint(
-        '_aggregateMembershipFromEvents: final member count: ${members.length}',
-      );
-
-      return members;
-    } catch (e) {
-      debugPrint('Failed to aggregate membership from events: $e');
-      return {};
-    }
-  }
-
   /// Get pending join requests for a group (kind 9021 per NIP-29)
   /// Returns only requests from users who are not already members
-  Future<List<JoinRequest>> getJoinRequests(String groupIdHex) async {
+  /// Get pending join requests for a group (kind 9021 per NIP-29)
+  ///
+  /// [mlsGroupIdHex] is the MLS group ID, which gets mapped to the NIP-29 group ID
+  Future<List<JoinRequest>> getJoinRequests(String mlsGroupIdHex) async {
     if (_nostrService == null || !_isConnected) {
       return [];
     }
 
+    // Get the NIP-29 group ID (may differ from MLS ID for joined groups)
+    final nip29GroupId = getNip29GroupId(mlsGroupIdHex);
+
     try {
       // Query kind 9021 (join-request) events for this group
+      // Use NIP-29 group ID for the query
       final events = await _nostrService!.requestPastEvents(
         kind: kindJoinRequest,
-        tags: [groupIdHex],
+        tags: [nip29GroupId],
         tagKey: 'h',
         limit: 100,
         useCache: true,
@@ -1346,7 +1494,7 @@ class GroupState with ChangeNotifier {
       }
 
       // Get current members to filter out already-approved requests
-      final members = await getGroupMembers(groupIdHex);
+      final members = await getGroupMembers(mlsGroupIdHex);
       final memberPubkeys = members.map((m) => m.pubkey).toSet();
 
       final requests = <JoinRequest>[];
@@ -1377,15 +1525,15 @@ class GroupState with ChangeNotifier {
           }
         }
 
-        // Only include if group ID matches
-        if (eventGroupId != groupIdHex) {
+        // Only include if group ID matches the NIP-29 group ID
+        if (eventGroupId != nip29GroupId) {
           continue;
         }
 
         requests.add(
           JoinRequest(
             pubkey: event.pubkey,
-            groupIdHex: groupIdHex,
+            groupIdHex: nip29GroupId,
             reason: event.content.isNotEmpty ? event.content : null,
             createdAt: event.createdAt,
             eventId: event.id,
@@ -1469,6 +1617,17 @@ class GroupState with ChangeNotifier {
   List<NostrEventModel> _groupMessages = [];
   List<GroupAnnouncement> _discoveredGroups = [];
   bool _isLoadingGroups = false;
+
+  // Relay error stream for surfacing errors to UI
+  final StreamController<String> _relayErrorController =
+      StreamController<String>.broadcast();
+
+  /// Stream of relay error messages for UI display
+  /// Emits user-friendly error messages from the relay (e.g., "only admins can...", "duplicate: already a member")
+  Stream<String> get relayErrors => _relayErrorController.stream;
+
+  // Subscription for publish results from NostrService
+  StreamSubscription<dynamic>? _publishResultSubscription;
 
   // All group messages across all groups (persists across group switches)
   // Used for showing group messages in the main unified feed
@@ -1598,6 +1757,16 @@ class GroupState with ChangeNotifier {
     return groupId.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
+  /// Get the NIP-29 group ID for an MLS group
+  ///
+  /// For groups we create, MLS group ID = NIP-29 group ID (same)
+  /// For groups we join via Welcome, they differ because MLS creates a new group ID
+  ///
+  /// Returns the mapped NIP-29 ID, or the MLS ID if no mapping exists
+  String getNip29GroupId(String mlsGroupIdHex) {
+    return _mlsToNip29GroupId[mlsGroupIdHex] ?? mlsGroupIdHex;
+  }
+
   // state methods here
   Future<void> _loadSavedGroups() async {
     if (_mlsService == null || _dbService?.database == null) return;
@@ -1653,10 +1822,62 @@ class GroupState with ChangeNotifier {
 
       _isLoading = false;
       safeNotifyListeners();
+
+      // Migrate existing groups: populate NIP-29 group ID mapping
+      // This handles groups that were joined before the mapping was implemented
+      _migrateNip29GroupIdMappings();
     } catch (e) {
       _isLoading = false;
       _errorMessage = 'Failed to load groups: $e';
       safeNotifyListeners();
+    }
+  }
+
+  /// Migrate existing groups to populate the NIP-29 group ID mapping
+  ///
+  /// For groups joined before this mapping was implemented, we try to find
+  /// the corresponding GroupAnnouncement by name and extract the NIP-29 group ID.
+  void _migrateNip29GroupIdMappings() {
+    if (_groups.isEmpty || _discoveredGroups.isEmpty) return;
+
+    int migrated = 0;
+    for (final group in _groups) {
+      final mlsGroupIdHex = _groupIdToHex(group.id);
+
+      // Skip if already has a mapping
+      if (_mlsToNip29GroupId.containsKey(mlsGroupIdHex)) {
+        continue;
+      }
+
+      // Try to find a matching GroupAnnouncement by name
+      // The announcement's mlsGroupId is actually the NIP-29 group ID (from 'd' tag)
+      final matchingAnnouncement = _discoveredGroups.firstWhere(
+        (a) =>
+            a.name != null &&
+            a.name!.toLowerCase() == group.name.toLowerCase() &&
+            a.mlsGroupId != null &&
+            a.mlsGroupId != mlsGroupIdHex, // Only if different
+        orElse: () => GroupAnnouncement(
+          eventId: '',
+          pubkey: '',
+          createdAt: DateTime.now(),
+        ),
+      );
+
+      if (matchingAnnouncement.mlsGroupId != null &&
+          matchingAnnouncement.mlsGroupId!.isNotEmpty) {
+        _mlsToNip29GroupId[mlsGroupIdHex] = matchingAnnouncement.mlsGroupId!;
+        migrated++;
+        debugPrint(
+          'Migrated NIP-29 group ID mapping: MLS ${mlsGroupIdHex.substring(0, 8)}... -> NIP-29 ${matchingAnnouncement.mlsGroupId!.substring(0, 8)}... (${group.name})',
+        );
+      }
+    }
+
+    if (migrated > 0) {
+      debugPrint(
+        '_migrateNip29GroupIdMappings: migrated $migrated groups',
+      );
     }
   }
 
@@ -2307,11 +2528,41 @@ class GroupState with ChangeNotifier {
     return addedCount;
   }
 
+  /// Setup listener for publish results from the relay
+  /// Surfaces error messages to the UI via the relayErrors stream
+  void _setupPublishResultListener() {
+    if (_nostrService == null) return;
+
+    // Cancel existing subscription if any
+    _publishResultSubscription?.cancel();
+
+    // Listen for publish results (OK messages from relay)
+    _publishResultSubscription = _nostrService!.publishResults.listen(
+      (result) {
+        if (!result.success && result.message.isNotEmpty) {
+          // Emit error message to the relay errors stream
+          _relayErrorController.add(result.message);
+          debugPrint('Relay error: ${result.message}');
+        }
+      },
+      onError: (error) {
+        debugPrint('Error in publish results listener: $error');
+      },
+    );
+
+    debugPrint('Setup publish result listener');
+  }
+
   /// Start listening for new group events
   /// Note: Groups are now MLS-based, so we just refresh the list periodically
   /// Also listens for Welcome messages (kind 1060) and NIP-29 create-group events (kind 9007)
   // Subscription for encrypted envelopes (reactions + messages from all groups)
   StreamSubscription<NostrEventModel>? _encryptedEnvelopeSubscription;
+
+  // Subscriptions for NIP-29 group metadata updates (39xxx events)
+  StreamSubscription<NostrEventModel>? _groupMetadataSubscription;
+  StreamSubscription<NostrEventModel>? _groupAdminsSubscription;
+  StreamSubscription<NostrEventModel>? _groupMembersSubscription;
 
   Future<void> _startListeningForGroupEvents() async {
     if (_nostrService == null || !_isConnected) return;
@@ -2445,6 +2696,10 @@ class GroupState with ChangeNotifier {
             },
           );
 
+      // Subscribe to NIP-29 39xxx events for real-time group state updates
+      // These are emitted by the relay when it processes 90xx moderation events
+      _startListeningForGroupMetadataUpdates();
+
       // Listen for ALL encrypted envelopes (kind 1059) to receive posts and reactions from all groups
       // This ensures events are received in real-time regardless of which group is active
       _startListeningForAllGroupEvents();
@@ -2525,6 +2780,219 @@ class GroupState with ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to start listening for group events: $e');
     }
+  }
+
+  /// Start listening for NIP-29 group metadata updates (39000, 39001, 39002)
+  /// These events are emitted by the relay when it processes 90xx moderation events
+  void _startListeningForGroupMetadataUpdates() {
+    if (_nostrService == null || !_isConnected) return;
+
+    // Get the list of group IDs we're a member of
+    final groupIds = _mlsGroups.keys.toList();
+    if (groupIds.isEmpty) {
+      debugPrint('No groups to listen for metadata updates');
+      return;
+    }
+
+    try {
+      // Cancel existing subscriptions
+      _groupMetadataSubscription?.cancel();
+      _groupAdminsSubscription?.cancel();
+      _groupMembersSubscription?.cancel();
+
+      // Subscribe to kind 39000 (group metadata) updates
+      _groupMetadataSubscription = _nostrService!
+          .listenToEvents(
+            kind: kindGroupMetadata,
+            tags: groupIds,
+            tagKey: 'd',
+            limit: null,
+          )
+          .listen(
+            (event) => _handleGroupMetadataUpdate(event),
+            onError: (error) {
+              debugPrint('Error listening to group metadata events: $error');
+            },
+          );
+
+      // Subscribe to kind 39001 (group admins) updates
+      _groupAdminsSubscription = _nostrService!
+          .listenToEvents(
+            kind: kindGroupAdmins,
+            tags: groupIds,
+            tagKey: 'd',
+            limit: null,
+          )
+          .listen(
+            (event) => _handleGroupAdminsUpdate(event),
+            onError: (error) {
+              debugPrint('Error listening to group admins events: $error');
+            },
+          );
+
+      // Subscribe to kind 39002 (group members) updates
+      _groupMembersSubscription = _nostrService!
+          .listenToEvents(
+            kind: kindGroupMembers,
+            tags: groupIds,
+            tagKey: 'd',
+            limit: null,
+          )
+          .listen(
+            (event) => _handleGroupMembersUpdate(event),
+            onError: (error) {
+              debugPrint('Error listening to group members events: $error');
+            },
+          );
+
+      debugPrint(
+        'Started listening for 39xxx metadata updates (${groupIds.length} groups)',
+      );
+    } catch (e) {
+      debugPrint('Failed to start listening for metadata updates: $e');
+    }
+  }
+
+  /// Handle kind 39000 (group metadata) event from relay
+  void _handleGroupMetadataUpdate(NostrEventModel event) {
+    if (event.kind != kindGroupMetadata) return;
+
+    // Extract group ID from 'd' tag
+    String? groupIdHex;
+    String? name;
+    String? about;
+    String? picture;
+
+    for (final tag in event.tags) {
+      if (tag.isEmpty || tag.length < 2) continue;
+
+      switch (tag[0]) {
+        case 'd':
+          groupIdHex = tag[1];
+          break;
+        case 'name':
+          name = tag[1];
+          break;
+        case 'about':
+          about = tag[1];
+          break;
+        case 'picture':
+          picture = tag[1];
+          break;
+      }
+    }
+
+    if (groupIdHex == null) {
+      debugPrint('Group metadata event missing group ID (d tag)');
+      return;
+    }
+
+    debugPrint('Received group metadata update for group $groupIdHex');
+
+    // Update name cache
+    if (name != null) {
+      _groupNameCache[groupIdHex] = name;
+    }
+
+    // Update discovered groups list
+    final index = _discoveredGroups.indexWhere(
+      (g) => g.mlsGroupId == groupIdHex,
+    );
+
+    if (index >= 0) {
+      final existing = _discoveredGroups[index];
+      final updatedAnnouncement = GroupAnnouncement(
+        eventId: event.id,
+        pubkey: existing.pubkey,
+        name: name ?? existing.name,
+        about: about ?? existing.about,
+        picture: picture ?? existing.picture,
+        cover: existing.cover,
+        mlsGroupId: existing.mlsGroupId,
+        createdAt: event.createdAt,
+        isPersonal: existing.isPersonal,
+        personalPubkey: existing.personalPubkey,
+      );
+      _discoveredGroups[index] = updatedAnnouncement;
+      _groupAnnouncementCache[groupIdHex] = updatedAnnouncement;
+
+      debugPrint('Applied group metadata update for $groupIdHex');
+      safeNotifyListeners();
+    }
+  }
+
+  /// Handle kind 39001 (group admins) event from relay
+  void _handleGroupAdminsUpdate(NostrEventModel event) {
+    if (event.kind != kindGroupAdmins) return;
+
+    // Extract group ID from 'd' tag
+    String? groupIdHex;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'd' && tag.length >= 2) {
+        groupIdHex = tag[1];
+        break;
+      }
+    }
+
+    if (groupIdHex == null) {
+      debugPrint('Group admins event missing group ID (d tag)');
+      return;
+    }
+
+    // Extract admin pubkeys from 'p' tags
+    final adminPubkeys = <String>[];
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
+        adminPubkeys.add(tag[1]);
+      }
+    }
+
+    debugPrint(
+      'Received group admins update for $groupIdHex: ${adminPubkeys.length} admins',
+    );
+
+    // Invalidate membership cache to force refresh on next access
+    _membershipCacheLoaded = false;
+
+    // Notify listeners so UI can refresh if needed
+    safeNotifyListeners();
+  }
+
+  /// Handle kind 39002 (group members) event from relay
+  void _handleGroupMembersUpdate(NostrEventModel event) {
+    if (event.kind != kindGroupMembers) return;
+
+    // Extract group ID from 'd' tag
+    String? groupIdHex;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'd' && tag.length >= 2) {
+        groupIdHex = tag[1];
+        break;
+      }
+    }
+
+    if (groupIdHex == null) {
+      debugPrint('Group members event missing group ID (d tag)');
+      return;
+    }
+
+    // Extract member pubkeys from 'p' tags
+    final memberPubkeys = <String>[];
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
+        memberPubkeys.add(tag[1]);
+      }
+    }
+
+    debugPrint(
+      'Received group members update for $groupIdHex: ${memberPubkeys.length} members',
+    );
+
+    // Invalidate membership cache to force refresh on next access
+    _membershipCacheLoaded = false;
+
+    // Notify listeners so UI can refresh if needed
+    safeNotifyListeners();
   }
 
   /// Handle a decrypted kind 1 post from any group
@@ -3454,7 +3922,8 @@ class GroupState with ChangeNotifier {
     await _initialize();
   }
 
-  /// Fetch NIP-29 create-group events from the relay with pagination
+  /// Fetch NIP-29 group metadata events from the relay with pagination
+  /// Uses kind 39000 (group metadata) which is relay-generated
   /// [limit] - Maximum number of groups to fetch (default: 50)
   /// [since] - Only fetch groups created after this timestamp (for pagination)
   /// [until] - Only fetch groups created before this timestamp (for pagination)
@@ -3474,10 +3943,11 @@ class GroupState with ChangeNotifier {
       _isLoadingGroups = true;
       safeNotifyListeners();
 
-      // Request NIP-29 create-group events (kind 9007)
+      // Request NIP-29 group metadata events (kind 39000)
+      // These are relay-generated addressable events containing group info
       // Disable cache when paginating (until is set) or when explicitly disabled
       final events = await _nostrService!.requestPastEvents(
-        kind: kindCreateGroup,
+        kind: kindGroupMetadata,
         since: since,
         until: until,
         limit: limit,
@@ -3488,9 +3958,16 @@ class GroupState with ChangeNotifier {
       );
 
       // Parse events into GroupAnnouncement objects and update caches
+      // Filter out personal groups (those with 'p' tag) from the public list
       final announcements = <GroupAnnouncement>[];
       for (final event in events) {
-        final announcement = _parseCreateGroupEvent(event);
+        // Skip personal groups (have 'p' tag indicating owner's pubkey)
+        final isPersonal = event.tags.any(
+          (tag) => tag.isNotEmpty && tag[0] == 'p',
+        );
+        if (isPersonal) continue;
+
+        final announcement = _parseGroupMetadataEvent(event);
         if (announcement != null) {
           announcements.add(announcement);
 
@@ -3508,7 +3985,7 @@ class GroupState with ChangeNotifier {
           try {
             await _eventTable!.insert(event);
           } catch (e) {
-            debugPrint('Failed to store create-group event: $e');
+            debugPrint('Failed to store group metadata event: $e');
           }
         }
       }
@@ -3525,6 +4002,57 @@ class GroupState with ChangeNotifier {
       _errorMessage = 'Failed to fetch groups from relay: $e';
       safeNotifyListeners();
       rethrow;
+    }
+  }
+
+  /// Fetch the user's personal group from the relay
+  /// Personal groups have a 'p' tag containing the owner's pubkey
+  /// Returns the GroupAnnouncement if found, null otherwise
+  Future<GroupAnnouncement?> fetchPersonalGroupFromRelay() async {
+    if (!_isConnected || _nostrService == null) {
+      return null;
+    }
+
+    try {
+      final pubkey = await getNostrPublicKey();
+      if (pubkey == null) {
+        debugPrint('Cannot fetch personal group: no pubkey available');
+        return null;
+      }
+
+      // Query kind 39000 events filtered by 'p' tag with our pubkey
+      final events = await _nostrService!.requestPastEvents(
+        kind: kindGroupMetadata,
+        tags: [pubkey],
+        tagKey: 'p', // Filter by #p tag (personal groups)
+        limit: 1,
+        useCache: false, // Always fetch fresh from relay
+      );
+
+      if (events.isEmpty) {
+        debugPrint('No personal group found for pubkey ${pubkey.substring(0, 8)}...');
+        return null;
+      }
+
+      final announcement = _parseGroupMetadataEvent(events.first);
+      if (announcement != null) {
+        debugPrint(
+          'Found personal group: ${announcement.mlsGroupId?.substring(0, 8)}...',
+        );
+
+        // Update caches
+        if (announcement.mlsGroupId != null) {
+          _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+          if (announcement.name != null) {
+            _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+          }
+        }
+      }
+
+      return announcement;
+    } catch (e) {
+      debugPrint('Failed to fetch personal group from relay: $e');
+      return null;
     }
   }
 
@@ -3564,6 +4092,9 @@ class GroupState with ChangeNotifier {
     // Build announcement cache for O(1) lookup
     _rebuildAnnouncementCache();
 
+    // Migrate NIP-29 group ID mappings for existing groups
+    _migrateNip29GroupIdMappings();
+
     // Also sync group names from NIP-29 create-group events (kind 9007)
     // This ensures we have the correct names for groups created with NIP-29
     await syncGroupNamesFromCreateEvents();
@@ -3585,8 +4116,25 @@ class GroupState with ChangeNotifier {
   }
 
   /// Get group announcement by hex ID - O(1) lookup
+  /// Handles mapping from MLS group ID to NIP-29 group ID for joined groups
   GroupAnnouncement? getGroupAnnouncementByHexId(String groupIdHex) {
-    return _groupAnnouncementCache[groupIdHex];
+    // First try direct lookup (works for groups we created)
+    final direct = _groupAnnouncementCache[groupIdHex];
+    if (direct != null) return direct;
+
+    // Try with NIP-29 group ID mapping (for joined groups where IDs differ)
+    final nip29GroupId = getNip29GroupId(groupIdHex);
+    if (nip29GroupId != groupIdHex) {
+      return _groupAnnouncementCache[nip29GroupId];
+    }
+
+    // Also try lowercase version in case of case mismatch
+    final lowercaseId = groupIdHex.toLowerCase();
+    if (lowercaseId != groupIdHex) {
+      return _groupAnnouncementCache[lowercaseId];
+    }
+
+    return null;
   }
 
   /// Sync edit-metadata events (kind 9002) and apply updates to discovered groups
@@ -3667,6 +4215,67 @@ class GroupState with ChangeNotifier {
           personalPubkey = tag[1];
           break;
       }
+    }
+
+    return GroupAnnouncement(
+      eventId: event.id,
+      pubkey: event.pubkey,
+      name: name,
+      about: about,
+      picture: picture,
+      cover: cover,
+      mlsGroupId: mlsGroupId,
+      createdAt: event.createdAt,
+      isPersonal: personalPubkey != null,
+      personalPubkey: personalPubkey,
+    );
+  }
+
+  /// Parse a NIP-29 group metadata event (kind 39000) into a GroupAnnouncement
+  /// Kind 39000 uses 'd' tag for group ID (addressable event format)
+  GroupAnnouncement? _parseGroupMetadataEvent(NostrEventModel event) {
+    if (event.kind != kindGroupMetadata) {
+      return null;
+    }
+
+    // Extract group ID from 'd' tag (addressable event format)
+    String? mlsGroupId;
+    String? name;
+    String? about;
+    String? picture;
+    String? cover;
+    String? personalPubkey;
+
+    for (final tag in event.tags) {
+      if (tag.isEmpty || tag.length < 2) continue;
+
+      // Key-value tags
+      switch (tag[0]) {
+        case 'd':
+          mlsGroupId = tag[1];
+          break;
+        case 'name':
+          name = tag[1];
+          break;
+        case 'about':
+          about = tag[1];
+          break;
+        case 'picture':
+          picture = tag[1];
+          break;
+        case 'cover':
+          cover = tag[1];
+          break;
+        case 'p':
+          // 'p' tag indicates this is a personal group, with the owner's pubkey
+          personalPubkey = tag[1];
+          break;
+      }
+    }
+
+    // Group ID is required
+    if (mlsGroupId == null) {
+      return null;
     }
 
     return GroupAnnouncement(
@@ -4185,6 +4794,16 @@ class GroupState with ChangeNotifier {
       throw Exception('MLS service not initialized');
     }
 
+    // Extract NIP-29 group ID from 'g' tag (set by the inviter)
+    // This is the original group ID used in NIP-29 events (kind 39xxx)
+    String? nip29GroupId;
+    for (final tag in welcomeEvent.tags) {
+      if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+        nip29GroupId = tag[1];
+        break;
+      }
+    }
+
     try {
       // Deserialize Welcome message
       final welcome = Welcome.fromJson(welcomeEvent.content);
@@ -4232,14 +4851,26 @@ class GroupState with ChangeNotifier {
       final groupIdHex = _groupIdToHex(group.id);
       _mlsGroups[groupIdHex] = group;
 
+      // Store mapping from MLS group ID to NIP-29 group ID
+      // For joined groups, these IDs differ (MLS creates new group ID)
+      if (nip29GroupId != null && nip29GroupId != groupIdHex) {
+        _mlsToNip29GroupId[groupIdHex] = nip29GroupId;
+        debugPrint(
+          'Stored NIP-29 group ID mapping: MLS $groupIdHex -> NIP-29 $nip29GroupId',
+        );
+      }
+
       // Try to get the proper group name from relay announcement
-      String? properGroupName = getGroupName(groupIdHex);
+      // Use NIP-29 group ID for lookups (not MLS group ID)
+      final lookupGroupId = nip29GroupId ?? groupIdHex;
+      String? properGroupName = getGroupName(lookupGroupId);
       if (properGroupName == null) {
         // Fetch NIP-29 create-group event (kind 9007) from relay to get the name
+        // Use NIP-29 group ID (not MLS group ID) for the query
         try {
           final createGroupEvents = await _nostrService!.requestPastEvents(
             kind: kindCreateGroup,
-            tags: [groupIdHex],
+            tags: [lookupGroupId],
             tagKey: 'h', // NIP-29 uses 'h' tag for group ID
             limit: 1,
             useCache: false,
@@ -4250,7 +4881,11 @@ class GroupState with ChangeNotifier {
             for (final tag in event.tags) {
               if (tag.isNotEmpty && tag[0] == 'name' && tag.length > 1) {
                 properGroupName = tag[1];
+                // Cache under both MLS and NIP-29 group IDs for lookups
                 _groupNameCache[groupIdHex] = properGroupName;
+                if (lookupGroupId != groupIdHex) {
+                  _groupNameCache[lookupGroupId] = properGroupName;
+                }
                 break;
               }
             }

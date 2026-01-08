@@ -204,33 +204,35 @@ The `_CreateGroupModal` provides a bottom sheet for creating groups:
 
 ### NIP-29 Membership Determination
 
-Group membership is determined by NIP-29 events from the relay:
+Group membership is determined by relay-generated NIP-29 events:
 
 | Kind | Name | Purpose |
 |------|------|---------|
-| 9000 | put-user | User was added to group |
-| 9001 | remove-user | User was removed from group |
+| 39001 | group-admins | List of group admins/moderators with roles |
+| 39002 | group-members | List of all group members |
 
 **Membership Logic:**
-A user is considered a member of a group if their latest `kind 9000` (put-user) event is more recent than their latest `kind 9001` (remove-user) event, or if no remove-user event exists.
+Kind 39002 is the source of truth for the member list. The relay generates this event by aggregating kind 9000 (put-user) and kind 9001 (remove-user) events internally.
 
 ```dart
-/// Check if user is a member based on NIP-29 events
-Future<bool> isUserMemberOfGroup(String groupIdHex, String userPubkey) async {
-  // Query kind 9000 (put-user) events for this user in this group
-  final putEvents = await requestPastEvents(kind: 9000, tags: [groupIdHex], tagKey: 'h');
-  final userPutEvents = putEvents.where((e) => e.hasUserInPTag(userPubkey));
+/// Get group members from NIP-29 events
+Future<List<NIP29GroupMember>> getGroupMembers(String groupIdHex) async {
+  // Query kind 39002 (group members) - source of truth
+  final memberEvents = await requestPastEvents(
+    kind: 39002,
+    tags: [groupIdHex],
+    tagKey: 'd',
+  );
   
-  if (userPutEvents.isEmpty) return false; // Never added
+  // Query kind 39001 (group admins) for roles
+  final adminEvents = await requestPastEvents(
+    kind: 39001,
+    tags: [groupIdHex],
+    tagKey: 'd',
+  );
   
-  // Query kind 9001 (remove-user) events  
-  final removeEvents = await requestPastEvents(kind: 9001, tags: [groupIdHex], tagKey: 'h');
-  final userRemoveEvents = removeEvents.where((e) => e.hasUserInPTag(userPubkey));
-  
-  if (userRemoveEvents.isEmpty) return true; // Added but never removed
-  
-  // Member if added after last removal
-  return latestPutTime.isAfter(latestRemoveTime);
+  // Extract members and merge with admin roles
+  // ...
 }
 ```
 
@@ -242,14 +244,14 @@ Groups are filtered based on NIP-29 membership. Personal groups (groups the user
 List<_GroupItem> _buildGroupList(GroupState groupState) {
   final allGroups = <_GroupItem>[];
 
-  // Filter based on NIP-29 membership (kind 9000/9001 events)
+  // Filter based on NIP-29 membership (kind 39002)
   for (final announcement in groupState.discoveredGroups) {
     // Skip the auto-created "Personal" group
     final isPersonalGroup = announcement.pubkey == userPubkey &&
         announcement.name?.toLowerCase() == 'personal';
     if (isPersonalGroup) continue;
 
-    // Check NIP-29 membership
+    // Check NIP-29 membership via kind 39002
     final isMember = memberships[announcement.mlsGroupId] ?? false;
     if (!isMember) continue;
 
@@ -271,8 +273,8 @@ List<_GroupItem> _buildGroupList(GroupState groupState) {
 ```
 
 **Filtering Rules:**
-- Groups are filtered based on NIP-29 membership events (kind 9000/9001)
-- User is a member if latest kind 9000 (put-user) is after latest kind 9001 (remove-user)
+- Groups are filtered based on kind 39002 (group members) events
+- Kind 39002 is the source of truth for the member list
 - Only the auto-created "Personal" group is hidden from the sidebar (other user-created groups are shown)
 
 ## Key Files
@@ -291,4 +293,7 @@ List<_GroupItem> _buildGroupList(GroupState groupState) {
 | 9001 | remove-user | Remove member from group |
 | 9002 | edit-metadata | Update group name/about/picture |
 | 9007 | create-group | Announce group creation |
-| 39001 | group-admins | List of group admins |
+| 9021 | join-request | User requests to join a group |
+| 39000 | group-metadata | Group metadata (relay-generated) |
+| 39001 | group-admins | List of group admins (relay-generated) |
+| 39002 | group-members | List of group members (relay-generated, source of truth) |

@@ -198,20 +198,15 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
       // Get announcement for metadata (name, picture, etc.)
       final announcement = groupState.getGroupAnnouncementByHexId(groupIdHex);
 
-      // Skip personal groups
-      if (announcement != null) {
-        final isPersonalGroup =
-            announcement.isPersonal &&
-            announcement.personalPubkey == _userNostrPubkey;
-        if (isPersonalGroup) {
-          continue;
-        }
-      } else {
-        // No announcement - skip if it looks like a personal group by name
-        if (_userNostrPubkey != null &&
-            mlsGroup.name.toLowerCase().contains(_userNostrPubkey!.substring(0, 8).toLowerCase())) {
-          continue;
-        }
+      // Skip ALL personal groups (not just user's own)
+      if (announcement != null && announcement.isPersonal) {
+        continue;
+      }
+      // No announcement - skip if it looks like a personal group by name
+      if (announcement == null &&
+          _userNostrPubkey != null &&
+          mlsGroup.name.toLowerCase().contains(_userNostrPubkey!.substring(0, 8).toLowerCase())) {
+        continue;
       }
 
       final isCreator = announcement?.pubkey == _userNostrPubkey;
@@ -238,11 +233,8 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
         continue;
       }
 
-      // Skip personal groups
-      final isPersonalGroup =
-          announcement.isPersonal &&
-          announcement.personalPubkey == _userNostrPubkey;
-      if (isPersonalGroup) {
+      // Skip ALL personal groups (not just user's own)
+      if (announcement.isPersonal) {
         continue;
       }
 
