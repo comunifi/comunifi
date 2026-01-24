@@ -11,6 +11,7 @@ import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/services/profile/profile.dart' show ProfileData;
 import 'package:comunifi/screens/recovery/send_recovery_screen.dart';
+import 'package:comunifi/theme/colors.dart';
 
 class ProfileSidebar extends StatefulWidget {
   final VoidCallback onClose;
@@ -411,7 +412,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
             decoration: const BoxDecoration(
               border: Border(
                 bottom: BorderSide(
-                  color: CupertinoColors.separator,
+                  color: AppColors.separator,
                   width: 0.5,
                 ),
               ),
@@ -443,7 +444,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                   padding: const EdgeInsets.all(16),
                   margin: const EdgeInsets.only(bottom: 12),
                   decoration: BoxDecoration(
-                    color: CupertinoColors.systemGrey6,
+                    color: AppColors.surface,
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Column(
@@ -468,7 +469,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                               height: 100,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: CupertinoColors.systemGrey4,
+                                color: AppColors.surfaceElevated,
                               ),
                               child: _currentProfilePictureUrl != null
                                   ? ClipOval(
@@ -485,13 +486,12 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                               return Container(
                                                 width: 100,
                                                 height: 100,
-                                                color:
-                                                    CupertinoColors.systemGrey4,
-                                                child: Center(
+                                                color: AppColors.surfaceElevated,
+                                                child: const Center(
                                                   child:
                                                       CupertinoActivityIndicator(
-                                                        radius: 15,
-                                                      ),
+                                                    radius: 15,
+                                                  ),
                                                 ),
                                               );
                                             },
@@ -500,8 +500,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                               return const Icon(
                                                 CupertinoIcons.person_fill,
                                                 size: 50,
-                                                color:
-                                                    CupertinoColors.systemGrey,
+                                                color: AppColors.secondaryLabel,
                                               );
                                             },
                                       ),
@@ -509,7 +508,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                   : const Icon(
                                       CupertinoIcons.person_fill,
                                       size: 50,
-                                      color: CupertinoColors.systemGrey,
+                                      color: AppColors.secondaryLabel,
                                     ),
                             ),
                             if (_isUploadingPhoto)
@@ -533,7 +532,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                   height: 32,
                                   decoration: const BoxDecoration(
                                     shape: BoxShape.circle,
-                                    color: CupertinoColors.activeBlue,
+                                    color: AppColors.primary,
                                   ),
                                   child: const Icon(
                                     CupertinoIcons.camera_fill,
@@ -549,7 +548,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                       Text(
                         _isUploadingPhoto ? 'Uploading...' : 'Tap to change',
                         style: const TextStyle(
-                          color: CupertinoColors.secondaryLabel,
+                          color: AppColors.secondaryLabel,
                           fontSize: 13,
                         ),
                       ),
@@ -558,14 +557,14 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                         Container(
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
-                            color: CupertinoColors.systemRed.withOpacity(0.1),
+                            color: AppColors.errorBackground,
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Row(
                             children: [
                               const Icon(
                                 CupertinoIcons.exclamationmark_triangle,
-                                color: CupertinoColors.systemRed,
+                                color: AppColors.error,
                                 size: 18,
                               ),
                               const SizedBox(width: 8),
@@ -573,7 +572,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                 child: Text(
                                   _uploadPhotoError!,
                                   style: const TextStyle(
-                                    color: CupertinoColors.systemRed,
+                                    color: AppColors.error,
                                     fontSize: 11,
                                   ),
                                 ),
@@ -588,7 +587,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                 },
                                 child: const Icon(
                                   CupertinoIcons.xmark_circle_fill,
-                                  color: CupertinoColors.systemRed,
+                                  color: AppColors.error,
                                   size: 18,
                                 ),
                               ),
@@ -604,7 +603,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                   padding: const EdgeInsets.all(16),
                   margin: const EdgeInsets.only(bottom: 12),
                   decoration: BoxDecoration(
-                    color: CupertinoColors.systemGrey6,
+                    color: AppColors.surface,
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Column(
@@ -627,8 +626,8 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                         enabled: _userNostrPubkey != null,
                         decoration: BoxDecoration(
                           color: _userNostrPubkey == null
-                              ? CupertinoColors.systemGrey5
-                              : CupertinoColors.systemBackground,
+                              ? AppColors.chipBackground
+                              : AppColors.surface,
                           borderRadius: BorderRadius.circular(8),
                         ),
                       ),
@@ -644,7 +643,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                               Text(
                                 'Checking availability...',
                                 style: TextStyle(
-                                  color: CupertinoColors.secondaryLabel,
+                                  color: AppColors.secondaryLabel,
                                   fontSize: 14,
                                 ),
                               ),
@@ -675,7 +674,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                   style: TextStyle(
                                     color: _usernameAvailable!
                                         ? CupertinoColors.systemGreen
-                                        : CupertinoColors.systemRed,
+                                        : AppColors.error,
                                     fontSize: 14,
                                   ),
                                 ),
@@ -688,14 +687,14 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                           padding: const EdgeInsets.all(12),
                           margin: const EdgeInsets.only(top: 8),
                           decoration: BoxDecoration(
-                            color: CupertinoColors.systemRed.withOpacity(0.1),
+                            color: AppColors.errorBackground,
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Row(
                             children: [
                               const Icon(
                                 CupertinoIcons.exclamationmark_triangle,
-                                color: CupertinoColors.systemRed,
+                                color: AppColors.error,
                                 size: 20,
                               ),
                               const SizedBox(width: 8),
@@ -703,7 +702,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                 child: Text(
                                   _updateUsernameError!,
                                   style: const TextStyle(
-                                    color: CupertinoColors.systemRed,
+                                    color: AppColors.error,
                                     fontSize: 12,
                                   ),
                                 ),
@@ -718,7 +717,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                 },
                                 child: const Icon(
                                   CupertinoIcons.xmark_circle_fill,
-                                  color: CupertinoColors.systemRed,
+                                  color: AppColors.error,
                                   size: 20,
                                 ),
                               ),
@@ -737,7 +736,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                 child: Text(
                                   'Loading user data...',
                                   style: TextStyle(
-                                    color: CupertinoColors.secondaryLabel,
+                                    color: AppColors.secondaryLabel,
                                     fontSize: 12,
                                   ),
                                 ),
@@ -765,7 +764,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                         Text(
                           'Pubkey: ${_userNostrPubkey!.length > 20 ? "${_userNostrPubkey!.substring(0, 10)}...${_userNostrPubkey!.substring(_userNostrPubkey!.length - 10)}" : _userNostrPubkey!}',
                           style: const TextStyle(
-                            color: CupertinoColors.secondaryLabel,
+                            color: AppColors.secondaryLabel,
                             fontSize: 11,
                           ),
                         ),
@@ -779,7 +778,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                   padding: const EdgeInsets.all(16),
                   margin: const EdgeInsets.only(bottom: 12),
                   decoration: BoxDecoration(
-                    color: CupertinoColors.systemGrey6,
+                    color: AppColors.surface,
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Column(
@@ -805,7 +804,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                       const SizedBox(height: 16),
                       CupertinoButton(
                         padding: const EdgeInsets.symmetric(vertical: 12),
-                        color: CupertinoColors.activeBlue,
+                        color: AppColors.primary,
                         borderRadius: BorderRadius.circular(8),
                         onPressed: _addNewDevice,
                         child: const Row(
@@ -831,7 +830,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                       CupertinoButton(
                         key: _saveRecoveryLinkButtonKey,
                         padding: const EdgeInsets.symmetric(vertical: 12),
-                        color: CupertinoColors.systemGrey5,
+                        color: AppColors.chipBackground,
                         borderRadius: BorderRadius.circular(8),
                         onPressed: _isGeneratingRecoveryLink
                             ? null
@@ -844,14 +843,14 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                   Icon(
                                     CupertinoIcons.link,
                                     size: 18,
-                                    color: CupertinoColors.label,
+                                    color: AppColors.label,
                                   ),
                                   SizedBox(width: 8),
                                   Text(
                                     'Save Recovery Link',
                                     style: TextStyle(
                                       fontWeight: FontWeight.w600,
-                                      color: CupertinoColors.label,
+                                      color: AppColors.label,
                                     ),
                                   ),
                                 ],
@@ -865,10 +864,10 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: CupertinoColors.systemRed.withOpacity(0.05),
+                    color: AppColors.errorBackground,
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: CupertinoColors.systemRed.withOpacity(0.3),
+                      color: AppColors.error.withOpacity(0.3),
                     ),
                   ),
                   child: Column(
@@ -889,7 +888,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
-                              color: CupertinoColors.systemRed,
+                              color: AppColors.error,
                             ),
                           ),
                         ],
@@ -907,7 +906,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                       const SizedBox(height: 16),
                       CupertinoButton(
                         padding: const EdgeInsets.symmetric(vertical: 12),
-                        color: CupertinoColors.systemRed,
+                        color: AppColors.error,
                         borderRadius: BorderRadius.circular(8),
                         onPressed: _isDeletingData
                             ? null

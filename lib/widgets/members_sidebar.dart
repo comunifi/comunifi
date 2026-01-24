@@ -1,8 +1,9 @@
 import 'dart:async';
-import 'package:flutter/cupertino.dart';
-import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
+import 'package:comunifi/theme/colors.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:provider/provider.dart';
 
 class MembersSidebar extends StatefulWidget {
   final VoidCallback onClose;
@@ -408,7 +409,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                 decoration: const BoxDecoration(
                   border: Border(
                     bottom: BorderSide(
-                      color: CupertinoColors.separator,
+                      color: AppColors.separator,
                       width: 0.5,
                     ),
                   ),
@@ -490,12 +491,12 @@ class _MembersSidebarState extends State<MembersSidebar> {
     return Container(
       decoration: BoxDecoration(
         color: hasRequests
-            ? CupertinoColors.systemYellow.withOpacity(0.15)
-            : CupertinoColors.systemGrey6,
+            ? AppColors.primarySoft.withOpacity(0.25)
+            : AppColors.surface,
         borderRadius: BorderRadius.circular(12),
         border: hasRequests
             ? Border.all(
-                color: CupertinoColors.systemYellow.withOpacity(0.5),
+                color: AppColors.primarySoft.withOpacity(0.6),
                 width: 1,
               )
             : null,
@@ -517,8 +518,8 @@ class _MembersSidebarState extends State<MembersSidebar> {
                   Icon(
                     CupertinoIcons.person_badge_plus,
                     color: hasRequests
-                        ? CupertinoColors.systemOrange
-                        : CupertinoColors.secondaryLabel,
+                        ? AppColors.warning
+                        : AppColors.secondaryLabel,
                     size: 20,
                   ),
                   const SizedBox(width: 10),
@@ -529,8 +530,8 @@ class _MembersSidebarState extends State<MembersSidebar> {
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
                         color: hasRequests
-                            ? CupertinoColors.label
-                            : CupertinoColors.secondaryLabel,
+                            ? AppColors.label
+                            : AppColors.secondaryLabel,
                       ),
                     ),
                   ),
@@ -541,7 +542,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                       _isJoinRequestsExpanded
                           ? CupertinoIcons.chevron_up
                           : CupertinoIcons.chevron_down,
-                      color: CupertinoColors.secondaryLabel,
+                      color: AppColors.secondaryLabel,
                       size: 16,
                     ),
                 ],
@@ -550,7 +551,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
           ),
           // Expandable content
           if (_isJoinRequestsExpanded) ...[
-            Container(height: 0.5, color: CupertinoColors.separator),
+            Container(height: 0.5, color: AppColors.separator),
             if (_joinRequests.isEmpty)
               const Padding(
                 padding: EdgeInsets.all(16),
@@ -591,7 +592,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
   Widget _buildInviteSection() {
     return Container(
       decoration: BoxDecoration(
-        color: CupertinoColors.systemGrey6,
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
@@ -608,11 +609,11 @@ class _MembersSidebarState extends State<MembersSidebar> {
               padding: const EdgeInsets.all(12),
               child: Row(
                 children: [
-                  const Icon(
-                    CupertinoIcons.person_add,
-                    color: CupertinoColors.activeBlue,
-                    size: 20,
-                  ),
+              const Icon(
+                CupertinoIcons.person_add,
+                color: AppColors.primary,
+                size: 20,
+              ),
                   const SizedBox(width: 10),
                   const Expanded(
                     child: Text(
@@ -620,7 +621,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
-                        color: CupertinoColors.label,
+                        color: AppColors.label,
                       ),
                     ),
                   ),
@@ -628,7 +629,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                     _isExpanded
                         ? CupertinoIcons.chevron_up
                         : CupertinoIcons.chevron_down,
-                    color: CupertinoColors.secondaryLabel,
+                    color: AppColors.secondaryLabel,
                     size: 16,
                   ),
                 ],
@@ -638,8 +639,8 @@ class _MembersSidebarState extends State<MembersSidebar> {
           // Expandable invite form
           if (_isExpanded) ...[
             Container(height: 0.5, color: CupertinoColors.separator),
-            Padding(
-              padding: const EdgeInsets.all(12),
+              Padding(
+                padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -648,7 +649,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                     placeholder: 'Enter username',
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: CupertinoColors.systemBackground,
+                      color: AppColors.surface,
                       borderRadius: BorderRadius.circular(8),
                     ),
                   ),
@@ -664,7 +665,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                           Text(
                             'Checking...',
                             style: TextStyle(
-                              color: CupertinoColors.secondaryLabel,
+                              color: AppColors.secondaryLabel,
                               fontSize: 12,
                             ),
                           ),
@@ -682,7 +683,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                                 : CupertinoIcons.xmark_circle,
                             color: _userExists!
                                 ? CupertinoColors.systemGreen
-                                : CupertinoColors.systemRed,
+                                : AppColors.error,
                             size: 16,
                           ),
                           const SizedBox(width: 8),
@@ -693,7 +694,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                             style: TextStyle(
                               color: _userExists!
                                   ? CupertinoColors.systemGreen
-                                  : CupertinoColors.systemRed,
+                                  : AppColors.error,
                               fontSize: 12,
                             ),
                           ),
@@ -705,13 +706,13 @@ class _MembersSidebarState extends State<MembersSidebar> {
                       padding: const EdgeInsets.all(8),
                       margin: const EdgeInsets.only(bottom: 8),
                       decoration: BoxDecoration(
-                        color: CupertinoColors.systemRed.withOpacity(0.1),
+                        color: AppColors.errorBackground,
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
                         _inviteError!,
                         style: const TextStyle(
-                          color: CupertinoColors.systemRed,
+                          color: AppColors.error,
                           fontSize: 11,
                         ),
                       ),
@@ -780,12 +781,12 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: widget.isCurrentUser
-            ? CupertinoColors.activeBlue.withOpacity(0.1)
-            : CupertinoColors.systemGrey6,
+            ? AppColors.primary.withOpacity(0.12)
+            : AppColors.surface,
         borderRadius: BorderRadius.circular(10),
         border: widget.isCurrentUser
             ? Border.all(
-                color: CupertinoColors.activeBlue.withOpacity(0.3),
+                color: AppColors.primary.withOpacity(0.4),
                 width: 1,
               )
             : null,
@@ -798,7 +799,7 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
             height: 40,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: CupertinoColors.systemGrey4,
+              color: AppColors.surfaceElevated,
               image: profilePicture != null
                   ? DecorationImage(
                       image: NetworkImage(profilePicture),
@@ -810,7 +811,7 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
                 ? const Icon(
                     CupertinoIcons.person_fill,
                     size: 20,
-                    color: CupertinoColors.systemGrey,
+                    color: AppColors.secondaryLabel,
                   )
                 : null,
           ),
@@ -844,7 +845,7 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
                             vertical: 2,
                           ),
                           decoration: BoxDecoration(
-                            color: CupertinoColors.systemOrange,
+                            color: AppColors.warning,
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: const Text(
@@ -863,7 +864,7 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
                             vertical: 2,
                           ),
                           decoration: BoxDecoration(
-                            color: CupertinoColors.systemPurple,
+                            color: AppColors.accent,
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: const Text(
@@ -885,7 +886,7 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
                             vertical: 2,
                           ),
                           decoration: BoxDecoration(
-                            color: CupertinoColors.activeBlue,
+                            color: AppColors.primary,
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: const Text(
@@ -965,9 +966,9 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: CupertinoColors.systemBackground,
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: CupertinoColors.separator, width: 0.5),
+        border: Border.all(color: AppColors.separator, width: 0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -980,7 +981,7 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
                 height: 36,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: CupertinoColors.systemGrey4,
+                  color: AppColors.surfaceElevated,
                   image: profilePicture != null
                       ? DecorationImage(
                           image: NetworkImage(profilePicture),
@@ -992,7 +993,7 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
                     ? const Icon(
                         CupertinoIcons.person_fill,
                         size: 18,
-                        color: CupertinoColors.systemGrey,
+                        color: AppColors.secondaryLabel,
                       )
                     : null,
               ),
@@ -1035,14 +1036,14 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: CupertinoColors.systemGrey6,
+                color: AppColors.surface,
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
                 widget.request.reason!,
                 style: const TextStyle(
                   fontSize: 13,
-                  color: CupertinoColors.secondaryLabel,
+                  color: AppColors.secondaryLabel,
                   fontStyle: FontStyle.italic,
                 ),
                 maxLines: 3,
@@ -1056,7 +1057,7 @@ class _JoinRequestTileState extends State<_JoinRequestTile> {
             width: double.infinity,
             child: CupertinoButton(
               padding: const EdgeInsets.symmetric(vertical: 8),
-              color: CupertinoColors.systemGreen,
+              color: AppColors.primary,
               borderRadius: BorderRadius.circular(8),
               minSize: 0,
               onPressed: widget.isApproving ? null : widget.onApprove,

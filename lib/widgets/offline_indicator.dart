@@ -1,4 +1,5 @@
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/theme/colors.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
 
@@ -21,7 +22,7 @@ class OfflineIndicator extends StatelessWidget {
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            color: CupertinoColors.systemRed.withOpacity(0.9),
+            color: AppColors.error.withOpacity(0.9),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [

@@ -3,6 +3,7 @@ import 'package:comunifi/state/app.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart' show ProfileData;
+import 'package:comunifi/theme/colors.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
@@ -75,10 +76,10 @@ class _TitlebarState extends State<Titlebar> {
               height: 36,
               padding: const EdgeInsets.symmetric(horizontal: 0),
               decoration: BoxDecoration(
-                color: CupertinoColors.systemBackground,
+                color: AppColors.background,
                 border: const Border(
                   bottom: BorderSide(
-                    color: CupertinoColors.separator,
+                    color: AppColors.separator,
                     width: 0.5,
                   ),
                 ),
@@ -94,7 +95,7 @@ class _TitlebarState extends State<Titlebar> {
                         if (isOffline)
                           const Icon(
                             CupertinoIcons.wifi_slash,
-                            color: CupertinoColors.systemGrey,
+                            color: AppColors.warning,
                             size: 16,
                           ),
                         const SizedBox(width: 8),
@@ -152,7 +153,7 @@ class _ProfileAvatarButtonState extends State<_ProfileAvatarButton> {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(16),
             color: _isHovered
-                ? CupertinoColors.systemGrey5
+                ? AppColors.chipBackground
                 : CupertinoColors.transparent,
           ),
           child: Row(
@@ -165,7 +166,7 @@ class _ProfileAvatarButtonState extends State<_ProfileAvatarButton> {
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
-                    color: CupertinoColors.label,
+                    color: AppColors.label,
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -176,7 +177,7 @@ class _ProfileAvatarButtonState extends State<_ProfileAvatarButton> {
                 height: avatarSize,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: CupertinoColors.systemGrey4,
+                  color: AppColors.surfaceElevated,
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: widget.profilePicture != null
@@ -190,21 +191,21 @@ class _ProfileAvatarButtonState extends State<_ProfileAvatarButton> {
                           return Icon(
                             CupertinoIcons.person_fill,
                             size: avatarSize * 0.6,
-                            color: CupertinoColors.systemGrey,
+                            color: AppColors.secondaryLabel,
                           );
                         },
                         errorBuilder: (context, error, stackTrace) {
                           return Icon(
                             CupertinoIcons.person_fill,
                             size: avatarSize * 0.6,
-                            color: CupertinoColors.systemGrey,
+                          color: AppColors.secondaryLabel,
                           );
                         },
                       )
                     : Icon(
                         CupertinoIcons.person_fill,
                         size: avatarSize * 0.6,
-                        color: CupertinoColors.systemGrey,
+                        color: AppColors.secondaryLabel,
                       ),
               ),
             ],

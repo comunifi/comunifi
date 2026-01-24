@@ -1,3 +1,4 @@
+import 'package:comunifi/theme/colors.dart';
 import 'package:flutter/cupertino.dart';
 
 /// A sidebar that slides in from the left or right side of the screen
@@ -109,7 +110,7 @@ class _SlideInSidebarState extends State<SlideInSidebar>
                   child: Container(
                     width: widget.width,
                     height: double.infinity,
-                    color: CupertinoColors.systemBackground,
+                    color: AppColors.surface,
                     child: widget.child,
                   ),
                 ),

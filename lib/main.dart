@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:auto_updater/auto_updater.dart';
 import 'package:comunifi/routes/routes.dart';
+import 'package:comunifi/theme/app_theme.dart';
 import 'package:comunifi/services/db/db.dart';
 import 'package:comunifi/services/deep_link/deep_link_service.dart';
 import 'package:comunifi/state/group.dart';
@@ -115,15 +116,7 @@ class _ComunifiState extends State<Comunifi> {
   final observers = <NavigatorObserver>[routeObserver];
   late GoRouter router;
 
-  final theme = CupertinoThemeData(
-    primaryColor: CupertinoColors.systemBlue,
-    brightness: Brightness.light,
-    scaffoldBackgroundColor: CupertinoColors.systemBackground,
-    textTheme: CupertinoTextThemeData(
-      textStyle: TextStyle(color: CupertinoColors.label, fontSize: 16),
-    ),
-    applyThemeToAll: true,
-  );
+  late final CupertinoThemeData theme = buildAppTheme();
 
   @override
   void initState() {
@@ -151,7 +144,7 @@ class _ComunifiState extends State<Comunifi> {
         ).copyWith(textScaler: const TextScaler.linear(1.0)),
         child: CupertinoPageScaffold(
           key: const Key('main'),
-          backgroundColor: CupertinoColors.systemBackground,
+          backgroundColor: theme.scaffoldBackgroundColor,
           child: Column(
             children: [
               // Offline indicator banner at the top

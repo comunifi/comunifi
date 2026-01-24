@@ -1,6 +1,7 @@
+import 'package:comunifi/screens/post/post_detail_modal.dart';
+import 'package:comunifi/theme/colors.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
-import 'package:comunifi/screens/post/post_detail_modal.dart';
 
 class CommentBubble extends StatelessWidget {
   final String eventId;
@@ -40,7 +41,7 @@ class CommentBubble extends StatelessWidget {
           const Icon(
             CupertinoIcons.chat_bubble,
             size: 20,
-            color: CupertinoColors.systemBlue,
+            color: AppColors.primary,
           ),
           if (isLoadingCount)
             const SizedBox(
@@ -54,7 +55,7 @@ class CommentBubble extends StatelessWidget {
               commentCount.toString(),
               style: const TextStyle(
                 fontSize: 14,
-                color: CupertinoColors.systemBlue,
+                color: AppColors.primary,
               ),
             ),
           ],

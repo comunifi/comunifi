@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:typed_data';
+import 'package:comunifi/theme/colors.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:image_picker/image_picker.dart';
@@ -311,9 +312,9 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
           child: Container(
             width: 108,
             decoration: BoxDecoration(
-              color: CupertinoColors.systemBackground,
+              color: AppColors.surface,
               border: Border(
-                right: BorderSide(color: CupertinoColors.separator, width: 0.5),
+                right: BorderSide(color: AppColors.separator, width: 0.5),
               ),
             ),
             child: Column(
@@ -330,12 +331,12 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                           width: 56,
                           height: 56,
                           decoration: BoxDecoration(
-                            color: CupertinoColors.systemGrey5,
+                            color: AppColors.chipBackground,
                             borderRadius: BorderRadius.circular(28),
                           ),
                           child: const Icon(
                             CupertinoIcons.plus,
-                            color: CupertinoColors.activeBlue,
+                            color: AppColors.primary,
                             size: 28,
                           ),
                         ),
@@ -344,7 +345,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                           'New',
                           style: TextStyle(
                             fontSize: 10,
-                            color: CupertinoColors.secondaryLabel,
+                            color: AppColors.secondaryLabel,
                           ),
                         ),
                       ],
@@ -373,7 +374,7 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
                   width: 40,
                   height: 2,
                   decoration: BoxDecoration(
-                    color: CupertinoColors.separator,
+                    color: AppColors.separator,
                     borderRadius: BorderRadius.circular(1),
                   ),
                 ),
@@ -463,13 +464,13 @@ class _ExploreIcon extends StatelessWidget {
           height: 56,
           decoration: BoxDecoration(
             color: isActive
-                ? CupertinoColors.activeBlue
-                : CupertinoColors.systemGrey5,
+                ? AppColors.primary
+                : AppColors.chipBackground,
             borderRadius: BorderRadius.circular(isActive ? 16 : 28),
             boxShadow: isActive
                 ? [
                     BoxShadow(
-                      color: CupertinoColors.activeBlue.withOpacity(0.4),
+                      color: AppColors.primary.withOpacity(0.4),
                       blurRadius: 8,
                       spreadRadius: 1,
                     ),
@@ -480,7 +481,7 @@ class _ExploreIcon extends StatelessWidget {
             CupertinoIcons.search,
             color: isActive
                 ? CupertinoColors.white
-                : CupertinoColors.activeBlue,
+                : AppColors.primary,
             size: 28,
           ),
         ),
@@ -491,8 +492,8 @@ class _ExploreIcon extends StatelessWidget {
             fontSize: 10,
             fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
             color: isActive
-                ? CupertinoColors.label
-                : CupertinoColors.secondaryLabel,
+                ? AppColors.label
+                : AppColors.secondaryLabel,
           ),
         ),
       ],
@@ -517,13 +518,13 @@ class _GlobalFeedIcon extends StatelessWidget {
           height: 56,
           decoration: BoxDecoration(
             color: isActive
-                ? CupertinoColors.activeBlue
-                : CupertinoColors.systemGrey5,
+                ? AppColors.primary
+                : AppColors.chipBackground,
             borderRadius: BorderRadius.circular(isActive ? 16 : 28),
             boxShadow: isActive
                 ? [
                     BoxShadow(
-                      color: CupertinoColors.activeBlue.withOpacity(0.4),
+                      color: AppColors.primary.withOpacity(0.4),
                       blurRadius: 8,
                       spreadRadius: 1,
                     ),
@@ -534,7 +535,7 @@ class _GlobalFeedIcon extends StatelessWidget {
             CupertinoIcons.globe,
             color: isActive
                 ? CupertinoColors.white
-                : CupertinoColors.activeBlue,
+                : AppColors.primary,
             size: 28,
           ),
         ),
@@ -545,8 +546,8 @@ class _GlobalFeedIcon extends StatelessWidget {
             fontSize: 10,
             fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
             color: isActive
-                ? CupertinoColors.label
-                : CupertinoColors.secondaryLabel,
+                ? AppColors.label
+                : AppColors.secondaryLabel,
           ),
         ),
       ],
@@ -583,8 +584,8 @@ class _GroupIconButton extends StatelessWidget {
             margin: const EdgeInsets.only(right: 4),
             decoration: BoxDecoration(
               color: isActive
-                  ? CupertinoColors.activeBlue
-                  : CupertinoColors.separator,
+                  ? AppColors.primary
+                  : AppColors.separator,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -633,10 +634,8 @@ class _GroupAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     // Use orange color for groups needing recovery
     final avatarColor = needsRecovery
-        ? CupertinoColors.systemOrange
-        : (isMember
-              ? CupertinoColors.systemIndigo
-              : CupertinoColors.systemGrey4);
+        ? AppColors.warning
+        : (isMember ? AppColors.primary : AppColors.surfaceElevated);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -673,7 +672,7 @@ class _GroupAvatar extends StatelessWidget {
                         style: TextStyle(
                           color: isMember || needsRecovery
                               ? CupertinoColors.white
-                              : CupertinoColors.systemGrey,
+                              : AppColors.secondaryLabel,
                           fontWeight: FontWeight.w600,
                           fontSize: 18,
                         ),
@@ -690,10 +689,10 @@ class _GroupAvatar extends StatelessWidget {
                   width: 18,
                   height: 18,
                   decoration: BoxDecoration(
-                    color: CupertinoColors.systemOrange,
+                    color: AppColors.warning,
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: CupertinoColors.systemBackground,
+                      color: AppColors.background,
                       width: 2,
                     ),
                   ),
@@ -716,8 +715,8 @@ class _GroupAvatar extends StatelessWidget {
                 fontSize: 10,
                 fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
                 color: isActive
-                    ? CupertinoColors.label
-                    : CupertinoColors.secondaryLabel,
+                    ? AppColors.label
+                    : AppColors.secondaryLabel,
               ),
               textAlign: TextAlign.center,
               maxLines: 1,
@@ -841,7 +840,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
     return Container(
       height: MediaQuery.of(context).size.height * 0.5,
       decoration: const BoxDecoration(
-        color: CupertinoColors.systemBackground,
+        color: AppColors.surface,
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       child: SafeArea(
@@ -853,7 +852,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                color: CupertinoColors.systemGrey4,
+                color: AppColors.outline,
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -886,7 +885,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                 ],
               ),
             ),
-            Container(height: 0.5, color: CupertinoColors.separator),
+            Container(height: 0.5, color: AppColors.separator),
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.all(16),
@@ -896,14 +895,14 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                       padding: const EdgeInsets.all(12),
                       margin: const EdgeInsets.only(bottom: 16),
                       decoration: BoxDecoration(
-                        color: CupertinoColors.systemRed.withOpacity(0.1),
+                        color: AppColors.errorBackground,
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Row(
                         children: [
                           const Icon(
                             CupertinoIcons.exclamationmark_triangle,
-                            color: CupertinoColors.systemRed,
+                            color: AppColors.error,
                             size: 20,
                           ),
                           const SizedBox(width: 8),
@@ -911,7 +910,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                             child: Text(
                               _error!,
                               style: const TextStyle(
-                                color: CupertinoColors.systemRed,
+                                color: AppColors.error,
                                 fontSize: 12,
                               ),
                             ),
@@ -922,7 +921,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                             onPressed: () => setState(() => _error = null),
                             child: const Icon(
                               CupertinoIcons.xmark_circle_fill,
-                              color: CupertinoColors.systemRed,
+                              color: AppColors.error,
                               size: 20,
                             ),
                           ),
@@ -938,7 +937,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                             width: 80,
                             height: 80,
                             decoration: BoxDecoration(
-                              color: CupertinoColors.systemGrey4,
+                              color: AppColors.surfaceElevated,
                               shape: BoxShape.circle,
                               image: _selectedPhotoBytes != null
                                   ? DecorationImage(
@@ -958,7 +957,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                                 ? const Icon(
                                     CupertinoIcons.person_2_fill,
                                     size: 32,
-                                    color: CupertinoColors.systemGrey,
+                                    color: AppColors.secondaryLabel,
                                   )
                                 : null,
                           ),
@@ -983,7 +982,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                                 height: 28,
                                 decoration: const BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: CupertinoColors.activeBlue,
+                                  color: AppColors.primary,
                                 ),
                                 child: const Icon(
                                   CupertinoIcons.camera_fill,
@@ -1003,7 +1002,7 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                           ? 'Uploading...'
                           : 'Tap to change photo',
                       style: const TextStyle(
-                        color: CupertinoColors.secondaryLabel,
+                        color: AppColors.secondaryLabel,
                         fontSize: 12,
                       ),
                     ),

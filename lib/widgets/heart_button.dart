@@ -1,3 +1,4 @@
+import 'package:comunifi/theme/colors.dart';
 import 'package:flutter/cupertino.dart';
 
 class HeartButton extends StatelessWidget {
@@ -29,8 +30,8 @@ class HeartButton extends StatelessWidget {
             isReacted ? CupertinoIcons.heart_fill : CupertinoIcons.heart,
             size: 20,
             color: isReacted
-                ? CupertinoColors.systemRed
-                : CupertinoColors.systemBlue,
+                ? AppColors.accent
+                : AppColors.primary,
           ),
           if (isLoadingCount)
             const SizedBox(
@@ -45,8 +46,8 @@ class HeartButton extends StatelessWidget {
               style: TextStyle(
                 fontSize: 14,
                 color: isReacted
-                    ? CupertinoColors.systemRed
-                    : CupertinoColors.systemBlue,
+                    ? AppColors.accent
+                    : AppColors.primary,
               ),
             ),
           ],

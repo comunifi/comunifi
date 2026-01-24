@@ -102,6 +102,18 @@ flutter:
     - .env
     - .env.debug
 
+  fonts:
+    - family: ComunifiRounded
+      fonts:
+        - asset: assets/fonts/Nunito-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Nunito-Regular.ttf
+          weight: 500
+        - asset: assets/fonts/Nunito-Regular.ttf
+          weight: 600
+        - asset: assets/fonts/Nunito-Regular.ttf
+          weight: 700
+
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
 

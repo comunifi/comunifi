@@ -1,3 +1,4 @@
+import 'package:comunifi/theme/colors.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -124,14 +125,14 @@ class _LinkPreviewState extends State<LinkPreview> {
             Icon(
               CupertinoIcons.link,
               size: 18,
-              color: CupertinoColors.systemBlue.resolveFrom(context),
+              color: AppColors.primary,
             ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
                 widget.url,
                 style: TextStyle(
-                  color: CupertinoColors.systemBlue.resolveFrom(context),
+                  color: AppColors.primary,
                   fontSize: 14,
                   decoration: TextDecoration.underline,
                 ),
