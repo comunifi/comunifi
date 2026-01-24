@@ -112,3 +112,24 @@ A replaceable event containing the MLS-encrypted Nostr keypair.
 3. **Relay Storage**: The relay only sees encrypted ciphertext. Without MLS keys, the identity cannot be recovered.
 
 4. **Replaceable Events**: Kind 10078 is in the replaceable event range (10000-19999). Updates replace the old event.
+
+## App Icon & Branding
+
+Comunifi's app icon is generated from a single source image and applied across all platforms using `flutter_launcher_icons`.
+
+- **Source asset**: `assets/icon.png`
+- **Generator config**: Top-level `flutter_launcher_icons` section in `pubspec.yaml`
+- **Supported platforms**: Android, iOS, macOS, Windows, Linux
+
+**To update the app icon:**
+
+1. Replace `assets/icon.png` with the new icon artwork (keeping the same filename and path).
+2. Ensure `pubspec.yaml` contains the `flutter_launcher_icons` dev dependency and configuration.
+3. From the project root, run:
+
+```bash
+flutter pub get
+dart run flutter_launcher_icons
+```
+
+This will regenerate launcher icons for all configured platforms using the updated source image.
