@@ -7,7 +7,7 @@ This document describes how the feed screen works in ComuniFi, including its lay
 The feed screen (`lib/screens/feed/feed_screen.dart`) is the main interface for viewing and interacting with posts. It supports two modes:
 
 1. **Regular Feed** - Global posts from the Nostr relay (kind 1 events)
-2. **Group Messages** - Encrypted messages within MLS groups
+2. **Group Messages** - Encrypted messages within MLS groups, organized by NIP-28 channels (exposed as tags)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -358,15 +358,21 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
    └── groupState.setActiveGroup(group)
 
 2. activeGroup != null
-   └── Show group messages from GroupState
+   └── Show group header and channel chips bar
+   └── Show group messages from GroupState (filtered by active channel)
 
 3. groupState.groupMessages displayed in SliverList
    └── Messages are decrypted MLS envelope contents
+   └── Messages are filtered by active channel (default: #general)
 
 4. User publishes message
    └── groupState.postMessage(content, imageUrl)
+   └── Message is assigned to a channel (first #tag or #general)
+   └── Channel is auto-created if it doesn't exist
    └── Message is MLS-encrypted and published
 ```
+
+**Channels**: Group messages are organized into NIP-28 channels, exposed as tags. See [docs/group_channels.md](group_channels.md) for details.
 
 ## Image Upload
 

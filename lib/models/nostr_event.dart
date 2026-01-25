@@ -48,11 +48,35 @@ const int kindGroupAdmins = 39001;
 const int kindGroupMembers = 39002;
 
 // =============================================================================
+// NIP-28: Public Chat Channels
+// https://github.com/nostr-protocol/nips/blob/master/28.md
+// =============================================================================
+
+/// Kind 40: Channel Create (NIP-28)
+/// Create a public chat channel scoped to a NIP-29 group
+/// Tags: ['h', groupId]
+/// Content: JSON with name, about, picture, relays
+const int kindChannelCreate = 40;
+
+/// Kind 41: Channel Metadata (NIP-28)
+/// Update a channel's public metadata
+/// Tags: ['h', groupId], ['e', channelId, '', 'root']
+/// Content: JSON with updated name, about, picture, relays
+const int kindChannelMetadata = 41;
+
+/// Kind 39004: Group Channel Metadata (per channel, relay-generated)
+/// Relay-signed per-channel metadata for NIP-29 groups
+/// Tags: ['h', groupId], ['d', 'group_id:channel_id'], ['e', channelId]
+/// Content: JSON with id, group_id, name, about, picture, relays, creator, extra
+/// See docs/group_channels.md for details
+const int kindGroupChannelMetadata = 39004;
+
+// =============================================================================
 // Legacy/Custom kinds (keeping for backwards compatibility)
 // =============================================================================
 
 /// Kind 40: Channel/Group announcement (NIP-28, legacy)
-/// @deprecated Use NIP-29 kinds instead
+/// @deprecated Use kindChannelCreate (40) for NIP-28 channels instead
 const int kindGroupAnnouncement = 40;
 
 /// Kind 1059: Encrypted envelope containing an encrypted Nostr event

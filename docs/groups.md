@@ -2,6 +2,10 @@
 
 This document describes how the group list works in ComuniFi, including how groups are loaded, displayed, and how users switch between them.
 
+## Channels
+
+Groups support **NIP-28 channels**, which are exposed to users as tags. Every group message is posted to a channel (defaulting to `#general` if no tag is specified). Channels are displayed as horizontal chips in the group view, allowing users to filter messages by channel. See [docs/group_channels.md](group_channels.md) for detailed implementation.
+
 ## Overview
 
 The group list is displayed in the `GroupsSidebar` widget (`lib/widgets/groups_sidebar.dart`). It uses a minimal Discord-like design with circular avatars in a narrow vertical bar.

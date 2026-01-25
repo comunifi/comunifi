@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/theme/colors.dart';
 
 /// Modal for editing group metadata (name, about, picture, cover)
 /// Shows as a bottom sheet with form fields
@@ -345,7 +346,7 @@ class _EditGroupModalState extends State<EditGroupModal> {
                           width: double.infinity,
                           height: 120,
                           decoration: BoxDecoration(
-                            color: CupertinoColors.systemGrey5,
+                            color: AppColors.chipBackground,
                             borderRadius: BorderRadius.circular(12),
                             image: _selectedCoverBytes != null
                                 ? DecorationImage(
@@ -367,13 +368,13 @@ class _EditGroupModalState extends State<EditGroupModal> {
                                     Icon(
                                       CupertinoIcons.photo,
                                       size: 32,
-                                      color: CupertinoColors.systemGrey,
+                                      color: AppColors.secondaryLabel,
                                     ),
                                     SizedBox(height: 4),
                                     Text(
                                       'Add cover photo',
                                       style: TextStyle(
-                                        color: CupertinoColors.systemGrey,
+                                        color: AppColors.secondaryLabel,
                                         fontSize: 12,
                                       ),
                                     ),

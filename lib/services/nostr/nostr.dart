@@ -5,7 +5,14 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:comunifi/models/nostr_event.dart'
-    show NostrEventModel, kindEncryptedEnvelope;
+    show
+        NostrEventModel,
+        kindChannelCreate,
+        kindChannelMetadata,
+        kindEncryptedEnvelope,
+        kindGroupChannelMetadata;
+import 'package:comunifi/services/nostr/group_channel.dart'
+    show GroupChannelMetadata;
 import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/db/nostr_event.dart';
@@ -1393,4 +1400,347 @@ class NostrService {
 
   /// Check if auto-reconnect is enabled
   bool get autoReconnectEnabled => _autoReconnect;
+
+  // ===========================================================================
+  // NIP-28 Channel Methods
+  // ===========================================================================
+
+  /// Create a NIP-28 channel in a NIP-29 group (kind 40)
+  /// The relay will generate a kind 39004 metadata event in response
+  ///
+  /// [groupIdHex] - The NIP-29 group ID (hex)
+  /// [name] - Channel name (e.g., "general", "support")
+  /// [about] - Optional channel description
+  /// [picture] - Optional channel picture URL
+  /// [keyPairs] - Key pairs for signing (required)
+  ///
+  /// Returns the created kind 40 event
+  Future<NostrEventModel> createChannel({
+    required String groupIdHex,
+    required String name,
+    String? about,
+    String? picture,
+    required NostrKeyPairs keyPairs,
+  }) async {
+    if (!_isConnected) {
+      throw Exception('Not connected to relay. Call connect() first.');
+    }
+
+    // Build channel metadata JSON (per NIP-28)
+    final metadata = <String, dynamic>{
+      'name': name,
+    };
+    if (about != null) metadata['about'] = about;
+    if (picture != null) metadata['picture'] = picture;
+    // Add relay URL to metadata (per NIP-28)
+    metadata['relays'] = [_relayUrl];
+
+    final content = jsonEncode(metadata);
+
+    // Build tags: ['h', groupIdHex] (per docs/group_channels.md)
+    final tags = <List<String>>[
+      ['h', groupIdHex],
+    ];
+
+    // Create the kind 40 event
+    final createdAt = DateTime.now();
+
+    // Add client signature tags
+    final signedTags = await addClientTagsWithSignature(tags, createdAt: createdAt);
+    final nostrEvent = NostrEvent.fromPartialData(
+      kind: kindChannelCreate,
+      content: content,
+      keyPairs: keyPairs,
+      tags: signedTags,
+      createdAt: createdAt,
+    );
+
+    final eventModel = NostrEventModel(
+      id: nostrEvent.id,
+      pubkey: nostrEvent.pubkey,
+      kind: nostrEvent.kind,
+      content: nostrEvent.content,
+      tags: nostrEvent.tags,
+      sig: nostrEvent.sig,
+      createdAt: nostrEvent.createdAt,
+    );
+
+    // Publish to relay (not encrypted, this is a public channel creation event)
+    await publishEvent(
+      eventModel.toJson(),
+      keyPairs: keyPairs,
+    );
+
+    // Cache the event
+    if (_cacheInitialized && _eventTable != null) {
+      _eventTable!.insert(eventModel).catchError((e) {
+        debugPrint('Failed to cache channel create event: $e');
+      });
+    }
+
+    debugPrint('Created channel "$name" in group $groupIdHex: ${eventModel.id}');
+    return eventModel;
+  }
+
+  /// Update a channel's metadata (kind 41)
+  /// The relay will update the kind 39004 metadata event in response
+  ///
+  /// [groupIdHex] - The NIP-29 group ID (hex)
+  /// [channelId] - The channel ID (from the kind 40 event that created it)
+  /// [name] - Optional updated channel name
+  /// [about] - Optional updated channel description
+  /// [picture] - Optional updated channel picture URL
+  /// [extra] - Optional extra metadata (e.g., pinned, order) - admin-only fields
+  /// [keyPairs] - Key pairs for signing (required)
+  ///
+  /// Returns the created kind 41 event
+  Future<NostrEventModel> updateChannelMetadata({
+    required String groupIdHex,
+    required String channelId,
+    String? name,
+    String? about,
+    String? picture,
+    Map<String, dynamic>? extra,
+    required NostrKeyPairs keyPairs,
+  }) async {
+    if (!_isConnected) {
+      throw Exception('Not connected to relay. Call connect() first.');
+    }
+
+    // Build updated metadata JSON (only include provided fields)
+    final metadata = <String, dynamic>{};
+    if (name != null) metadata['name'] = name;
+    if (about != null) metadata['about'] = about;
+    if (picture != null) metadata['picture'] = picture;
+    if (extra != null) metadata['extra'] = extra;
+
+    final content = jsonEncode(metadata);
+
+    // Build tags: ['h', groupIdHex], ['e', channelId, '', 'root'] (per docs/group_channels.md)
+    final tags = <List<String>>[
+      ['h', groupIdHex],
+      ['e', channelId, '', 'root'],
+    ];
+
+    // Create the kind 41 event
+    final createdAt = DateTime.now();
+
+    // Add client signature tags
+    final signedTags = await addClientTagsWithSignature(tags, createdAt: createdAt);
+    final nostrEvent = NostrEvent.fromPartialData(
+      kind: kindChannelMetadata,
+      content: content,
+      keyPairs: keyPairs,
+      tags: signedTags,
+      createdAt: createdAt,
+    );
+
+    final eventModel = NostrEventModel(
+      id: nostrEvent.id,
+      pubkey: nostrEvent.pubkey,
+      kind: nostrEvent.kind,
+      content: nostrEvent.content,
+      tags: nostrEvent.tags,
+      sig: nostrEvent.sig,
+      createdAt: nostrEvent.createdAt,
+    );
+
+    // Publish to relay (not encrypted, this is a public metadata update)
+    await publishEvent(
+      eventModel.toJson(),
+      keyPairs: keyPairs,
+    );
+
+    // Cache the event
+    if (_cacheInitialized && _eventTable != null) {
+      _eventTable!.insert(eventModel).catchError((e) {
+        debugPrint('Failed to cache channel metadata event: $e');
+      });
+    }
+
+    debugPrint(
+      'Updated channel metadata for $channelId in group $groupIdHex: ${eventModel.id}',
+    );
+    return eventModel;
+  }
+
+  /// Watch for channel metadata events (kind 39004) for a specific group
+  /// Returns a stream of channel metadata lists, sorted with #general first
+  ///
+  /// [groupIdHex] - The NIP-29 group ID (hex)
+  ///
+  /// The stream emits whenever channel metadata changes (new channels created,
+  /// existing channels updated, etc.)
+  Stream<List<GroupChannelMetadata>> watchGroupChannels(
+    String groupIdHex,
+  ) {
+    if (!_isConnected) {
+      throw Exception('Not connected to relay. Call connect() first.');
+    }
+
+    // Transform events into GroupChannelMetadata and maintain a sorted list
+    final StreamController<List<GroupChannelMetadata>> controller =
+        StreamController<List<GroupChannelMetadata>>.broadcast();
+
+    final Map<String, GroupChannelMetadata> channelsMap = {};
+
+    // Initialize with existing channels before listening for updates
+    // This ensures the stream always emits the complete channel list
+    fetchGroupChannelsOnce(groupIdHex, useCache: true).then((existingChannels) {
+      // Populate map with existing channels
+      for (final channel in existingChannels) {
+        channelsMap[channel.id] = channel;
+      }
+
+      // Emit initial state with all existing channels
+      if (channelsMap.isNotEmpty) {
+        final initialSorted = _sortChannels(channelsMap.values.toList());
+        if (!controller.isClosed) {
+          controller.add(initialSorted);
+        }
+      }
+    }).catchError((error) {
+      debugPrint('Error fetching initial channels in watchGroupChannels: $error');
+      // Continue anyway - stream will still work with incoming events
+    });
+
+    // Subscribe to kind 39004 events with #h = [groupIdHex]
+    final eventStream = listenToEvents(
+      kind: kindGroupChannelMetadata,
+      tags: [groupIdHex],
+      tagKey: 'h',
+    );
+
+    eventStream.listen(
+      (event) {
+        try {
+          final channel = GroupChannelMetadata.fromNostrEvent(event);
+
+          // Merge extra field if channel already exists
+          if (channelsMap.containsKey(channel.id)) {
+            final existingChannel = channelsMap[channel.id]!;
+            Map<String, dynamic>? mergedExtra;
+
+            if (existingChannel.extra != null || channel.extra != null) {
+              mergedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
+              if (channel.extra != null) {
+                mergedExtra.addAll(channel.extra!);
+              }
+            }
+
+            // Create new channel with merged extra, but use new event's other fields
+            final mergedChannel = GroupChannelMetadata(
+              id: channel.id,
+              groupId: channel.groupId,
+              name: channel.name,
+              about: channel.about,
+              picture: channel.picture,
+              relays: channel.relays,
+              creator: channel.creator,
+              extra: mergedExtra,
+              createdAt: channel.createdAt,
+            );
+
+            channelsMap[channel.id] = mergedChannel;
+          } else {
+            channelsMap[channel.id] = channel;
+          }
+
+          // Emit sorted list with all channels (existing + updated)
+          final sortedChannels = _sortChannels(channelsMap.values.toList());
+          if (!controller.isClosed) {
+            controller.add(sortedChannels);
+          }
+        } catch (e) {
+          debugPrint('Failed to parse channel metadata event: $e');
+        }
+      },
+      onError: (error) {
+        debugPrint('Error in watchGroupChannels stream: $error');
+        // Don't close controller on error - continue listening
+        // Only add error if controller is still open
+        if (!controller.isClosed) {
+          controller.addError(error);
+        }
+      },
+      onDone: () {
+        debugPrint('watchGroupChannels event stream closed for group $groupIdHex');
+        // Don't close the controller - it should stay open for future events
+      },
+    );
+
+    return controller.stream;
+  }
+
+  /// Fetch channel metadata events (kind 39004) for a specific group (one-shot)
+  /// Returns a list of channels, sorted with #general first
+  ///
+  /// [groupIdHex] - The NIP-29 group ID (hex)
+  /// [useCache] - Whether to check cache first (default: true)
+  ///
+  /// This is useful for initial load when you don't need real-time updates
+  Future<List<GroupChannelMetadata>> fetchGroupChannelsOnce(
+    String groupIdHex, {
+    bool useCache = true,
+  }) async {
+    // Query for kind 39004 events with #h = [groupIdHex]
+    final events = await requestPastEvents(
+      kind: kindGroupChannelMetadata,
+      tags: [groupIdHex],
+      tagKey: 'h',
+      useCache: useCache,
+    );
+
+    // Parse events into GroupChannelMetadata
+    final channels = <GroupChannelMetadata>[];
+    for (final event in events) {
+      try {
+        final channel = GroupChannelMetadata.fromNostrEvent(event);
+        channels.add(channel);
+      } catch (e) {
+        debugPrint('Failed to parse channel metadata event: $e');
+      }
+    }
+
+    // Return sorted list (#general first, then alphabetical)
+    return _sortChannels(channels);
+  }
+
+  /// Sort channels: #general always first, then pinned channels, then by order, then alphabetical
+  List<GroupChannelMetadata> _sortChannels(
+    List<GroupChannelMetadata> channels,
+  ) {
+    final sorted = List<GroupChannelMetadata>.from(channels);
+    sorted.sort((a, b) {
+      // 1. #general always comes first (even if pinned)
+      final aIsGeneral = a.name.toLowerCase() == 'general';
+      final bIsGeneral = b.name.toLowerCase() == 'general';
+      if (aIsGeneral != bIsGeneral) {
+        return aIsGeneral ? -1 : 1;
+      }
+
+      // 2. If both are general, they're equal
+      if (aIsGeneral && bIsGeneral) return 0;
+
+      // 3. Pinned channels next (excluding general)
+      final aPinned = a.extra?['pinned'] == true;
+      final bPinned = b.extra?['pinned'] == true;
+      if (aPinned != bPinned) {
+        return aPinned ? -1 : 1;
+      }
+
+      // 4. Then by order (if available)
+      final aOrder = a.extra?['order'] as num?;
+      final bOrder = b.extra?['order'] as num?;
+      if (aOrder != null && bOrder != null && aOrder != bOrder) {
+        return aOrder.compareTo(bOrder);
+      }
+      if (aOrder != null && bOrder == null) return -1;
+      if (aOrder == null && bOrder != null) return 1;
+
+      // 5. Fallback: alphabetical
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return sorted;
+  }
 }

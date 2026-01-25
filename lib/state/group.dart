@@ -10,6 +10,8 @@ import 'package:sqflite_common/sqflite.dart';
 import 'package:dart_nostr/dart_nostr.dart';
 import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/services/nostr/nostr.dart' show NostrService;
+import 'package:comunifi/services/nostr/group_channel.dart'
+    show GroupChannelMetadata;
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/services/mls/group_state/group_state.dart';
@@ -50,6 +52,7 @@ import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/media/media_upload.dart';
 import 'package:comunifi/services/media/encrypted_media.dart';
 import 'package:comunifi/services/db/decrypted_media_cache.dart';
+import 'package:comunifi/services/db/channel_metadata.dart';
 import 'package:comunifi/services/whatsapp/whatsapp_import.dart';
 import 'package:comunifi/services/backup/backup_service.dart';
 import 'package:comunifi/services/backup/backup_models.dart';
@@ -157,6 +160,7 @@ class GroupState with ChangeNotifier {
 
   // Database table for decrypted media cache
   DecryptedMediaCacheTable? _decryptedMediaCacheTable;
+  ChannelMetadataTable? _channelMetadataTable;
 
   // Backup service for MLS group backup/restore
   BackupService? _backupService;
@@ -323,6 +327,12 @@ class GroupState with ChangeNotifier {
         _dbService!.database!,
       );
       await _decryptedMediaCacheTable!.create(_dbService!.database!);
+
+      // Initialize channel metadata table
+      _channelMetadataTable = ChannelMetadataTable(
+        _dbService!.database!,
+      );
+      await _channelMetadataTable!.create(_dbService!.database!);
 
       // Initialize encrypted media service with database
       _encryptedMediaService.initWithDatabase(_dbService!.database!);
@@ -900,8 +910,9 @@ class GroupState with ChangeNotifier {
       }
 
       // Check if migration already ran
-      final migrationStatus =
-          await _preferenceTable!.get(_prefKeyGroupListMigration);
+      final migrationStatus = await _preferenceTable!.get(
+        _prefKeyGroupListMigration,
+      );
       if (migrationStatus == 'done') {
         debugPrint('Group list migration: already completed');
         return;
@@ -1636,6 +1647,11 @@ class GroupState with ChangeNotifier {
   // Hashtag filtering
   String? _hashtagFilter;
 
+  // Channel state (NIP-28 channels scoped to NIP-29 groups)
+  final Map<String, List<GroupChannelMetadata>> _channelsByGroupId = {};
+  final Map<String, String> _activeChannelNameByGroupId = {};
+  StreamSubscription<List<GroupChannelMetadata>>? _channelSubscription;
+
   // Explore mode (shows discoverable groups in feed area)
   bool _isExploreMode = false;
 
@@ -1672,18 +1688,27 @@ class GroupState with ChangeNotifier {
   /// Current hashtag filter (null = no filter)
   String? get hashtagFilter => _hashtagFilter;
 
-  /// Get group messages, optionally filtered by hashtag
+  /// Get group messages, filtered by active channel and optionally by hashtag
   /// Only returns kind 1 (text notes), excludes kind 7 (reactions)
   List<NostrEventModel> get groupMessages {
     // Filter to only kind 1 messages (exclude reactions)
-    final messagesOnly = _groupMessages.where((e) => e.kind == 1);
+    final messagesOnly = _groupMessages.where((e) => e.kind == 1).toList();
 
+    // Filter by active channel first
+    // A message appears in a channel if the active channel matches any of the message's channels
+    final activeChannel = activeChannelName;
+    final channelFiltered = messagesOnly.where((event) {
+      final eventChannels = _channelsForEvent(event);
+      return eventChannels.contains(activeChannel);
+    }).toList();
+
+    // Then apply hashtag filter if set (for searching within a channel)
     if (_hashtagFilter == null) {
-      return messagesOnly.toList();
+      return channelFiltered;
     }
-    // Filter messages that have the hashtag (check both tags and content)
+
     final filterLower = _hashtagFilter!.toLowerCase();
-    return messagesOnly.where((event) {
+    return channelFiltered.where((event) {
       // Check 't' tags first
       if (event.hashtags.contains(filterLower)) {
         return true;
@@ -1695,6 +1720,10 @@ class GroupState with ChangeNotifier {
       return contentHashtags.contains(filterLower);
     }).toList();
   }
+
+  /// Get messages for the active channel (convenience getter)
+  /// This is the same as groupMessages but provided for clarity
+  List<NostrEventModel> get activeChannelMessages => groupMessages;
 
   /// Get all group messages (unfiltered) for active group
   /// Only returns kind 1 (text notes), excludes kind 7 (reactions)
@@ -1718,6 +1747,816 @@ class GroupState with ChangeNotifier {
   void clearHashtagFilter() {
     _hashtagFilter = null;
     safeNotifyListeners();
+  }
+
+  // ===========================================================================
+  // Channel State (NIP-28 channels)
+  // ===========================================================================
+
+  /// Get channels for the active group
+  /// Returns a list sorted by: #general first, then pinned channels, then by order, then alphabetically
+  /// Channels are already sorted by watchGroupChannels() stream
+  List<GroupChannelMetadata> get activeGroupChannels {
+    if (_activeGroup == null) return [];
+
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+    final channels = _channelsByGroupId[groupIdHex] ?? [];
+
+    // Always ensure #general exists (synthetic if not in metadata)
+    final hasGeneral = channels.any((c) => c.name.toLowerCase() == 'general');
+    if (!hasGeneral) {
+      // Create synthetic #general channel
+      final syntheticGeneral = GroupChannelMetadata(
+        id: '', // Will be set when channel is actually created
+        groupId: groupIdHex,
+        name: 'general',
+        about: 'General discussion',
+        relays: [],
+        creator: '',
+        createdAt: DateTime.now(),
+      );
+      return [syntheticGeneral, ...channels];
+    }
+
+    return channels;
+  }
+
+  /// Get the active channel name for the current group
+  /// Defaults to 'general' if no channel is selected
+  String get activeChannelName {
+    if (_activeGroup == null) return 'general';
+
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+    return _activeChannelNameByGroupId[groupIdHex] ?? 'general';
+  }
+
+  /// Set the active channel for the current group
+  void setActiveChannel(String channelName) {
+    if (_activeGroup == null) return;
+
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+    _activeChannelNameByGroupId[groupIdHex] = channelName.toLowerCase();
+    safeNotifyListeners();
+  }
+
+  /// Get the primary channel for a message event
+  /// Checks for explicit channel reference (e tag with root marker),
+  /// then hashtags, then defaults to 'general'
+  String _primaryChannelForEvent(NostrEventModel event) {
+    if (_activeGroup == null) return 'general';
+
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+    final channels = _channelsByGroupId[groupIdHex] ?? [];
+
+    // First, check for explicit channel reference via 'e' tag with 'root' marker
+    // This indicates the message is explicitly associated with a channel
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty &&
+          tag[0] == 'e' &&
+          tag.length >= 4 &&
+          tag[3] == 'root') {
+        final channelId = tag[1];
+        final channel = channels.firstWhere(
+          (c) => c.id == channelId,
+          orElse: () => GroupChannelMetadata(
+            id: channelId,
+            groupId: groupIdHex,
+            name: 'general',
+            relays: [],
+            creator: '',
+            createdAt: DateTime.now(),
+          ),
+        );
+        // If channel not found by ID, check 't' tags on the event (these contain the channel name)
+        if (channel.name == 'general' && channel.id == channelId) {
+          // Channel not found by ID, try 't' tags on the event
+          final tTags = event.tags
+              .where((t) => t.isNotEmpty && t[0] == 't' && t.length > 1)
+              .toList();
+          if (tTags.isNotEmpty) {
+            // Use first 't' tag as channel name (this is the primary channel tag added when posting)
+            return tTags.first[1].toLowerCase();
+          }
+        }
+        return channel.name.toLowerCase();
+      }
+    }
+
+    // Fallback to first hashtag in content
+    final hashtags = NostrEventModel.extractHashtagsFromContent(event.content);
+    if (hashtags.isNotEmpty) {
+      final firstTag = hashtags.first.toLowerCase();
+      // Check if this tag matches a known channel
+      final matchingChannel = channels.firstWhere(
+        (c) => c.name.toLowerCase() == firstTag,
+        orElse: () => GroupChannelMetadata(
+          id: '',
+          groupId: groupIdHex,
+          name: firstTag,
+          relays: [],
+          creator: '',
+          createdAt: DateTime.now(),
+        ),
+      );
+      return matchingChannel.name.toLowerCase();
+    }
+
+    // Default to general
+    return 'general';
+  }
+
+  /// Get all channels that a message belongs to
+  /// Returns a list of channel names (hashtags) found in the message
+  /// This allows messages with multiple hashtags to appear in multiple channels
+  List<String> _channelsForEvent(NostrEventModel event) {
+    if (_activeGroup == null) return ['general'];
+
+    final groupIdHex = _groupIdToHex(_activeGroup!.id);
+    final channels = _channelsByGroupId[groupIdHex] ?? [];
+    final channelNames = <String>[];
+
+    // First, check for explicit channel reference via 'e' tag with 'root' marker
+    bool hasExplicitChannel = false;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty &&
+          tag[0] == 'e' &&
+          tag.length >= 4 &&
+          tag[3] == 'root') {
+        hasExplicitChannel = true;
+        final channelId = tag[1];
+        final channel = channels.firstWhere(
+          (c) => c.id == channelId,
+          orElse: () => GroupChannelMetadata(
+            id: channelId,
+            groupId: groupIdHex,
+            name: 'general',
+            relays: [],
+            creator: '',
+            createdAt: DateTime.now(),
+          ),
+        );
+        // If channel not found by ID, check 't' tags
+        if (channel.name == 'general' && channel.id == channelId) {
+          final tTags = event.tags
+              .where((t) => t.isNotEmpty && t[0] == 't' && t.length > 1)
+              .toList();
+          if (tTags.isNotEmpty) {
+            channelNames.addAll(tTags.map((t) => t[1].toLowerCase()));
+          } else {
+            channelNames.add('general');
+          }
+        } else {
+          channelNames.add(channel.name.toLowerCase());
+        }
+        break; // Only process first explicit channel reference
+      }
+    }
+
+    // If no explicit channel reference, check 't' tags and content hashtags
+    if (!hasExplicitChannel) {
+      // Get hashtags from 't' tags
+      final tTags = event.tags
+          .where((t) => t.isNotEmpty && t[0] == 't' && t.length > 1)
+          .map((t) => t[1].toLowerCase())
+          .toList();
+      channelNames.addAll(tTags);
+
+      // Also get hashtags from content
+      final contentHashtags =
+          NostrEventModel.extractHashtagsFromContent(event.content);
+      channelNames.addAll(contentHashtags.map((h) => h.toLowerCase()));
+    } else {
+      // If we have an explicit channel, also include any additional 't' tags
+      final additionalTTags = event.tags
+          .where((t) => t.isNotEmpty && t[0] == 't' && t.length > 1)
+          .map((t) => t[1].toLowerCase())
+          .toList();
+      channelNames.addAll(additionalTTags);
+    }
+
+    // If no hashtags found, default to general
+    if (channelNames.isEmpty) {
+      channelNames.add('general');
+    }
+
+    // Remove duplicates and return
+    return channelNames.toSet().toList();
+  }
+
+  /// Ensure a channel exists for a given tag name
+  /// If the channel doesn't exist, creates it via NIP-28 kind 40
+  /// Returns the channel metadata (optimistic if just created)
+  Future<GroupChannelMetadata> ensureChannelForTag(
+    String groupIdHex,
+    String tagName,
+  ) async {
+    if (_nostrService == null) {
+      throw Exception('NostrService not initialized');
+    }
+
+    final normalizedTag = tagName.toLowerCase();
+
+    // Check if channel already exists
+    final existingChannels = _channelsByGroupId[groupIdHex] ?? [];
+    final existing = existingChannels.firstWhere(
+      (c) => c.name.toLowerCase() == normalizedTag,
+      orElse: () => GroupChannelMetadata(
+        id: '',
+        groupId: groupIdHex,
+        name: normalizedTag,
+        relays: [],
+        creator: '',
+        createdAt: DateTime.now(),
+      ),
+    );
+
+    // If channel has an ID, it exists
+    if (existing.id.isNotEmpty) {
+      return existing;
+    }
+
+    // Channel doesn't exist, create it
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Create the channel via kind 40
+      final createEvent = await _nostrService!.createChannel(
+        groupIdHex: groupIdHex,
+        name: normalizedTag,
+        keyPairs: keyPair,
+      );
+
+      // Create optimistic channel metadata
+      // The relay will emit kind 39004 which will update this via watchGroupChannels
+      final optimisticChannel = GroupChannelMetadata(
+        id: createEvent.id,
+        groupId: groupIdHex,
+        name: normalizedTag,
+        relays: [_nostrService!.relayUrl],
+        creator: createEvent.pubkey,
+        createdAt: createEvent.createdAt,
+      );
+
+      // Add to local cache optimistically
+      if (!_channelsByGroupId.containsKey(groupIdHex)) {
+        _channelsByGroupId[groupIdHex] = [];
+      }
+      _channelsByGroupId[groupIdHex]!.add(optimisticChannel);
+      _channelsByGroupId[groupIdHex]!.sort((a, b) {
+        // 1. #general always comes first (even if pinned)
+        final aIsGeneral = a.name.toLowerCase() == 'general';
+        final bIsGeneral = b.name.toLowerCase() == 'general';
+        if (aIsGeneral != bIsGeneral) {
+          return aIsGeneral ? -1 : 1;
+        }
+
+        // 2. If both are general, they're equal
+        if (aIsGeneral && bIsGeneral) return 0;
+
+        // 3. Pinned channels next (excluding general)
+        final aPinned = a.extra?['pinned'] == true;
+        final bPinned = b.extra?['pinned'] == true;
+        if (aPinned != bPinned) {
+          return aPinned ? -1 : 1;
+        }
+
+        // 4. Then by order (if available)
+        final aOrder = a.extra?['order'] as num?;
+        final bOrder = b.extra?['order'] as num?;
+        if (aOrder != null && bOrder != null && aOrder != bOrder) {
+          return aOrder.compareTo(bOrder);
+        }
+        if (aOrder != null && bOrder == null) return -1;
+        if (aOrder == null && bOrder != null) return 1;
+
+        // 5. Fallback: alphabetical
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+
+      // Persist optimistic channel creation to database
+      if (_channelMetadataTable != null) {
+        await _persistChannels(groupIdHex, _channelsByGroupId[groupIdHex]!);
+      }
+
+      safeNotifyListeners();
+
+      debugPrint('Created channel "$normalizedTag" in group $groupIdHex');
+      return optimisticChannel;
+    } catch (e) {
+      debugPrint('Failed to create channel "$normalizedTag": $e');
+      rethrow;
+    }
+  }
+
+  /// Start watching channels for a group
+  Future<void> _startWatchingChannels(String groupIdHex) async {
+    if (_nostrService == null) return;
+
+    // Cancel existing subscription
+    await _channelSubscription?.cancel();
+
+    // Load from database first (fast, offline-capable)
+    if (_channelMetadataTable != null) {
+      try {
+        final cachedChannels = await _channelMetadataTable!.getByGroupId(groupIdHex);
+        if (cachedChannels.isNotEmpty) {
+          // Sort cached channels (general first, then pinned, then by order, then alphabetical)
+          final sortedCached = List<GroupChannelMetadata>.from(cachedChannels);
+          sortedCached.sort((a, b) {
+            // 1. #general always comes first (even if pinned)
+            final aIsGeneral = a.name.toLowerCase() == 'general';
+            final bIsGeneral = b.name.toLowerCase() == 'general';
+            if (aIsGeneral != bIsGeneral) {
+              return aIsGeneral ? -1 : 1;
+            }
+            if (aIsGeneral && bIsGeneral) return 0;
+
+            // 3. Pinned channels next (excluding general)
+            final aPinned = a.extra?['pinned'] == true;
+            final bPinned = b.extra?['pinned'] == true;
+            if (aPinned != bPinned) {
+              return aPinned ? -1 : 1;
+            }
+
+            // 4. Then by order (if available)
+            final aOrder = a.extra?['order'] as num?;
+            final bOrder = b.extra?['order'] as num?;
+            if (aOrder != null && bOrder != null && aOrder != bOrder) {
+              return aOrder.compareTo(bOrder);
+            }
+            if (aOrder != null && bOrder == null) return -1;
+            if (aOrder == null && bOrder != null) return 1;
+
+            // 5. Fallback: alphabetical
+            return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+          });
+          
+          _channelsByGroupId[groupIdHex] = sortedCached;
+
+          // Ensure active channel is set (default to general)
+          if (!_activeChannelNameByGroupId.containsKey(groupIdHex)) {
+            _activeChannelNameByGroupId[groupIdHex] = 'general';
+          }
+
+          safeNotifyListeners(); // Show cached channels immediately
+        }
+      } catch (e) {
+        debugPrint('Failed to load channels from database: $e');
+      }
+    }
+
+    // Fetch initial channels from relay (for updates)
+    try {
+      final fetchedChannels = await _nostrService!.fetchGroupChannelsOnce(groupIdHex);
+      
+      // Merge with database-loaded channels to preserve extra fields (pinned, order)
+      final existingChannels = _channelsByGroupId[groupIdHex] ?? [];
+      final channelMap = <String, GroupChannelMetadata>{
+        for (final ch in existingChannels) ch.id: ch,
+      };
+      
+      // Merge fetched channels with existing (preserve extra from database)
+      for (final fetchedChannel in fetchedChannels) {
+        if (channelMap.containsKey(fetchedChannel.id)) {
+          // Merge: preserve extra from database, update other fields from relay
+          final existingChannel = channelMap[fetchedChannel.id]!;
+          Map<String, dynamic>? mergedExtra;
+          
+          if (existingChannel.extra != null || fetchedChannel.extra != null) {
+            mergedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
+            if (fetchedChannel.extra != null) {
+              mergedExtra.addAll(fetchedChannel.extra!);
+            }
+          }
+          
+          channelMap[fetchedChannel.id] = GroupChannelMetadata(
+            id: fetchedChannel.id,
+            groupId: fetchedChannel.groupId,
+            name: fetchedChannel.name,
+            about: fetchedChannel.about,
+            picture: fetchedChannel.picture,
+            relays: fetchedChannel.relays,
+            creator: fetchedChannel.creator,
+            extra: mergedExtra,
+            createdAt: fetchedChannel.createdAt,
+          );
+        } else {
+          // New channel from relay
+          channelMap[fetchedChannel.id] = fetchedChannel;
+        }
+      }
+      
+      final mergedChannels = channelMap.values.toList();
+      
+      // Sort merged channels (general first, then pinned, then by order, then alphabetical)
+      mergedChannels.sort((a, b) {
+        // 1. #general always comes first (even if pinned)
+        final aIsGeneral = a.name.toLowerCase() == 'general';
+        final bIsGeneral = b.name.toLowerCase() == 'general';
+        if (aIsGeneral != bIsGeneral) {
+          return aIsGeneral ? -1 : 1;
+        }
+        if (aIsGeneral && bIsGeneral) return 0;
+
+        // 3. Pinned channels next (excluding general)
+        final aPinned = a.extra?['pinned'] == true;
+        final bPinned = b.extra?['pinned'] == true;
+        if (aPinned != bPinned) {
+          return aPinned ? -1 : 1;
+        }
+
+        // 4. Then by order (if available)
+        final aOrder = a.extra?['order'] as num?;
+        final bOrder = b.extra?['order'] as num?;
+        if (aOrder != null && bOrder != null && aOrder != bOrder) {
+          return aOrder.compareTo(bOrder);
+        }
+        if (aOrder != null && bOrder == null) return -1;
+        if (aOrder == null && bOrder != null) return 1;
+
+        // 5. Fallback: alphabetical
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      
+      _channelsByGroupId[groupIdHex] = mergedChannels;
+
+      // Persist merged channels to database
+      if (_channelMetadataTable != null) {
+        await _persistChannels(groupIdHex, mergedChannels);
+      }
+
+      // Ensure active channel is set (default to general)
+      if (!_activeChannelNameByGroupId.containsKey(groupIdHex)) {
+        _activeChannelNameByGroupId[groupIdHex] = 'general';
+      }
+
+      safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Failed to fetch initial channels: $e');
+    }
+
+    // Start watching for updates
+    try {
+      _channelSubscription = _nostrService!
+          .watchGroupChannels(groupIdHex)
+          .listen(
+        (channels) {
+          // Merge stream channels with database to preserve extra fields (pinned, order)
+          final existingChannels = _channelsByGroupId[groupIdHex] ?? [];
+          final channelMap = <String, GroupChannelMetadata>{
+            for (final ch in existingChannels) ch.id: ch,
+          };
+          
+          // Merge stream channels with existing (preserve extra from database)
+          for (final streamChannel in channels) {
+            if (channelMap.containsKey(streamChannel.id)) {
+              // Merge: preserve extra from database, update other fields from stream
+              final existingChannel = channelMap[streamChannel.id]!;
+              Map<String, dynamic>? mergedExtra;
+              
+              if (existingChannel.extra != null || streamChannel.extra != null) {
+                mergedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
+                if (streamChannel.extra != null) {
+                  mergedExtra.addAll(streamChannel.extra!);
+                }
+              }
+              
+              channelMap[streamChannel.id] = GroupChannelMetadata(
+                id: streamChannel.id,
+                groupId: streamChannel.groupId,
+                name: streamChannel.name,
+                about: streamChannel.about,
+                picture: streamChannel.picture,
+                relays: streamChannel.relays,
+                creator: streamChannel.creator,
+                extra: mergedExtra,
+                createdAt: streamChannel.createdAt,
+              );
+            } else {
+              // New channel from stream
+              channelMap[streamChannel.id] = streamChannel;
+            }
+          }
+          
+          final mergedChannels = channelMap.values.toList();
+          
+          // Sort merged channels (general first, then pinned, then by order, then alphabetical)
+          mergedChannels.sort((a, b) {
+            // 1. #general always comes first (even if pinned)
+            final aIsGeneral = a.name.toLowerCase() == 'general';
+            final bIsGeneral = b.name.toLowerCase() == 'general';
+            if (aIsGeneral != bIsGeneral) {
+              return aIsGeneral ? -1 : 1;
+            }
+            if (aIsGeneral && bIsGeneral) return 0;
+
+            // 3. Pinned channels next (excluding general)
+            final aPinned = a.extra?['pinned'] == true;
+            final bPinned = b.extra?['pinned'] == true;
+            if (aPinned != bPinned) {
+              return aPinned ? -1 : 1;
+            }
+
+            // 4. Then by order (if available)
+            final aOrder = a.extra?['order'] as num?;
+            final bOrder = b.extra?['order'] as num?;
+            if (aOrder != null && bOrder != null && aOrder != bOrder) {
+              return aOrder.compareTo(bOrder);
+            }
+            if (aOrder != null && bOrder == null) return -1;
+            if (aOrder == null && bOrder != null) return 1;
+
+            // 5. Fallback: alphabetical
+            return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+          });
+          
+          _channelsByGroupId[groupIdHex] = mergedChannels;
+
+          // Persist merged channels to database
+          if (_channelMetadataTable != null) {
+            _persistChannels(groupIdHex, mergedChannels);
+          }
+
+          safeNotifyListeners();
+        },
+        onError: (error) {
+          debugPrint('Error in channel subscription for group $groupIdHex: $error');
+          // Don't cancel subscription on error - continue listening
+          // The stream should handle errors internally and continue
+        },
+        cancelOnError: false, // Keep listening even if errors occur
+      );
+    } catch (e) {
+      debugPrint('Failed to watch channels: $e');
+    }
+  }
+
+  /// Persist channels to database
+  Future<void> _persistChannels(
+    String groupIdHex,
+    List<GroupChannelMetadata> channels,
+  ) async {
+    if (_channelMetadataTable == null) return;
+
+    try {
+      for (final channel in channels) {
+        await _channelMetadataTable!.insertOrUpdate(channel);
+      }
+    } catch (e) {
+      debugPrint('Failed to persist channels: $e');
+    }
+  }
+
+  /// Stop watching channels (when leaving a group)
+  Future<void> _stopWatchingChannels() async {
+    await _channelSubscription?.cancel();
+    _channelSubscription = null;
+  }
+
+  /// Pin or unpin a channel (admin-only)
+  /// [groupIdHex] - The MLS group ID (hex)
+  /// [channelId] - The channel ID
+  /// [pinned] - Whether to pin (true) or unpin (false) the channel
+  Future<void> pinChannel(
+    String groupIdHex,
+    String channelId,
+    bool pinned,
+  ) async {
+    if (_nostrService == null || !_isConnected) {
+      throw Exception('Not connected to relay');
+    }
+
+    // Check admin status
+    final isAdmin = await isGroupAdmin(groupIdHex);
+    if (!isAdmin) {
+      _relayErrorController.add('Only admins can pin or unpin channels');
+      throw Exception('Only admins can pin or unpin channels');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      // Get current channel metadata to preserve the name
+      final channels = _channelsByGroupId[groupIdHex] ?? [];
+      final channel = channels.firstWhere(
+        (c) => c.id == channelId,
+        orElse: () => GroupChannelMetadata(
+          id: channelId,
+          groupId: groupIdHex,
+          name: '', // Fallback if channel not found
+          relays: [],
+          creator: '',
+          createdAt: DateTime.now(),
+        ),
+      );
+
+      // Optimistic update: immediately update local state
+      final channelIndex = channels.indexWhere((c) => c.id == channelId);
+      if (channelIndex >= 0) {
+        final existingChannel = channels[channelIndex];
+        final updatedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
+        if (pinned) {
+          updatedExtra['pinned'] = true;
+        } else {
+          updatedExtra.remove('pinned');
+        }
+        
+        final updatedChannel = GroupChannelMetadata(
+          id: existingChannel.id,
+          groupId: existingChannel.groupId,
+          name: existingChannel.name,
+          about: existingChannel.about,
+          picture: existingChannel.picture,
+          relays: existingChannel.relays,
+          creator: existingChannel.creator,
+          extra: updatedExtra.isEmpty ? null : updatedExtra,
+          createdAt: existingChannel.createdAt,
+        );
+        
+        channels[channelIndex] = updatedChannel;
+        // Re-sort channels with new pinned state
+        channels.sort((a, b) {
+          // 1. #general always comes first (even if pinned)
+          final aIsGeneral = a.name.toLowerCase() == 'general';
+          final bIsGeneral = b.name.toLowerCase() == 'general';
+          if (aIsGeneral != bIsGeneral) {
+            return aIsGeneral ? -1 : 1;
+          }
+          if (aIsGeneral && bIsGeneral) return 0;
+
+          // 3. Pinned channels next (excluding general)
+          final aPinned = a.extra?['pinned'] == true;
+          final bPinned = b.extra?['pinned'] == true;
+          if (aPinned != bPinned) {
+            return aPinned ? -1 : 1;
+          }
+
+          // 4. Then by order (if available)
+          final aOrder = a.extra?['order'] as num?;
+          final bOrder = b.extra?['order'] as num?;
+          if (aOrder != null && bOrder != null && aOrder != bOrder) {
+            return aOrder.compareTo(bOrder);
+          }
+          if (aOrder != null && bOrder == null) return -1;
+          if (aOrder == null && bOrder != null) return 1;
+
+          // 5. Fallback: alphabetical
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        });
+        
+        _channelsByGroupId[groupIdHex] = channels;
+        
+        // Persist optimistic update to database
+        if (_channelMetadataTable != null) {
+          await _persistChannels(groupIdHex, channels);
+        }
+        
+        safeNotifyListeners();
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Update channel metadata with pinned field in extra
+      // Include the name to ensure it's preserved (relay should merge, but be safe)
+      await _nostrService!.updateChannelMetadata(
+        groupIdHex: groupIdHex,
+        channelId: channelId,
+        name: channel.name.isNotEmpty ? channel.name : null,
+        extra: {'pinned': pinned},
+        keyPairs: keyPair,
+      );
+
+      debugPrint('${pinned ? 'Pinned' : 'Unpinned'} channel $channelId in group $groupIdHex');
+    } catch (e) {
+      debugPrint('Failed to ${pinned ? 'pin' : 'unpin'} channel: $e');
+      _relayErrorController.add('Failed to ${pinned ? 'pin' : 'unpin'} channel: $e');
+      rethrow;
+    }
+  }
+
+  /// Update channel order (admin-only)
+  /// [groupIdHex] - The MLS group ID (hex)
+  /// [channelId] - The channel ID
+  /// [order] - The order value (lower numbers appear first)
+  Future<void> updateChannelOrder(
+    String groupIdHex,
+    String channelId,
+    num order,
+  ) async {
+    if (_nostrService == null || !_isConnected) {
+      throw Exception('Not connected to relay');
+    }
+
+    // Check admin status
+    final isAdmin = await isGroupAdmin(groupIdHex);
+    if (!isAdmin) {
+      _relayErrorController.add('Only admins can set channel order');
+      throw Exception('Only admins can set channel order');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      // Get current channel metadata to preserve the name
+      final channels = _channelsByGroupId[groupIdHex] ?? [];
+      final channel = channels.firstWhere(
+        (c) => c.id == channelId,
+        orElse: () => GroupChannelMetadata(
+          id: channelId,
+          groupId: groupIdHex,
+          name: '', // Fallback if channel not found
+          relays: [],
+          creator: '',
+          createdAt: DateTime.now(),
+        ),
+      );
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Update channel metadata with order field in extra
+      // Include the name to ensure it's preserved (relay should merge, but be safe)
+      await _nostrService!.updateChannelMetadata(
+        groupIdHex: groupIdHex,
+        channelId: channelId,
+        name: channel.name.isNotEmpty ? channel.name : null,
+        extra: {'order': order},
+        keyPairs: keyPair,
+      );
+
+      debugPrint('Updated channel $channelId order to $order in group $groupIdHex');
+    } catch (e) {
+      debugPrint('Failed to update channel order: $e');
+      _relayErrorController.add('Failed to update channel order: $e');
+      rethrow;
+    }
+  }
+
+  /// Reorder pinned channels (admin-only)
+  /// Assigns order values 1, 2, 3... to channels in the provided order
+  /// [groupIdHex] - The MLS group ID (hex)
+  /// [channelIds] - Ordered list of channel IDs (first = order 1, second = order 2, etc.)
+  Future<void> reorderPinnedChannels(
+    String groupIdHex,
+    List<String> channelIds,
+  ) async {
+    if (_nostrService == null || !_isConnected) {
+      throw Exception('Not connected to relay');
+    }
+
+    // Check admin status
+    final isAdmin = await isGroupAdmin(groupIdHex);
+    if (!isAdmin) {
+      _relayErrorController.add('Only admins can reorder channels');
+      throw Exception('Only admins can reorder channels');
+    }
+
+    try {
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      // Get current channel metadata to preserve names
+      final channels = _channelsByGroupId[groupIdHex] ?? [];
+      final channelMap = {
+        for (final ch in channels) ch.id: ch,
+      };
+
+      // Update each channel with its new order value
+      for (int i = 0; i < channelIds.length; i++) {
+        final channelId = channelIds[i];
+        final order = i + 1; // Start from 1
+        final channel = channelMap[channelId];
+
+        final channelName = channel?.name;
+        await _nostrService!.updateChannelMetadata(
+          groupIdHex: groupIdHex,
+          channelId: channelId,
+          name: (channelName != null && channelName.isNotEmpty) ? channelName : null,
+          extra: {'order': order},
+          keyPairs: keyPair,
+        );
+      }
+
+      debugPrint('Reordered ${channelIds.length} channels in group $groupIdHex');
+    } catch (e) {
+      debugPrint('Failed to reorder channels: $e');
+      _relayErrorController.add('Failed to reorder channels: $e');
+      rethrow;
+    }
   }
 
   /// Resolve MLS group by hex ID (for NostrService)
@@ -1875,9 +2714,7 @@ class GroupState with ChangeNotifier {
     }
 
     if (migrated > 0) {
-      debugPrint(
-        '_migrateNip29GroupIdMappings: migrated $migrated groups',
-      );
+      debugPrint('_migrateNip29GroupIdMappings: migrated $migrated groups');
     }
   }
 
@@ -2206,9 +3043,10 @@ class GroupState with ChangeNotifier {
     _isLoadingMoreGroupMessages = false;
 
     if (group == null) {
-      // Stop listening for messages
+      // Stop listening for messages and channels
       _messageEventSubscription?.cancel();
       _messageEventSubscription = null;
+      _stopWatchingChannels();
       notifyListeners(); // Use direct notify for immediate UI update
       return;
     }
@@ -2222,6 +3060,10 @@ class GroupState with ChangeNotifier {
     // This ensures the UI frame completes and shows loading state first
     Future.microtask(() async {
       try {
+        // Start watching channels for this group
+        final groupIdHex = _groupIdToHex(group.id);
+        await _startWatchingChannels(groupIdHex);
+
         // Start listening for new messages
         _startListeningForGroupMessages(group);
 
@@ -2492,9 +3334,14 @@ class GroupState with ChangeNotifier {
       );
       if (!hasGroupTag) continue;
 
-      // Check if this is a comment (has 'e' tag for reply) - skip comments from main feed
+      // Check if this is a comment (has 'e' tag for reply, but NOT for channel reference)
+      // Channel references use 'e' tag with 'root' marker, comments use 'reply' or no marker
       final isComment = event.tags.any(
-        (tag) => tag.isNotEmpty && tag[0] == 'e' && tag.length > 1,
+        (tag) =>
+            tag.isNotEmpty &&
+            tag[0] == 'e' &&
+            tag.length > 1 &&
+            (tag.length < 4 || tag[3] != 'root'), // Exclude channel reference tags
       );
       if (isComment) {
         // Emit to comment stream for post detail views
@@ -3190,7 +4037,7 @@ class GroupState with ChangeNotifier {
                 if (!_allDecryptedMessages.any((e) => e.id == event.id)) {
                   _allDecryptedMessages.insert(0, event);
                 }
-                
+
                 safeNotifyListeners();
               } else {
                 debugPrint(
@@ -3255,10 +4102,30 @@ class GroupState with ChangeNotifier {
       // Extract URLs and generate 'r' tags (Nostr convention for URL references)
       final urlTags = _linkPreviewService.generateUrlTags(content);
 
+      // Extract hashtags to determine primary channel
+      final hashtags = NostrEventModel.extractHashtagsFromContent(content);
+      final primaryChannelTag = hashtags.isNotEmpty
+          ? hashtags.first.toLowerCase()
+          : activeChannelName; // Use selected channel instead of hardcoded 'general'
+
+      // Ensure primary channel exists (creates it if needed)
+      final channel = await ensureChannelForTag(groupIdHex, primaryChannelTag);
+
+      // Ensure all additional hashtags also create channels
+      for (final tag in hashtags.skip(1)) {
+        await ensureChannelForTag(groupIdHex, tag.toLowerCase());
+      }
+
       // Build tags list
       final baseTags = <List<String>>[
         ['g', groupIdHex], // Add group ID tag
+        ['t', primaryChannelTag], // Add primary channel as hashtag tag
+        // Add channel reference tag (NIP-28 style)
+        if (channel.id.isNotEmpty)
+          ['e', channel.id, _nostrService!.relayUrl, 'root'],
         ...urlTags, // Add URL reference tags
+        // Add any additional hashtags beyond the primary one
+        ...hashtags.skip(1).map((tag) => ['t', tag.toLowerCase()]),
       ];
 
       // Add image tag if provided (NIP-92 imeta format)
@@ -3332,6 +4199,13 @@ class GroupState with ChangeNotifier {
       }
       safeNotifyListeners();
 
+      // Switch to the channel if it's different from current active channel
+      // Only switch if hashtags were found (posting to a specific channel)
+      if (hashtags.isNotEmpty &&
+          primaryChannelTag.toLowerCase() != activeChannelName.toLowerCase()) {
+        setActiveChannel(primaryChannelTag);
+      }
+
       debugPrint(
         'Posted encrypted message to group ${_activeGroup!.name}: ${eventModel.id}',
       );
@@ -3378,16 +4252,32 @@ class GroupState with ChangeNotifier {
       // Extract URLs and generate 'r' tags (Nostr convention for URL references)
       final urlTags = _linkPreviewService.generateUrlTags(content);
 
-      // Extract hashtags and generate 't' tags (NIP-12)
-      final hashtagTags = NostrEventModel.generateHashtagTags(content);
+      // Extract hashtags to determine primary channel
+      final hashtags = NostrEventModel.extractHashtagsFromContent(content);
+      final primaryChannelTag = hashtags.isNotEmpty
+          ? hashtags.first.toLowerCase()
+          : activeChannelName; // Use selected channel instead of hardcoded 'general'
+
+      // Ensure primary channel exists (creates it if needed)
+      final channel = await ensureChannelForTag(groupIdHex, primaryChannelTag);
+
+      // Ensure all additional hashtags also create channels
+      for (final tag in hashtags.skip(1)) {
+        await ensureChannelForTag(groupIdHex, tag.toLowerCase());
+      }
 
       // Build tags list with 'q' tag for quote (NIP-18)
       // Format: ['q', '<event_id>', '<relay_url>', '<pubkey>']
       final baseTags = <List<String>>[
         ['g', groupIdHex], // Add group ID tag
         ['q', quotedEvent.id, '', quotedEvent.pubkey], // Quote tag
+        ['t', primaryChannelTag], // Add primary channel as hashtag tag
+        // Add channel reference tag (NIP-28 style)
+        if (channel.id.isNotEmpty)
+          ['e', channel.id, _nostrService!.relayUrl, 'root'],
         ...urlTags, // Add URL reference tags
-        ...hashtagTags, // Add hashtag tags
+        // Add any additional hashtags beyond the primary one
+        ...hashtags.skip(1).map((tag) => ['t', tag.toLowerCase()]),
       ];
 
       // Create a normal Nostr event (kind 1 = text note)
@@ -3440,6 +4330,13 @@ class GroupState with ChangeNotifier {
         _allDecryptedMessages.insert(0, eventModel);
       }
       safeNotifyListeners();
+
+      // Switch to the channel if it's different from current active channel
+      // Only switch if hashtags were found (posting to a specific channel)
+      if (hashtags.isNotEmpty &&
+          primaryChannelTag.toLowerCase() != activeChannelName.toLowerCase()) {
+        setActiveChannel(primaryChannelTag);
+      }
 
       debugPrint(
         'Posted encrypted quote post to group ${_activeGroup!.name}: ${eventModel.id}',
@@ -3590,10 +4487,10 @@ class GroupState with ChangeNotifier {
     return result;
   }
 
-  /// Upload media to the user's own (personal) group
+  /// Upload media to global/public storage (no group association).
   ///
-  /// Uses the Blossom protocol with the user's personal group ID.
-  /// This is useful for uploading profile photos and other personal media.
+  /// This is used for profile pictures and community icons where the image
+  /// should be publicly accessible and not restricted to a specific group.
   Future<String> uploadMediaToOwnGroup(
     Uint8List fileBytes,
     String mimeType,
@@ -3605,54 +4502,44 @@ class GroupState with ChangeNotifier {
       );
     }
 
-    final pubkey = await getNostrPublicKey();
-    if (pubkey == null) {
-      throw Exception('No pubkey available');
-    }
+    final keyPair = NostrKeyPairs(private: privateKey);
 
-    // Find the user's personal group (one they created)
-    MlsGroup? personalGroup;
-    for (final group in _groups) {
-      final groupIdHex = _groupIdToHex(group.id);
-      // Check if this group was created by the user
-      final announcement = _discoveredGroups.firstWhere(
-        (a) => a.mlsGroupId == groupIdHex && a.pubkey == pubkey,
-        orElse: () => GroupAnnouncement(
-          eventId: '',
-          pubkey: '',
-          createdAt: DateTime.now(),
-        ),
+    final result = await _mediaUploadService.upload(
+      fileBytes: fileBytes,
+      mimeType: mimeType,
+      groupId: null,
+      keyPairs: keyPair,
+    );
+
+    return result.url;
+  }
+
+  /// Upload unencrypted media to a specific group (for icons/covers).
+  ///
+  /// This uploads with the group ID (`h` tag) so the blob is organized under
+  /// the group, but without MLS encryption so it can be displayed as a plain image.
+  /// The relay will validate group membership before allowing the upload.
+  Future<String> uploadGroupIcon(
+    Uint8List fileBytes,
+    String mimeType,
+    String groupIdHex,
+  ) async {
+    final privateKey = await getNostrPrivateKey();
+    if (privateKey == null || privateKey.isEmpty) {
+      throw Exception(
+        'No Nostr key found. Please ensure keys are initialized.',
       );
-      if (announcement.pubkey == pubkey) {
-        personalGroup = group;
-        break;
-      }
-    }
-
-    // Fallback: use the first group named "Personal" or any group the user is in
-    if (personalGroup == null && _groups.isNotEmpty) {
-      personalGroup = _groups.firstWhere(
-        (g) => g.name.toLowerCase() == 'personal',
-        orElse: () => _groups.first,
-      );
-    }
-
-    if (personalGroup == null) {
-      throw Exception('No personal group found. Please create a group first.');
     }
 
     final keyPair = NostrKeyPairs(private: privateKey);
-    final groupIdHex = _groupIdToHex(personalGroup.id);
 
-    debugPrint(
-      'Uploading to personal group: ${personalGroup.name} ($groupIdHex)',
-    );
-
+    // Upload with group ID but without MLS encryption
     final result = await _mediaUploadService.upload(
       fileBytes: fileBytes,
       mimeType: mimeType,
       groupId: groupIdHex,
       keyPairs: keyPair,
+      mlsGroup: null, // No encryption - plain image
     );
 
     return result.url;
@@ -4030,7 +4917,9 @@ class GroupState with ChangeNotifier {
       );
 
       if (events.isEmpty) {
-        debugPrint('No personal group found for pubkey ${pubkey.substring(0, 8)}...');
+        debugPrint(
+          'No personal group found for pubkey ${pubkey.substring(0, 8)}...',
+        );
         return null;
       }
 

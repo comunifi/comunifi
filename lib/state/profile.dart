@@ -13,6 +13,7 @@ import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/services/mls/mls.dart';
 import 'package:comunifi/services/db/app_db.dart';
+import 'package:comunifi/services/preferences/notification_preferences.dart';
 
 class ProfileState with ChangeNotifier {
   // instantiate services here
@@ -31,6 +32,9 @@ class ProfileState with ChangeNotifier {
     try {
       // Initialize MLS storage for keys group
       await _initializeKeysGroup();
+
+      // Load notification preferences (e.g., new-post sound toggle).
+      await _loadNotificationPreferences();
 
       // Load environment variables
       try {
@@ -118,6 +122,18 @@ class ProfileState with ChangeNotifier {
     }
   }
 
+  /// Load persisted notification preferences into memory.
+  Future<void> _loadNotificationPreferences() async {
+    try {
+      final prefs = NotificationPreferencesService.instance;
+      await prefs.ensureInitialized();
+      _playNewPostSound = prefs.isNewPostSoundEnabled;
+      safeNotifyListeners();
+    } catch (e) {
+      debugPrint('Failed to load notification preferences: $e');
+    }
+  }
+
   /// Initialize the local username table for storing random usernames
   Future<void> _initializeLocalUsernameTable() async {
     try {
@@ -183,13 +199,34 @@ class ProfileState with ChangeNotifier {
   bool _isLoading = false;
   String? _errorMessage;
   final Map<String, ProfileData?> _profiles = {};
+  bool _playNewPostSound = true;
 
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
   Map<String, ProfileData?> get profiles => Map.unmodifiable(_profiles);
+  bool get playNewPostSound => _playNewPostSound;
 
   // state methods here
+
+  /// Enable or disable the new-post notification sound.
+  ///
+  /// Updates in-memory state immediately and then persists the preference.
+  Future<void> setPlayNewPostSound(bool enabled) async {
+    if (_playNewPostSound == enabled) {
+      return;
+    }
+
+    _playNewPostSound = enabled;
+    safeNotifyListeners();
+
+    try {
+      await NotificationPreferencesService.instance
+          .setNewPostSoundEnabled(enabled);
+    } catch (e) {
+      debugPrint('Failed to update notification preference: $e');
+    }
+  }
 
   /// Get or generate a local username for a pubkey
   /// Returns a random username stored in local DB

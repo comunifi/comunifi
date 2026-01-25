@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart' as material;
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
@@ -19,7 +20,7 @@ import 'package:comunifi/screens/feed/group_settings_modal.dart';
 import 'package:comunifi/screens/feed/create_group_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
-import 'package:comunifi/widgets/members_sidebar.dart';
+import 'package:comunifi/widgets/group_right_sidebar.dart';
 import 'package:comunifi/widgets/slide_in_sidebar.dart';
 import 'package:comunifi/widgets/comment_bubble.dart';
 import 'package:comunifi/widgets/heart_button.dart';
@@ -30,6 +31,7 @@ import 'package:comunifi/widgets/encrypted_image.dart';
 import 'package:comunifi/widgets/author_avatar.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/media/media_upload.dart';
+import 'package:comunifi/theme/colors.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class FeedScreen extends StatefulWidget {
@@ -513,7 +515,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   ),
                 ),
                 child: activeGroup != null
-                    ? MembersSidebar(onClose: () {}, showCloseButton: false)
+                    ? GroupRightSidebar(onClose: () {}, showCloseButton: false)
                     : ProfileSidebar(onClose: () {}, showCloseButton: false),
               ),
             ],
@@ -642,7 +644,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
               position: SlideInSidebarPosition.right,
               width: sidebarWidth,
               child: activeGroup != null
-                  ? MembersSidebar(
+                  ? GroupRightSidebar(
                       onClose: () {
                         setState(() {
                           _isRightSidebarOpen = false;
@@ -796,6 +798,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   selectedImageBytes: _selectedImageBytes,
                   onClearImage: _clearSelectedImage,
                   showImagePicker: true,
+                  groupState: groupState,
                 ),
               ],
             ),
@@ -1637,10 +1640,19 @@ class _RichContentText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final spans = _buildTextSpans(context);
-    return RichText(
-      text: TextSpan(
-        style: DefaultTextStyle.of(context).style.copyWith(fontSize: 15),
-        children: spans,
+    return Localizations(
+      locale: Localizations.localeOf(context),
+      delegates: [
+        material.DefaultMaterialLocalizations.delegate,
+        material.DefaultWidgetsLocalizations.delegate,
+      ],
+      child: material.SelectionArea(
+        child: RichText(
+          text: TextSpan(
+            style: DefaultTextStyle.of(context).style.copyWith(fontSize: 15),
+            children: spans,
+          ),
+        ),
       ),
     );
   }
@@ -2124,6 +2136,12 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   static const double _profileOverlap = 40.0;
   static const double _infoSectionHeight = 80.0;
 
+  static const LinearGradient _defaultGroupCoverGradient = LinearGradient(
+    colors: <Color>[AppColors.primary, AppColors.accent],
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+  );
+
   _CollapsingGroupHeaderDelegate({
     required this.group,
     this.announcement,
@@ -2194,28 +2212,14 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
                       // Fallback to gradient if image fails to load
                       return Container(
                         decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              CupertinoColors.systemIndigo.withOpacity(0.6),
-                              CupertinoColors.systemPurple.withOpacity(0.4),
-                            ],
-                          ),
+                          gradient: _defaultGroupCoverGradient,
                         ),
                       );
                     },
                   )
                 : Container(
                     decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          CupertinoColors.systemIndigo.withOpacity(0.6),
-                          CupertinoColors.systemPurple.withOpacity(0.4),
-                        ],
-                      ),
+                      gradient: _defaultGroupCoverGradient,
                     ),
                   ),
           ),
@@ -2431,7 +2435,9 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
   void _showEditModal() {
     final groupIdHex = _groupIdToHex(widget.group);
     // Use getGroupAnnouncementByHexId which handles MLS to NIP-29 ID mapping
-    final announcement = widget.groupState.getGroupAnnouncementByHexId(groupIdHex);
+    final announcement = widget.groupState.getGroupAnnouncementByHexId(
+      groupIdHex,
+    );
 
     final effectiveAnnouncement =
         announcement ??
@@ -2449,7 +2455,9 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
   void _showSettingsModal() {
     final groupIdHex = _groupIdToHex(widget.group);
     // Use getGroupAnnouncementByHexId which handles MLS to NIP-29 ID mapping
-    final announcement = widget.groupState.getGroupAnnouncementByHexId(groupIdHex);
+    final announcement = widget.groupState.getGroupAnnouncementByHexId(
+      groupIdHex,
+    );
 
     final effectiveAnnouncement =
         announcement ??
@@ -2472,7 +2480,9 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
 
     // Get the announcement for this group using proper ID mapping
     final groupIdHex = _groupIdToHex(widget.group);
-    final announcement = widget.groupState.getGroupAnnouncementByHexId(groupIdHex);
+    final announcement = widget.groupState.getGroupAnnouncementByHexId(
+      groupIdHex,
+    );
 
     return SliverPersistentHeader(
       pinned: true,
@@ -2744,7 +2754,198 @@ class _MentionProfileModalState extends State<_MentionProfileModal> {
   }
 }
 
-class _ComposeMessageWidget extends StatelessWidget {
+/// Widget to display hashtag pills below the composer
+class _HashtagPillsRow extends StatelessWidget {
+  final List<String> hashtags;
+  final void Function(String) onRemove;
+
+  const _HashtagPillsRow({
+    required this.hashtags,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (hashtags.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.start, // Left align
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            for (int i = 0; i < hashtags.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(right: 6.0),
+                child: _HashtagPill(
+                  hashtag: hashtags[i],
+                  isPrimary: i == 0,
+                  canRemove: hashtags.length > 1,
+                  onRemove: () => onRemove(hashtags[i]),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Individual hashtag pill widget
+class _HashtagPill extends StatelessWidget {
+  final String hashtag;
+  final bool isPrimary;
+  final bool canRemove;
+  final VoidCallback onRemove;
+
+  const _HashtagPill({
+    required this.hashtag,
+    required this.isPrimary,
+    required this.canRemove,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: canRemove ? onRemove : null,
+      child: Container(
+        decoration: BoxDecoration(
+          color: isPrimary
+              ? CupertinoColors.activeBlue
+              : CupertinoColors.secondarySystemFill,
+          borderRadius: BorderRadius.circular(12.0),
+        ),
+        padding: EdgeInsets.symmetric(
+          horizontal: 10.0,
+          vertical: 4.0,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '#$hashtag',
+              style: TextStyle(
+                color: isPrimary
+                    ? CupertinoColors.white
+                    : CupertinoColors.label,
+                fontSize: 12,
+                fontWeight: isPrimary ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+            if (canRemove) ...[
+              const SizedBox(width: 4),
+              Icon(
+                CupertinoIcons.xmark_circle_fill,
+                size: 14,
+                color: isPrimary
+                    ? CupertinoColors.white.withOpacity(0.8)
+                    : CupertinoColors.secondaryLabel,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact inline hashtag badges for display within text input
+class _InlineHashtagBadges extends StatelessWidget {
+  final List<String> hashtags;
+  final void Function(String) onRemove;
+
+  const _InlineHashtagBadges({
+    required this.hashtags,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (int i = 0; i < hashtags.length; i++)
+            Padding(
+              padding: const EdgeInsets.only(right: 4.0),
+              child: _InlineHashtagBadge(
+                hashtag: hashtags[i],
+                isPrimary: i == 0,
+                canRemove: hashtags.length > 1,
+                onRemove: () => onRemove(hashtags[i]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Individual inline hashtag badge widget
+class _InlineHashtagBadge extends StatelessWidget {
+  final String hashtag;
+  final bool isPrimary;
+  final bool canRemove;
+  final VoidCallback onRemove;
+
+  const _InlineHashtagBadge({
+    required this.hashtag,
+    required this.isPrimary,
+    required this.canRemove,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: canRemove ? onRemove : null,
+      child: Container(
+        height: 20.0, // Compact height for inline display
+        decoration: BoxDecoration(
+          color: isPrimary
+              ? CupertinoColors.activeBlue
+              : CupertinoColors.secondarySystemFill,
+          borderRadius: BorderRadius.circular(10.0),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 2.0),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '#$hashtag',
+              style: TextStyle(
+                color: isPrimary
+                    ? CupertinoColors.white
+                    : CupertinoColors.label,
+                fontSize: 11,
+                fontWeight: isPrimary ? FontWeight.w600 : FontWeight.normal,
+                height: 1.0,
+              ),
+            ),
+            if (canRemove) ...[
+              const SizedBox(width: 3),
+              Icon(
+                CupertinoIcons.xmark_circle_fill,
+                size: 12,
+                color: isPrimary
+                    ? CupertinoColors.white.withOpacity(0.8)
+                    : CupertinoColors.secondaryLabel,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ComposeMessageWidget extends StatefulWidget {
   final TextEditingController controller;
   final bool isPublishing;
   final String? error;
@@ -2755,6 +2956,7 @@ class _ComposeMessageWidget extends StatelessWidget {
   final Uint8List? selectedImageBytes;
   final VoidCallback? onClearImage;
   final bool showImagePicker;
+  final GroupState? groupState; // Optional, for showing channel in group context
 
   const _ComposeMessageWidget({
     required this.controller,
@@ -2767,7 +2969,57 @@ class _ComposeMessageWidget extends StatelessWidget {
     this.selectedImageBytes,
     this.onClearImage,
     this.showImagePicker = false,
+    this.groupState,
   });
+
+  @override
+  State<_ComposeMessageWidget> createState() => _ComposeMessageWidgetState();
+}
+
+class _ComposeMessageWidgetState extends State<_ComposeMessageWidget> {
+  List<String> _extractedHashtags = [];
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_extractHashtags);
+    _extractHashtags(); // Initial extraction
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_extractHashtags);
+    super.dispose();
+  }
+
+  void _extractHashtags() {
+    final content = widget.controller.text;
+    final hashtags = NostrEventModel.extractHashtagsFromContent(content);
+    setState(() {
+      _extractedHashtags = hashtags.isNotEmpty
+          ? hashtags
+          : [widget.groupState?.activeChannelName ?? 'general'];
+    });
+  }
+
+  void _removeHashtag(String hashtag) {
+    if (_extractedHashtags.length <= 1) return; // Can't remove last one
+
+    // Remove hashtag from content (handle multiple occurrences)
+    final content = widget.controller.text;
+    // Use regex to remove the hashtag (with #) but preserve surrounding text
+    final regex = RegExp(r'#\b' + RegExp.escape(hashtag) + r'\b');
+    final updated = content.replaceAll(regex, '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    
+    final selectionOffset = widget.controller.selection.baseOffset;
+    widget.controller.text = updated;
+    
+    // Try to preserve cursor position, but clamp to valid range
+    final newOffset = selectionOffset > updated.length ? updated.length : selectionOffset;
+    widget.controller.selection = TextSelection.collapsed(offset: newOffset);
+
+    _extractHashtags(); // Re-extract
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2783,7 +3035,7 @@ class _ComposeMessageWidget extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (error != null)
+            if (widget.error != null)
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16.0,
@@ -2794,7 +3046,7 @@ class _ComposeMessageWidget extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        error!,
+                        widget.error!,
                         style: const TextStyle(
                           color: CupertinoColors.systemRed,
                           fontSize: 12,
@@ -2804,7 +3056,7 @@ class _ComposeMessageWidget extends StatelessWidget {
                     CupertinoButton(
                       padding: EdgeInsets.zero,
                       minSize: 0,
-                      onPressed: onErrorDismiss,
+                      onPressed: widget.onErrorDismiss,
                       child: const Icon(
                         CupertinoIcons.xmark_circle_fill,
                         color: CupertinoColors.systemRed,
@@ -2815,7 +3067,7 @@ class _ComposeMessageWidget extends StatelessWidget {
                 ),
               ),
             // Selected image preview
-            if (selectedImageBytes != null)
+            if (widget.selectedImageBytes != null)
               Align(
                 alignment: Alignment.centerLeft,
                 child: Container(
@@ -2825,7 +3077,7 @@ class _ComposeMessageWidget extends StatelessWidget {
                       ClipRRect(
                         borderRadius: BorderRadius.circular(12.0),
                         child: Image.memory(
-                          selectedImageBytes!,
+                          widget.selectedImageBytes!,
                           height: 80,
                           width: 80,
                           fit: BoxFit.cover,
@@ -2837,7 +3089,7 @@ class _ComposeMessageWidget extends StatelessWidget {
                         child: CupertinoButton(
                           padding: EdgeInsets.zero,
                           minSize: 0,
-                          onPressed: onClearImage,
+                          onPressed: widget.onClearImage,
                           child: Container(
                             width: 20,
                             height: 20,
@@ -2863,11 +3115,11 @@ class _ComposeMessageWidget extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   // Image picker button
-                  if (showImagePicker && onPickImage != null)
+                  if (widget.showImagePicker && widget.onPickImage != null)
                     CupertinoButton(
                       padding: EdgeInsets.zero,
                       minSize: 0,
-                      onPressed: isPublishing ? null : onPickImage,
+                      onPressed: widget.isPublishing ? null : widget.onPickImage,
                       child: Container(
                         width: 36,
                         height: 36,
@@ -2877,14 +3129,14 @@ class _ComposeMessageWidget extends StatelessWidget {
                         ),
                         child: Icon(
                           CupertinoIcons.photo,
-                          color: isPublishing
+                          color: widget.isPublishing
                               ? CupertinoColors.systemGrey
                               : CupertinoColors.systemBlue,
                           size: 20,
                         ),
                       ),
                     ),
-                  if (showImagePicker && onPickImage != null)
+                  if (widget.showImagePicker && widget.onPickImage != null)
                     const SizedBox(width: 8),
                   Expanded(
                     child: Focus(
@@ -2897,27 +3149,53 @@ class _ComposeMessageWidget extends StatelessWidget {
                             event is KeyDownEvent &&
                             event.logicalKey == LogicalKeyboardKey.enter &&
                             !HardwareKeyboard.instance.isShiftPressed) {
-                          if (!isPublishing) {
-                            onPublish();
+                          if (!widget.isPublishing) {
+                            widget.onPublish();
                           }
                           return KeyEventResult.handled;
                         }
                         return KeyEventResult.ignored;
                       },
-                      child: CupertinoTextField(
-                        controller: controller,
-                        placeholder: placeholder ?? 'Write a message...',
-                        maxLines: null,
-                        minLines: 1,
-                        textInputAction: TextInputAction.newline,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12.0,
-                          vertical: 8.0,
-                        ),
-                        decoration: BoxDecoration(
-                          color: CupertinoColors.systemGrey6,
-                          borderRadius: BorderRadius.circular(20.0),
-                        ),
+                      child: Stack(
+                        alignment: Alignment.bottomLeft,
+                        children: [
+                          CupertinoTextField(
+                            controller: widget.controller,
+                            placeholder: widget.placeholder ?? 'Write a message...',
+                            maxLines: null,
+                            minLines: 1,
+                            textInputAction: TextInputAction.newline,
+                            padding: EdgeInsets.only(
+                              left: 12.0,
+                              right: 12.0,
+                              top: 8.0,
+                              bottom: widget.groupState != null &&
+                                      widget.groupState!.activeGroup != null &&
+                                      widget.controller.text.isNotEmpty &&
+                                      _extractedHashtags.isNotEmpty
+                                  ? 40.0 // Space for badges
+                                  : 8.0,
+                            ),
+                            decoration: BoxDecoration(
+                              color: CupertinoColors.systemGrey6,
+                              borderRadius: BorderRadius.circular(20.0),
+                            ),
+                          ),
+                          // Inline badges overlay
+                          if (widget.groupState != null &&
+                              widget.groupState!.activeGroup != null &&
+                              widget.controller.text.isNotEmpty &&
+                              _extractedHashtags.isNotEmpty)
+                            Positioned(
+                              left: 12.0,
+                              bottom: 4.0,
+                              right: 12.0,
+                              child: _InlineHashtagBadges(
+                                hashtags: _extractedHashtags,
+                                onRemove: _removeHashtag,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ),
@@ -2925,17 +3203,17 @@ class _ComposeMessageWidget extends StatelessWidget {
                   CupertinoButton(
                     padding: EdgeInsets.zero,
                     minSize: 0,
-                    onPressed: isPublishing ? null : onPublish,
+                    onPressed: widget.isPublishing ? null : widget.onPublish,
                     child: Container(
                       width: 36,
                       height: 36,
                       decoration: BoxDecoration(
-                        color: isPublishing
+                        color: widget.isPublishing
                             ? CupertinoColors.systemGrey
                             : CupertinoColors.systemBlue,
                         shape: BoxShape.circle,
                       ),
-                      child: isPublishing
+                      child: widget.isPublishing
                           ? const CupertinoActivityIndicator(
                               color: CupertinoColors.white,
                             )

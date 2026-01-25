@@ -76,24 +76,28 @@ class _CreateGroupModalState extends State<CreateGroupModal> {
         about: about.isEmpty ? null : about,
       );
 
-      // 2. Set it as active so uploadMedia works
+      // 2. Set it as active so the user is navigated into the new group
       groupState.setActiveGroup(newGroup);
 
-      // 3. Upload image to the newly created group
+      // 3. Upload image to the group (unencrypted, but with group ID)
       String? pictureUrl;
       if (_selectedPhotoBytes != null) {
-        setState(() => _isUploadingPhoto = true);
-        final uploadResult = await groupState.uploadMedia(
-          _selectedPhotoBytes!,
-          'image/jpeg',
-        );
-        pictureUrl = uploadResult.url;
-        setState(() => _isUploadingPhoto = false);
+        // Small delay to let the relay process the kind 9000 (put-user) event
+        // so membership is recognized before we try to upload with the group ID
+        await Future.delayed(const Duration(milliseconds: 500));
 
-        // 4. Update group metadata with the picture URL
+        setState(() => _isUploadingPhoto = true);
         final groupIdHex = newGroup.id.bytes
             .map((b) => b.toRadixString(16).padLeft(2, '0'))
             .join();
+        pictureUrl = await groupState.uploadGroupIcon(
+          _selectedPhotoBytes!,
+          'image/jpeg',
+          groupIdHex,
+        );
+        setState(() => _isUploadingPhoto = false);
+
+        // 4. Update group metadata with the picture URL
         await groupState.updateGroupMetadata(
           groupIdHex: groupIdHex,
           name: name,

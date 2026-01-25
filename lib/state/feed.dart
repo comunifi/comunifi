@@ -15,6 +15,8 @@ import 'package:comunifi/services/mls/storage/secure_storage.dart';
 import 'package:comunifi/services/db/app_db.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/secure_storage/secure_storage.dart';
+import 'package:comunifi/services/preferences/notification_preferences.dart';
+import 'package:comunifi/services/sound/sound_service.dart';
 
 /// Shared secure storage key for Nostr private key
 const String _nostrPrivateKeyStorageKey = 'comunifi_nostr_private_key';
@@ -45,6 +47,20 @@ class FeedState with ChangeNotifier {
 
       // Load or generate Nostr key
       await _ensureNostrKey();
+
+      // Load and cache the user's Nostr pubkey for filtering self-authored
+      // posts when playing notification sounds.
+      try {
+        _userPubkey = await getNostrPublicKey();
+      } catch (e) {
+        debugPrint(
+          'Failed to load Nostr public key for feed notifications: $e',
+        );
+      }
+
+      // Initialize notification preferences so we can respect the user's
+      // sound settings when new posts arrive.
+      await NotificationPreferencesService.instance.ensureInitialized();
 
       // Load environment variables
       try {
@@ -385,6 +401,7 @@ class FeedState with ChangeNotifier {
   String? _errorMessage;
   List<NostrEventModel> _events = [];
   DateTime? _oldestEventTime;
+  String? _userPubkey;
   static const int _pageSize = 20;
 
   // Hashtag filtering
@@ -613,6 +630,13 @@ class FeedState with ChangeNotifier {
                 _events.add(event);
                 _sortAndDeduplicateEvents();
                 safeNotifyListeners();
+
+                // Play a notification sound for new posts from others, if enabled.
+                final prefs = NotificationPreferencesService.instance;
+                if (prefs.isNewPostSoundEnabled &&
+                    (_userPubkey == null || event.pubkey != _userPubkey)) {
+                  SoundService.instance.playNewPostSound();
+                }
               }
             },
             onError: (error) {

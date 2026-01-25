@@ -46,7 +46,7 @@ class MediaUploadService {
   Future<MediaUploadResult> upload({
     required Uint8List fileBytes,
     required String mimeType,
-    required String groupId,
+    String? groupId,
     required NostrKeyPairs keyPairs,
     MlsGroup? mlsGroup,
   }) async {
@@ -117,7 +117,7 @@ class MediaUploadService {
   /// Create a signed authorization event (kind 24242)
   Future<Map<String, dynamic>> _createAuthEvent({
     required String sha256,
-    required String groupId,
+    String? groupId,
     required int fileSize,
     required NostrKeyPairs keyPairs,
   }) async {
@@ -126,11 +126,11 @@ class MediaUploadService {
     // Expiration is required by the relay - set to 5 minutes from now
     final expiration = timestamp + 300;
 
-    final baseTags = [
+    final baseTags = <List<String>>[
       ['t', 'upload'],
       ['x', sha256],
       ['expiration', expiration.toString()], // Required!
-      ['h', groupId],
+      if (groupId != null && groupId.isNotEmpty) ['h', groupId],
       ['size', fileSize.toString()],
     ];
 

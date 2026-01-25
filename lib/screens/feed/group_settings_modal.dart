@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/screens/feed/import_whatsapp_modal.dart';
+import 'package:comunifi/screens/feed/channel_management_modal.dart';
 
 /// Modal for group admin settings.
 ///
@@ -126,6 +127,24 @@ class GroupSettingsModal extends StatelessWidget {
 
                   const SizedBox(height: 24),
 
+                  // Section: Channels
+                  _buildSectionHeader(context, 'Channels'),
+                  const SizedBox(height: 8),
+                  _buildSettingsCard(
+                    context,
+                    children: [
+                      _SettingsTile(
+                        icon: CupertinoIcons.tag,
+                        iconColor: CupertinoColors.systemBlue,
+                        title: 'Manage Channels',
+                        subtitle: 'Pin, unpin, and reorder channels',
+                        onTap: () => _showChannelManagementModal(context),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 24),
+
                   // Section: Data (placeholder for future settings)
                   _buildSectionHeader(context, 'Data'),
                   const SizedBox(height: 8),
@@ -213,6 +232,10 @@ class GroupSettingsModal extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  void _showChannelManagementModal(BuildContext context) {
+    showChannelManagementModal(context, announcement);
   }
 
   void _showComingSoon(BuildContext context, String feature) {

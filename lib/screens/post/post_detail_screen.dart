@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:comunifi/state/post_detail.dart';
@@ -884,8 +885,8 @@ class _RichContentText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final spans = _buildTextSpans(context);
-    return RichText(
-      text: TextSpan(
+    return SelectableText.rich(
+      TextSpan(
         style: DefaultTextStyle.of(context).style.copyWith(fontSize: 15),
         children: spans,
       ),
