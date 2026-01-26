@@ -4,6 +4,7 @@ import 'package:comunifi/models/nostr_event.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart';
 import 'package:comunifi/widgets/quoted_post_preview.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 
 /// Modal for creating a quote post (repost with comment)
 class QuotePostModal extends StatefulWidget {
@@ -121,9 +122,14 @@ class _QuotePostModalState extends State<QuotePostModal> {
                     onPressed: () => Navigator.of(context).pop(),
                     child: const Text('Cancel'),
                   ),
-                  const Text(
-                    'Quote Post',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Text(
+                        localizations?.quotePost ?? 'Quote Post',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      );
+                    },
                   ),
                   CupertinoButton(
                     padding: EdgeInsets.zero,
@@ -185,18 +191,23 @@ class _QuotePostModalState extends State<QuotePostModal> {
                       const SizedBox(height: 16),
                     ],
                     // Compose area
-                    CupertinoTextField(
-                      controller: _controller,
-                      placeholder: 'Add your comment...',
-                      maxLines: 6,
-                      minLines: 3,
-                      textAlignVertical: TextAlignVertical.top,
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: CupertinoColors.systemGrey6,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      autofocus: true,
+                    Builder(
+                      builder: (context) {
+                        final localizations = AppLocalizations.of(context);
+                        return CupertinoTextField(
+                          controller: _controller,
+                          placeholder: localizations?.addYourComment ?? 'Add your comment...',
+                          maxLines: 6,
+                          minLines: 3,
+                          textAlignVertical: TextAlignVertical.top,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemGrey6,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          autofocus: true,
+                        );
+                      },
                     ),
                     const SizedBox(height: 16),
                     // Quoted post preview

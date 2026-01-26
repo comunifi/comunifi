@@ -15,6 +15,7 @@ import 'package:comunifi/widgets/quote_button.dart';
 import 'package:comunifi/widgets/quoted_post_preview.dart';
 import 'package:comunifi/widgets/link_preview.dart';
 import 'package:comunifi/widgets/encrypted_image.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 import 'package:comunifi/widgets/author_avatar.dart';
 import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/screens/feed/quote_post_modal.dart';
@@ -147,7 +148,12 @@ class _PostDetailContentState extends State<PostDetailContent> {
                 const SizedBox(height: 16),
                 CupertinoButton(
                   onPressed: postDetailState.retryConnection,
-                  child: const Text('Retry'),
+                  child: Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Text(localizations?.retry ?? 'Retry');
+                    },
+                  ),
                 ),
               ],
             ),

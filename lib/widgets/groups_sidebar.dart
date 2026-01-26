@@ -9,6 +9,8 @@ import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/screens/feed/create_group_modal.dart';
+import 'package:comunifi/screens/feed/pending_invitations_modal.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 
 /// Helper class to combine discovered and local groups
 class _GroupItem {
@@ -46,7 +48,8 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     super.initState();
     _loadUserPubkey();
     _loadFromCache(); // Load from cache first for instant display
-    _fetchGroupsFromRelay(); // Then fetch from network in background
+    // Don't fetch from network here - let build() method handle it when connected
+    // This prevents unnecessary reloads when widget is preserved with stable key
   }
 
   Future<void> _loadUserPubkey() async {
@@ -117,15 +120,24 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     final groupState = context.read<GroupState>();
     if (!groupState.isConnected || _isFetchingGroups) return;
 
+    // Don't fetch if we already have groups loaded (prevents clearing cache unnecessarily)
+    // Only fetch if we don't have groups or if explicitly needed (cache invalidation)
+    if (groupState.discoveredGroups.isNotEmpty && _membershipsLoaded) {
+      // We already have groups and memberships - skip fetch to preserve cache
+      return;
+    }
+
     setState(() => _isFetchingGroups = true);
 
     try {
       // Fetch from network in background (cache already displayed)
+      // refreshDiscoveredGroups now preserves existing data, so this is safe
       await groupState.refreshDiscoveredGroups(limit: 1000);
       // Also refresh memberships when fetching groups
       await _loadMemberships();
     } catch (e) {
       // Silently fail - cache is already displayed
+      debugPrint('Failed to fetch groups from relay: $e');
     } finally {
       if (mounted) setState(() => _isFetchingGroups = false);
     }
@@ -143,6 +155,13 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
           _fetchGroupsFromRelay();
         },
       ),
+    );
+  }
+
+  void _showPendingInvitationsModal() {
+    showCupertinoModalPopup(
+      context: context,
+      builder: (context) => const PendingInvitationsModal(),
     );
   }
 
@@ -320,36 +339,80 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
             child: Column(
               children: [
                 SizedBox(height: topPadding),
-                // Create group button
+                // Create group button with pending invitations badge
                 Center(
-                  child: GestureDetector(
-                    onTap: _showCreateGroupModal,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 56,
-                          height: 56,
-                          decoration: BoxDecoration(
-                            color: AppColors.chipBackground,
-                            borderRadius: BorderRadius.circular(28),
-                          ),
-                          child: const Icon(
-                            CupertinoIcons.plus,
-                            color: AppColors.primary,
-                            size: 28,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      GestureDetector(
+                        onTap: _showCreateGroupModal,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 56,
+                              height: 56,
+                              decoration: BoxDecoration(
+                                color: AppColors.chipBackground,
+                                borderRadius: BorderRadius.circular(28),
+                              ),
+                              child: const Icon(
+                                CupertinoIcons.plus,
+                                color: AppColors.primary,
+                                size: 28,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            const Text(
+                              'New',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: AppColors.secondaryLabel,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Pending invitations badge
+                      if (groupState.pendingInvitationCount > 0)
+                        Positioned(
+                          top: -4,
+                          right: -4,
+                          child: GestureDetector(
+                            onTap: _showPendingInvitationsModal,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppColors.primary,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: AppColors.surface,
+                                  width: 2,
+                                ),
+                              ),
+                              constraints: const BoxConstraints(
+                                minWidth: 20,
+                                minHeight: 20,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  groupState.pendingInvitationCount > 99
+                                      ? '99+'
+                                      : '${groupState.pendingInvitationCount}',
+                                  style: const TextStyle(
+                                    color: CupertinoColors.white,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
                           ),
                         ),
-                        const SizedBox(height: 2),
-                        const Text(
-                          'New',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: AppColors.secondaryLabel,
-                          ),
-                        ),
-                      ],
-                    ),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -486,15 +549,20 @@ class _ExploreIcon extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 2),
-        Text(
-          'Explore',
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
-            color: isActive
-                ? AppColors.label
-                : AppColors.secondaryLabel,
-          ),
+        Builder(
+          builder: (context) {
+            final localizations = AppLocalizations.of(context);
+            return Text(
+              localizations?.explore ?? 'Explore',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                color: isActive
+                    ? AppColors.label
+                    : AppColors.secondaryLabel,
+              ),
+            );
+          },
         ),
       ],
     );
@@ -540,15 +608,20 @@ class _GlobalFeedIcon extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 2),
-        Text(
-          'Feed',
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
-            color: isActive
-                ? AppColors.label
-                : AppColors.secondaryLabel,
-          ),
+        Builder(
+          builder: (context) {
+            final localizations = AppLocalizations.of(context);
+            return Text(
+              localizations?.feed ?? 'Feed',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                color: isActive
+                    ? AppColors.label
+                    : AppColors.secondaryLabel,
+              ),
+            );
+          },
         ),
       ],
     );
@@ -867,9 +940,14 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                     onPressed: () => Navigator.of(context).pop(),
                     child: const Text('Cancel'),
                   ),
-                  const Text(
-                    'Edit Group',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Text(
+                        localizations?.editGroup ?? 'Edit Group',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      );
+                    },
                   ),
                   CupertinoButton(
                     padding: EdgeInsets.zero,
@@ -877,9 +955,14 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                     onPressed: _isSaving ? null : _save,
                     child: _isSaving
                         ? const CupertinoActivityIndicator()
-                        : const Text(
-                            'Save',
-                            style: TextStyle(fontWeight: FontWeight.bold),
+                        : Builder(
+                            builder: (context) {
+                              final localizations = AppLocalizations.of(context);
+                              return Text(
+                                localizations?.save ?? 'Save',
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              );
+                            },
                           ),
                   ),
                 ],
@@ -996,16 +1079,21 @@ class _EditGroupModalState extends State<_EditGroupModal> {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  Center(
-                    child: Text(
-                      _isUploadingPhoto
-                          ? 'Uploading...'
-                          : 'Tap to change photo',
-                      style: const TextStyle(
-                        color: AppColors.secondaryLabel,
-                        fontSize: 12,
-                      ),
-                    ),
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Center(
+                        child: Text(
+                          _isUploadingPhoto
+                              ? (localizations?.uploading ?? 'Uploading...')
+                              : (localizations?.tapToChangePhoto ?? 'Tap to change photo'),
+                          style: const TextStyle(
+                            color: AppColors.secondaryLabel,
+                            fontSize: 12,
+                          ),
+                        ),
+                      );
+                    },
                   ),
                   const SizedBox(height: 20),
                   CupertinoTextField(

@@ -53,6 +53,7 @@ import 'package:comunifi/services/media/media_upload.dart';
 import 'package:comunifi/services/media/encrypted_media.dart';
 import 'package:comunifi/services/db/decrypted_media_cache.dart';
 import 'package:comunifi/services/db/channel_metadata.dart';
+import 'package:comunifi/services/db/pending_invitation.dart';
 import 'package:comunifi/services/whatsapp/whatsapp_import.dart';
 import 'package:comunifi/services/backup/backup_service.dart';
 import 'package:comunifi/services/backup/backup_models.dart';
@@ -161,6 +162,10 @@ class GroupState with ChangeNotifier {
   // Database table for decrypted media cache
   DecryptedMediaCacheTable? _decryptedMediaCacheTable;
   ChannelMetadataTable? _channelMetadataTable;
+  PendingInvitationTable? _pendingInvitationTable;
+
+  // Pending group invitations
+  List<PendingInvitation> _pendingInvitations = [];
 
   // Backup service for MLS group backup/restore
   BackupService? _backupService;
@@ -264,6 +269,9 @@ class GroupState with ChangeNotifier {
       // This ensures groups are available even when not connected
       await _loadSavedGroups();
 
+      // Load pending invitations from database
+      await loadPendingInvitations();
+
       // Load group announcements from cache for instant display
       try {
         final cachedAnnouncements = await loadGroupAnnouncementsFromCache();
@@ -333,6 +341,12 @@ class GroupState with ChangeNotifier {
         _dbService!.database!,
       );
       await _channelMetadataTable!.create(_dbService!.database!);
+
+      // Initialize pending invitations table
+      _pendingInvitationTable = PendingInvitationTable(
+        _dbService!.database!,
+      );
+      await _pendingInvitationTable!.create(_dbService!.database!);
 
       // Initialize encrypted media service with database
       _encryptedMediaService.initWithDatabase(_dbService!.database!);
@@ -1189,9 +1203,60 @@ class GroupState with ChangeNotifier {
 
   /// Set discovered groups from cache (for instant display)
   /// This is used by the sidebar to show groups immediately from cache
+  /// Merges with existing groups instead of replacing to preserve data
   void setDiscoveredGroupsFromCache(List<GroupAnnouncement> announcements) {
-    _discoveredGroups = announcements;
-    _rebuildAnnouncementCache();
+    if (announcements.isEmpty) return;
+    
+    // Merge with existing groups (avoid duplicates by eventId)
+    // Only update if we don't already have groups, or merge to preserve existing
+    if (_discoveredGroups.isEmpty) {
+      // No existing groups - set directly
+      _discoveredGroups = announcements;
+      _rebuildAnnouncementCache(clearFirst: true);
+    } else {
+      // Merge with existing groups (preserve existing, add new from cache)
+      final mergedGroups = <GroupAnnouncement>[];
+      final seenEventIds = <String>{};
+      
+      // Add existing groups first (they take precedence)
+      for (final group in _discoveredGroups) {
+        if (!seenEventIds.contains(group.eventId)) {
+          mergedGroups.add(group);
+          seenEventIds.add(group.eventId);
+        }
+      }
+      
+      // Add cached groups that aren't already present
+      for (final group in announcements) {
+        if (!seenEventIds.contains(group.eventId)) {
+          mergedGroups.add(group);
+          seenEventIds.add(group.eventId);
+        }
+      }
+      
+      _discoveredGroups = mergedGroups;
+      // Update cache incrementally (don't overwrite entries with picture/cover)
+      for (final announcement in announcements) {
+        if (announcement.mlsGroupId != null) {
+          final existing = _groupAnnouncementCache[announcement.mlsGroupId!];
+          
+          if (existing == null) {
+            // No existing entry - add it
+            _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+          } else {
+            // Only update if existing doesn't have picture/cover (preserve fresh data)
+            final existingHasImage = (existing.picture != null && existing.picture!.isNotEmpty) ||
+                                     (existing.cover != null && existing.cover!.isNotEmpty);
+            
+            if (!existingHasImage) {
+              // Existing entry has no images - safe to update with cached data
+              _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+            }
+            // Otherwise, keep existing entry (it has image data from network)
+          }
+        }
+      }
+    }
 
     // Migrate NIP-29 group ID mappings for existing groups
     _migrateNip29GroupIdMappings();
@@ -1455,6 +1520,19 @@ class GroupState with ChangeNotifier {
         }
       }
 
+      // Ensure all admins from kind 39001 are included, even if missing from kind 39002
+      // This fixes the issue where admins don't appear in member list for non-admin viewers
+      for (final entry in adminRoles.entries) {
+        final pubkey = entry.key;
+        final role = entry.value;
+        if (!members.containsKey(pubkey)) {
+          members[pubkey] = NIP29GroupMember(pubkey: pubkey, role: role);
+          debugPrint(
+            'getGroupMembers: added admin ${pubkey.substring(0, 8)}... from kind 39001 with role: $role',
+          );
+        }
+      }
+
       debugPrint(
         'getGroupMembers($nip29GroupId): total ${members.length} members',
       );
@@ -1668,6 +1746,11 @@ class GroupState with ChangeNotifier {
   MlsGroup? get activeGroup => _activeGroup;
   List<GroupAnnouncement> get discoveredGroups => _discoveredGroups;
   bool get isLoadingGroups => _isLoadingGroups;
+
+  List<PendingInvitation> get pendingInvitations =>
+      List.unmodifiable(_pendingInvitations);
+
+  int get pendingInvitationCount => _pendingInvitations.length;
   bool get isExploreMode => _isExploreMode;
   bool get hasMoreGroupMessages => _hasMoreGroupMessages;
   bool get isLoadingMoreGroupMessages => _isLoadingMoreGroupMessages;
@@ -3431,9 +3514,9 @@ class GroupState with ChangeNotifier {
           )
           .listen(
             (event) {
-              // Handle Welcome invitation
-              handleWelcomeInvitation(event).catchError((error) {
-                debugPrint('Error handling Welcome invitation: $error');
+              // Store as pending invitation instead of auto-processing
+              storePendingInvitation(event).catchError((error) {
+                debugPrint('Error storing pending invitation: $error');
               });
             },
             onError: (error) {
@@ -3467,15 +3550,27 @@ class GroupState with ChangeNotifier {
               }
             }
 
-            // Only process if we don't already have this group
-            if (groupIdHex != null && !_mlsGroups.containsKey(groupIdHex)) {
-              debugPrint(
-                'Processing missed Welcome for group: ${groupIdHex.substring(0, 8)}...',
-              );
+            // Only store as pending if we don't already have this group
+            if (groupIdHex != null) {
+              // Check if we already have the MLS group
               try {
-                await handleWelcomeInvitation(welcomeEvent);
+                final welcome = Welcome.fromJson(welcomeEvent.content);
+                final welcomeGroupIdHex = welcome.groupId.bytes
+                    .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                    .join()
+                    .toLowerCase();
+                if (!_mlsGroups.containsKey(welcomeGroupIdHex)) {
+                  debugPrint(
+                    'Storing missed Welcome as pending for group: ${groupIdHex.substring(0, 8)}...',
+                  );
+                  try {
+                    await storePendingInvitation(welcomeEvent);
+                  } catch (e) {
+                    debugPrint('Failed to store past Welcome: $e');
+                  }
+                }
               } catch (e) {
-                debugPrint('Failed to process past Welcome: $e');
+                debugPrint('Failed to parse Welcome for pending storage: $e');
               }
             }
           }
@@ -4973,35 +5068,105 @@ class GroupState with ChangeNotifier {
   /// Refresh discovered groups from relay
   /// Fetches the latest groups (always queries relay, no cache)
   /// Also syncs group names from NIP-29 create-group events (kind 9007)
+  /// Preserves existing groups if network fetch fails or returns incomplete data
   Future<void> refreshDiscoveredGroups({int limit = 50}) async {
-    // Always query relay for refresh (disable cache to get latest groups)
-    final newGroups = await fetchGroupsFromRelay(limit: limit, useCache: false);
-    _discoveredGroups = newGroups;
+    // Preserve existing data before network fetch
+    final existingGroups = List<GroupAnnouncement>.from(_discoveredGroups);
 
-    // Build announcement cache for O(1) lookup
-    _rebuildAnnouncementCache();
+    try {
+      // Try to fetch from network
+      final newGroups = await fetchGroupsFromRelay(limit: limit, useCache: false);
 
-    // Migrate NIP-29 group ID mappings for existing groups
-    _migrateNip29GroupIdMappings();
+      if (newGroups.isNotEmpty) {
+        // Merge new groups with existing ones (avoid duplicates by eventId)
+        final mergedGroups = <GroupAnnouncement>[];
+        final seenEventIds = <String>{};
 
-    // Also sync group names from NIP-29 create-group events (kind 9007)
-    // This ensures we have the correct names for groups created with NIP-29
-    await syncGroupNamesFromCreateEvents();
+        // Add new groups first (they take precedence)
+        for (final group in newGroups) {
+          if (!seenEventIds.contains(group.eventId)) {
+            mergedGroups.add(group);
+            seenEventIds.add(group.eventId);
+          }
+        }
 
-    // Apply any edit-metadata events (kind 9002) to update group info
-    await _syncEditMetadataEvents();
+        // Add existing groups that weren't in the new fetch
+        for (final group in existingGroups) {
+          if (!seenEventIds.contains(group.eventId)) {
+            mergedGroups.add(group);
+            seenEventIds.add(group.eventId);
+          }
+        }
 
-    safeNotifyListeners();
+        _discoveredGroups = mergedGroups;
+
+        // Update cache incrementally (preserve existing entries)
+        for (final announcement in newGroups) {
+          if (announcement.mlsGroupId != null) {
+            _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+          }
+        }
+        // Existing cache entries are preserved automatically (we didn't clear)
+
+        // Migrate NIP-29 group ID mappings for existing groups
+        _migrateNip29GroupIdMappings();
+
+        // Also sync group names from NIP-29 create-group events (kind 9007)
+        // This ensures we have the correct names for groups created with NIP-29
+        await syncGroupNamesFromCreateEvents();
+
+        // Apply any edit-metadata events (kind 9002) to update group info
+        await _syncEditMetadataEvents();
+      } else {
+        // Network fetch returned empty - keep existing data
+        // Fallback to database cache to ensure we have data
+        final cachedAnnouncements = await loadGroupAnnouncementsFromCache();
+        if (cachedAnnouncements.isNotEmpty && _discoveredGroups.isEmpty) {
+          _discoveredGroups = cachedAnnouncements;
+          _rebuildAnnouncementCache(clearFirst: true); // Clear and rebuild for database fallback
+        }
+      }
+    } catch (e) {
+      // Network fetch failed - preserve existing data and fallback to database
+      debugPrint('Failed to refresh discovered groups from relay: $e');
+
+      // If we have existing data, keep it
+      if (_discoveredGroups.isEmpty && existingGroups.isNotEmpty) {
+        _discoveredGroups = existingGroups;
+        // Restore cache entries for existing groups (cache wasn't cleared, but be explicit)
+        for (final announcement in existingGroups) {
+          if (announcement.mlsGroupId != null) {
+            _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+          }
+        }
+      } else if (_discoveredGroups.isEmpty) {
+        // No existing data - fallback to database cache
+        final cachedAnnouncements = await loadGroupAnnouncementsFromCache();
+        if (cachedAnnouncements.isNotEmpty) {
+          _discoveredGroups = cachedAnnouncements;
+          _rebuildAnnouncementCache(clearFirst: true); // Clear and rebuild for database fallback
+        }
+      }
+      // If we have data (either existing or from DB), keep it
+    } finally {
+      safeNotifyListeners();
+    }
   }
 
   /// Rebuild the announcement cache from discovered groups
-  void _rebuildAnnouncementCache() {
-    _groupAnnouncementCache.clear();
+  /// If [clearFirst] is true, clears the cache before rebuilding (for fresh loads)
+  /// If false, only updates entries for groups in discoveredGroups (preserves existing)
+  void _rebuildAnnouncementCache({bool clearFirst = false}) {
+    if (clearFirst) {
+      _groupAnnouncementCache.clear();
+    }
+    // Update cache entries for groups in discoveredGroups
     for (final announcement in _discoveredGroups) {
       if (announcement.mlsGroupId != null) {
         _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
       }
     }
+    // Existing entries not in _discoveredGroups are preserved when clearFirst is false
   }
 
   /// Get group announcement by hex ID - O(1) lookup
@@ -5694,7 +5859,7 @@ class GroupState with ChangeNotifier {
     }
 
     try {
-      // Deserialize Welcome message
+      // Deserialize Welcome message (fromJson expects a JSON string)
       final welcome = Welcome.fromJson(welcomeEvent.content);
 
       // Check if we already have this group (deduplication)
@@ -5832,6 +5997,190 @@ class GroupState with ChangeNotifier {
       await _backupNewGroup(group);
     } catch (e) {
       debugPrint('Failed to handle Welcome invitation: $e');
+      rethrow;
+    }
+  }
+
+  /// Store a Welcome message as a pending invitation (instead of auto-processing)
+  Future<void> storePendingInvitation(NostrEventModel welcomeEvent) async {
+    if (welcomeEvent.kind != kindMlsWelcome) {
+      debugPrint('Event is not a Welcome message (kind 1060)');
+      return;
+    }
+
+    // Check if this Welcome is for us (check 'p' tag)
+    final recipientPubkey =
+        welcomeEvent.tags
+                .firstWhere(
+                  (tag) => tag.isNotEmpty && tag[0] == 'p',
+                  orElse: () => [],
+                )
+                .length >
+            1
+        ? welcomeEvent.tags.firstWhere(
+            (tag) => tag.isNotEmpty && tag[0] == 'p',
+          )[1]
+        : null;
+
+    if (recipientPubkey == null) {
+      debugPrint('Welcome message has no recipient tag');
+      return;
+    }
+
+    // Check if this Welcome is for our Nostr pubkey
+    final ourPubkey = await getNostrPublicKey();
+    if (ourPubkey != recipientPubkey) {
+      debugPrint(
+        'Welcome message is not for us (ours: $ourPubkey, theirs: $recipientPubkey)',
+      );
+      return;
+    }
+
+    if (_pendingInvitationTable == null) {
+      debugPrint('Pending invitation table not initialized');
+      return;
+    }
+
+    try {
+      // Extract NIP-29 group ID from 'g' tag
+      String? groupIdHex;
+      for (final tag in welcomeEvent.tags) {
+        if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+          groupIdHex = tag[1].toLowerCase();
+          break;
+        }
+      }
+
+      // Check if we already have this group (deduplication)
+      if (groupIdHex != null) {
+        // Check if we already have the MLS group
+        final welcome = Welcome.fromJson(welcomeEvent.content);
+        final welcomeGroupIdHex = welcome.groupId.bytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join()
+            .toLowerCase();
+        if (_mlsGroups.containsKey(welcomeGroupIdHex)) {
+          debugPrint(
+            'Already have group ${welcomeGroupIdHex.substring(0, 8)}..., skipping pending invitation',
+          );
+          return;
+        }
+
+        // Check if we already have a pending invitation for this group
+        final exists = await _pendingInvitationTable!.existsForGroup(groupIdHex);
+        if (exists) {
+          debugPrint(
+            'Already have pending invitation for group ${groupIdHex.substring(0, 8)}..., skipping',
+          );
+          return;
+        }
+      }
+
+      // Convert event to JSON for storage
+      // Convert DateTime to Unix timestamp (seconds)
+      final createdAtTimestamp = welcomeEvent.createdAt.millisecondsSinceEpoch ~/ 1000;
+      final eventJson = {
+        'id': welcomeEvent.id,
+        'pubkey': welcomeEvent.pubkey,
+        'created_at': createdAtTimestamp,
+        'kind': welcomeEvent.kind,
+        'tags': welcomeEvent.tags,
+        'content': welcomeEvent.content,
+        'sig': welcomeEvent.sig,
+      };
+
+      final invitation = PendingInvitation(
+        id: welcomeEvent.id,
+        welcomeEventJson: eventJson,
+        groupIdHex: groupIdHex,
+        inviterPubkey: welcomeEvent.pubkey,
+        receivedAt: welcomeEvent.createdAt,
+      );
+
+      await _pendingInvitationTable!.add(invitation);
+      debugPrint(
+        'Stored pending invitation for group ${groupIdHex?.substring(0, 8) ?? "unknown"}...',
+      );
+
+      // Reload pending invitations and notify listeners
+      await loadPendingInvitations();
+    } catch (e) {
+      debugPrint('Failed to store pending invitation: $e');
+    }
+  }
+
+  /// Load pending invitations from database
+  Future<void> loadPendingInvitations() async {
+    if (_pendingInvitationTable == null) {
+      return;
+    }
+
+    try {
+      _pendingInvitations = await _pendingInvitationTable!.getAll();
+      safeNotifyListeners();
+      debugPrint('Loaded ${_pendingInvitations.length} pending invitations');
+    } catch (e) {
+      debugPrint('Failed to load pending invitations: $e');
+    }
+  }
+
+  /// Accept a pending invitation and join the group
+  Future<void> acceptInvitation(PendingInvitation invitation) async {
+    if (_pendingInvitationTable == null) {
+      throw Exception('Pending invitation table not initialized');
+    }
+
+    try {
+      // Convert stored JSON back to NostrEventModel
+      final eventJson = invitation.welcomeEventJson;
+      final createdAtValue = eventJson['created_at'];
+      final createdAt = createdAtValue is int
+          ? DateTime.fromMillisecondsSinceEpoch(createdAtValue * 1000)
+          : DateTime.now();
+      
+      final tagsList = (eventJson['tags'] as List).map((t) {
+        if (t is List) {
+          return t.map((item) => item.toString()).toList();
+        }
+        return [t.toString()];
+      }).toList();
+      
+      final welcomeEvent = NostrEventModel(
+        id: eventJson['id'] as String,
+        pubkey: eventJson['pubkey'] as String,
+        createdAt: createdAt,
+        kind: eventJson['kind'] as int,
+        tags: tagsList,
+        content: eventJson['content'] as String,
+        sig: eventJson['sig'] as String,
+      );
+
+      // Process the Welcome message (existing logic)
+      await handleWelcomeInvitation(welcomeEvent);
+
+      // Remove from pending invitations
+      await _pendingInvitationTable!.remove(invitation.id);
+      await loadPendingInvitations();
+
+      debugPrint('Accepted invitation for group ${invitation.groupIdHex}');
+    } catch (e) {
+      debugPrint('Failed to accept invitation: $e');
+      rethrow;
+    }
+  }
+
+  /// Reject a pending invitation (remove without joining)
+  Future<void> rejectInvitation(PendingInvitation invitation) async {
+    if (_pendingInvitationTable == null) {
+      throw Exception('Pending invitation table not initialized');
+    }
+
+    try {
+      await _pendingInvitationTable!.remove(invitation.id);
+      await loadPendingInvitations();
+      debugPrint('Rejected invitation for group ${invitation.groupIdHex}');
+    } catch (e) {
+      debugPrint('Failed to reject invitation: $e');
       rethrow;
     }
   }

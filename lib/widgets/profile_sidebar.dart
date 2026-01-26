@@ -1,17 +1,13 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
-import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
-import 'package:comunifi/state/feed.dart';
 import 'package:comunifi/services/profile/profile.dart' show ProfileData;
-import 'package:comunifi/screens/recovery/send_recovery_screen.dart';
 import 'package:comunifi/theme/colors.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 
 class ProfileSidebar extends StatefulWidget {
   final VoidCallback onClose;
@@ -45,13 +41,6 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
   bool _isUploadingPhoto = false;
   String? _uploadPhotoError;
   final ImagePicker _imagePicker = ImagePicker();
-
-  // Danger zone state
-  bool _isDeletingData = false;
-
-  // Device linking state
-  bool _isGeneratingRecoveryLink = false;
-  final GlobalKey _saveRecoveryLinkButtonKey = GlobalKey();
 
   @override
   void initState() {
@@ -294,68 +283,6 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
     }
   }
 
-  Future<void> _addNewDevice() async {
-    Navigator.of(context).push(
-      CupertinoPageRoute(builder: (context) => const SendRecoveryScreen()),
-    );
-  }
-
-  Future<void> _saveRecoveryLink() async {
-    setState(() {
-      _isGeneratingRecoveryLink = true;
-    });
-
-    try {
-      final groupState = context.read<GroupState>();
-      final payload = await groupState.generateRecoveryPayload();
-      if (payload == null) {
-        throw Exception('Failed to generate recovery link');
-      }
-
-      final recoveryLink = payload.toRecoveryLink();
-
-      // Get button position for macOS
-      Rect? sharePositionOrigin;
-      if (Platform.isMacOS) {
-        final box =
-            _saveRecoveryLinkButtonKey.currentContext?.findRenderObject()
-                as RenderBox?;
-        if (box != null) {
-          final position = box.localToGlobal(Offset.zero);
-          sharePositionOrigin = position & box.size;
-        }
-      }
-
-      // Show share sheet
-      await Share.share(
-        recoveryLink,
-        subject: 'Comunifi Recovery Link',
-        sharePositionOrigin: sharePositionOrigin,
-      );
-    } catch (e) {
-      if (mounted) {
-        showCupertinoDialog(
-          context: context,
-          builder: (context) => CupertinoAlertDialog(
-            title: const Text('Error'),
-            content: Text('Failed to generate recovery link: $e'),
-            actions: [
-              CupertinoDialogAction(
-                child: const Text('OK'),
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-            ],
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isGeneratingRecoveryLink = false;
-        });
-      }
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -410,6 +337,7 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: const BoxDecoration(
+              color: CupertinoColors.white,
               border: Border(
                 bottom: BorderSide(
                   color: AppColors.separator,
@@ -419,9 +347,14 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
             ),
             child: Row(
               children: [
-                const Text(
-                  'Profile',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                Builder(
+                  builder: (context) {
+                    final localizations = AppLocalizations.of(context);
+                    return Text(
+                      localizations?.profile ?? 'Profile',
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    );
+                  },
                 ),
                 if (widget.showCloseButton) ...[
                   const Spacer(),
@@ -477,6 +410,8 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                                         _currentProfilePictureUrl!,
                                         width: 100,
                                         height: 100,
+                                        cacheWidth: 100,
+                                        cacheHeight: 100,
                                         fit: BoxFit.cover,
                                         loadingBuilder:
                                             (context, child, loadingProgress) {
@@ -772,171 +707,6 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 12),
-                // Link Device section
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  margin: const EdgeInsets.only(bottom: 12),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text(
-                        'Link Another Device',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Transfer your account to another device or save a recovery link.',
-                        style: TextStyle(
-                          color: CupertinoColors.secondaryLabel.resolveFrom(
-                            context,
-                          ),
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      CupertinoButton(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        color: AppColors.primary,
-                        borderRadius: BorderRadius.circular(8),
-                        onPressed: _addNewDevice,
-                        child: const Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              CupertinoIcons.device_phone_portrait,
-                              size: 18,
-                              color: CupertinoColors.white,
-                            ),
-                            SizedBox(width: 8),
-                            Text(
-                              'Add New Device',
-                              style: TextStyle(
-                                fontWeight: FontWeight.w600,
-                                color: CupertinoColors.white,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      CupertinoButton(
-                        key: _saveRecoveryLinkButtonKey,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        color: AppColors.chipBackground,
-                        borderRadius: BorderRadius.circular(8),
-                        onPressed: _isGeneratingRecoveryLink
-                            ? null
-                            : _saveRecoveryLink,
-                        child: _isGeneratingRecoveryLink
-                            ? const CupertinoActivityIndicator()
-                            : const Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    CupertinoIcons.link,
-                                    size: 18,
-                                    color: AppColors.label,
-                                  ),
-                                  SizedBox(width: 8),
-                                  Text(
-                                    'Save Recovery Link',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.label,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-                // Danger Zone section
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: AppColors.errorBackground,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: AppColors.error.withOpacity(0.3),
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(
-                            CupertinoIcons.exclamationmark_triangle_fill,
-                            color: CupertinoColors.systemRed.resolveFrom(
-                              context,
-                            ),
-                            size: 20,
-                          ),
-                          const SizedBox(width: 8),
-                          const Text(
-                            'Danger Zone',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.error,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'These actions are permanent and cannot be undone.',
-                        style: TextStyle(
-                          color: CupertinoColors.secondaryLabel.resolveFrom(
-                            context,
-                          ),
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      CupertinoButton(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        color: AppColors.error,
-                        borderRadius: BorderRadius.circular(8),
-                        onPressed: _isDeletingData
-                            ? null
-                            : _showDeleteConfirmation,
-                        child: _isDeletingData
-                            ? const CupertinoActivityIndicator(
-                                color: CupertinoColors.white,
-                              )
-                            : const Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    CupertinoIcons.trash,
-                                    size: 18,
-                                    color: CupertinoColors.white,
-                                  ),
-                                  SizedBox(width: 8),
-                                  Text(
-                                    'Delete All App Data',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      color: CupertinoColors.white,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                      ),
-                    ],
-                  ),
-                ),
                 const SizedBox(height: 32),
               ],
             ),
@@ -946,116 +716,4 @@ class _ProfileSidebarState extends State<ProfileSidebar> {
     );
   }
 
-  void _showDeleteConfirmation() {
-    showCupertinoDialog(
-      context: context,
-      builder: (context) => CupertinoAlertDialog(
-        title: const Text('Delete All App Data?'),
-        content: const Text(
-          'This will permanently delete:\n\n'
-          '• All your messages and groups\n'
-          '• Your encryption keys\n'
-          '• Your local settings\n'
-          '• Your Nostr profile data\n\n'
-          'If you don\'t have a recovery link saved, you will lose access to your account forever.\n\n'
-          'This action cannot be undone.',
-        ),
-        actions: [
-          CupertinoDialogAction(
-            child: const Text('Cancel'),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () {
-              Navigator.of(context).pop();
-              _showFinalConfirmation();
-            },
-            child: const Text('Continue'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showFinalConfirmation() {
-    showCupertinoDialog(
-      context: context,
-      builder: (context) => CupertinoAlertDialog(
-        title: const Text('Are you absolutely sure?'),
-        content: const Text(
-          'Type "DELETE" to confirm you want to permanently delete all your data.',
-        ),
-        actions: [
-          CupertinoDialogAction(
-            child: const Text('Cancel'),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () {
-              Navigator.of(context).pop();
-              _deleteAllData();
-            },
-            child: const Text('Delete Everything'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _deleteAllData() async {
-    setState(() {
-      _isDeletingData = true;
-    });
-
-    try {
-      // Shutdown all services with NostrService instances first
-      // to prevent auto-reconnect after database deletion
-      FeedState? feedState;
-      ProfileState? profileState;
-
-      try {
-        feedState = context.read<FeedState>();
-        await feedState.shutdown();
-      } catch (_) {}
-
-      try {
-        profileState = context.read<ProfileState>();
-        await profileState.shutdown();
-      } catch (_) {}
-
-      final groupState = context.read<GroupState>();
-      await groupState.deleteAllAppData();
-
-      // Reinitialize all services so "New Account" works
-      await groupState.reinitialize();
-      await feedState?.reinitialize();
-      await profileState?.reinitialize();
-
-      // Navigate to onboarding screen
-      if (mounted) {
-        context.go('/');
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isDeletingData = false;
-        });
-        showCupertinoDialog(
-          context: context,
-          builder: (context) => CupertinoAlertDialog(
-            title: const Text('Error'),
-            content: Text('Failed to delete data: $e'),
-            actions: [
-              CupertinoDialogAction(
-                child: const Text('OK'),
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-            ],
-          ),
-        );
-      }
-    }
-  }
 }

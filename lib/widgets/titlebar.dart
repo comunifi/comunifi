@@ -4,12 +4,15 @@ import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/services/profile/profile.dart' show ProfileData;
 import 'package:comunifi/theme/colors.dart';
+import 'package:comunifi/screens/feed/feed_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 class Titlebar extends StatefulWidget {
-  const Titlebar({super.key});
+  final GlobalKey<NavigatorState>? rootNavigatorKey;
+
+  const Titlebar({super.key, this.rootNavigatorKey});
 
   @override
   State<Titlebar> createState() => _TitlebarState();
@@ -86,7 +89,7 @@ class _TitlebarState extends State<Titlebar> {
               ),
               child: Row(
                 children: [
-                  // Center content (offline indicator)
+                  // Left side: offline indicator
                   Expanded(
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.end,
@@ -102,13 +105,49 @@ class _TitlebarState extends State<Titlebar> {
                       ],
                     ),
                   ),
-                  // Profile avatar button (before window controls on Windows)
-                  _ProfileAvatarButton(
-                    profilePicture: profilePicture,
-                    username: username,
+                  // Center: logo and "Comunifi" text
+                  Expanded(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Image.asset(
+                          'assets/logo.png',
+                          width: 20,
+                          height: 20,
+                          fit: BoxFit.contain,
+                        ),
+                        const SizedBox(width: 6),
+                        const Text(
+                          'Comunifi',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.label,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  // Window controls (Windows only)
-                  if (_isWindows) const _WindowControls(),
+                  // Right side: Profile avatar button and settings icon (before window controls on Windows)
+                  Expanded(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        _ProfileAvatarButton(
+                          profilePicture: profilePicture,
+                          username: username,
+                        ),
+                        const SizedBox(width: 4),
+                        _SettingsButton(),
+                        // Padding on right side
+                        const SizedBox(width: 8),
+                        // Window controls (Windows only)
+                        if (_isWindows) const _WindowControls(),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -139,79 +178,146 @@ class _ProfileAvatarButtonState extends State<_ProfileAvatarButton> {
   @override
   Widget build(BuildContext context) {
     const avatarSize = 24.0;
+    final appState = context.read<AppState>();
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _isHovered = true),
-      onExit: (_) => setState(() => _isHovered = false),
-      child: GestureDetector(
-        onTap: () {
-          // Signal to FeedScreen to open the profile sidebar
-          context.read<AppState>().onProfileTap();
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            color: _isHovered
-                ? AppColors.chipBackground
-                : CupertinoColors.transparent,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Username
-              if (widget.username != null) ...[
-                Text(
-                  widget.username!,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: AppColors.label,
-                  ),
-                ),
-                const SizedBox(width: 6),
-              ],
-              // Avatar
-              Container(
-                width: avatarSize,
-                height: avatarSize,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.surfaceElevated,
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: widget.profilePicture != null
-                    ? Image.network(
-                        widget.profilePicture!,
-                        width: avatarSize,
-                        height: avatarSize,
-                        fit: BoxFit.cover,
-                        loadingBuilder: (context, child, loadingProgress) {
-                          if (loadingProgress == null) return child;
-                          return Icon(
+    return ValueListenableBuilder<RightSidebarType?>(
+      valueListenable: appState.rightSidebarType,
+      builder: (context, rightSidebarType, child) {
+        final isActive = rightSidebarType == RightSidebarType.profile;
+
+        return MouseRegion(
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          child: GestureDetector(
+            onTap: () {
+              // Trigger profile sidebar via AppState
+              appState.onProfileTap();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                color: isActive
+                    ? CupertinoColors.activeBlue.withOpacity(0.1)
+                    : (_isHovered
+                        ? AppColors.chipBackground
+                        : CupertinoColors.transparent),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Username
+                  if (widget.username != null) ...[
+                    Text(
+                      widget.username!,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: isActive
+                            ? CupertinoColors.activeBlue
+                            : AppColors.label,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                  // Avatar
+                  Container(
+                    width: avatarSize,
+                    height: avatarSize,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.surfaceElevated,
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: widget.profilePicture != null
+                        ? Image.network(
+                            widget.profilePicture!,
+                            width: avatarSize,
+                            height: avatarSize,
+                            cacheWidth: avatarSize.toInt(),
+                            cacheHeight: avatarSize.toInt(),
+                            fit: BoxFit.cover,
+                            loadingBuilder: (context, child, loadingProgress) {
+                              if (loadingProgress == null) return child;
+                              return Icon(
+                                CupertinoIcons.person_fill,
+                                size: avatarSize * 0.6,
+                                color: AppColors.secondaryLabel,
+                              );
+                            },
+                            errorBuilder: (context, error, stackTrace) {
+                              return Icon(
+                                CupertinoIcons.person_fill,
+                                size: avatarSize * 0.6,
+                                color: AppColors.secondaryLabel,
+                              );
+                            },
+                          )
+                        : Icon(
                             CupertinoIcons.person_fill,
                             size: avatarSize * 0.6,
                             color: AppColors.secondaryLabel,
-                          );
-                        },
-                        errorBuilder: (context, error, stackTrace) {
-                          return Icon(
-                            CupertinoIcons.person_fill,
-                            size: avatarSize * 0.6,
-                          color: AppColors.secondaryLabel,
-                          );
-                        },
-                      )
-                    : Icon(
-                        CupertinoIcons.person_fill,
-                        size: avatarSize * 0.6,
-                        color: AppColors.secondaryLabel,
-                      ),
+                          ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
+    );
+  }
+}
+
+/// Settings icon button in the titlebar
+class _SettingsButton extends StatefulWidget {
+  const _SettingsButton();
+
+  @override
+  State<_SettingsButton> createState() => _SettingsButtonState();
+}
+
+class _SettingsButtonState extends State<_SettingsButton> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = context.read<AppState>();
+
+    return ValueListenableBuilder<RightSidebarType?>(
+      valueListenable: appState.rightSidebarType,
+      builder: (context, rightSidebarType, child) {
+        final isActive = rightSidebarType == RightSidebarType.settings;
+
+        return MouseRegion(
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          child: GestureDetector(
+            onTap: () {
+              // Trigger settings sidebar via AppState
+              appState.onSettingsTap();
+            },
+            child: Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: isActive
+                    ? CupertinoColors.activeBlue.withOpacity(0.1)
+                    : (_isHovered
+                        ? AppColors.chipBackground
+                        : CupertinoColors.transparent),
+              ),
+              child: Icon(
+                CupertinoIcons.settings,
+                size: 16,
+                color: isActive
+                    ? CupertinoColors.activeBlue
+                    : AppColors.label,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

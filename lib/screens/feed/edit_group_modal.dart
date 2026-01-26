@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/theme/colors.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 
 /// Modal for editing group metadata (name, about, picture, cover)
 /// Shows as a bottom sheet with form fields
@@ -182,9 +183,14 @@ class _EditGroupModalState extends State<EditGroupModal> {
                     onPressed: () => Navigator.of(context).pop(),
                     child: const Text('Cancel'),
                   ),
-                  const Text(
-                    'Edit Group',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Text(
+                        localizations?.editGroup ?? 'Edit Group',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      );
+                    },
                   ),
                   CupertinoButton(
                     padding: EdgeInsets.zero,
@@ -316,16 +322,21 @@ class _EditGroupModalState extends State<EditGroupModal> {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  Center(
-                    child: Text(
-                      _isUploadingPhoto
-                          ? 'Uploading...'
-                          : 'Tap to change photo',
-                      style: const TextStyle(
-                        color: CupertinoColors.secondaryLabel,
-                        fontSize: 12,
-                      ),
-                    ),
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Center(
+                        child: Text(
+                          _isUploadingPhoto
+                              ? (localizations?.uploading ?? 'Uploading...')
+                              : (localizations?.tapToChangePhoto ?? 'Tap to change photo'),
+                          style: const TextStyle(
+                            color: CupertinoColors.secondaryLabel,
+                            fontSize: 12,
+                          ),
+                        ),
+                      );
+                    },
                   ),
                   const SizedBox(height: 20),
                   // Cover photo picker
@@ -448,20 +459,30 @@ class _EditGroupModalState extends State<EditGroupModal> {
                   ),
                   const SizedBox(height: 20),
                   // Name field
-                  CupertinoTextField(
-                    controller: _nameController,
-                    placeholder: 'Group name',
-                    padding: const EdgeInsets.all(12),
-                    enabled: !_isSaving,
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return CupertinoTextField(
+                        controller: _nameController,
+                        placeholder: localizations?.groupName ?? 'Group name',
+                        padding: const EdgeInsets.all(12),
+                        enabled: !_isSaving,
+                      );
+                    },
                   ),
                   const SizedBox(height: 12),
                   // About field
-                  CupertinoTextField(
-                    controller: _aboutController,
-                    placeholder: 'About (optional)',
-                    padding: const EdgeInsets.all(12),
-                    maxLines: 2,
-                    enabled: !_isSaving,
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return CupertinoTextField(
+                        controller: _aboutController,
+                        placeholder: localizations?.aboutOptional ?? 'About (optional)',
+                        padding: const EdgeInsets.all(12),
+                        maxLines: 2,
+                        enabled: !_isSaving,
+                      );
+                    },
                   ),
                 ],
               ),

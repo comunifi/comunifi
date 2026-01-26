@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart' as material;
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
@@ -20,7 +19,10 @@ import 'package:comunifi/screens/feed/group_settings_modal.dart';
 import 'package:comunifi/screens/feed/create_group_modal.dart';
 import 'package:comunifi/widgets/groups_sidebar.dart';
 import 'package:comunifi/widgets/profile_sidebar.dart';
-import 'package:comunifi/widgets/group_right_sidebar.dart';
+import 'package:comunifi/widgets/settings_sidebar.dart';
+import 'package:comunifi/widgets/channels_sidebar.dart';
+import 'package:comunifi/widgets/members_sidebar.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 import 'package:comunifi/widgets/slide_in_sidebar.dart';
 import 'package:comunifi/widgets/comment_bubble.dart';
 import 'package:comunifi/widgets/heart_button.dart';
@@ -33,6 +35,8 @@ import 'package:comunifi/services/link_preview/link_preview.dart';
 import 'package:comunifi/services/media/media_upload.dart';
 import 'package:comunifi/theme/colors.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+enum RightSidebarType { none, profile, settings, channels, members }
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -48,7 +52,13 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
   bool _isPublishing = false;
   String? _publishError;
   bool _isLeftSidebarOpen = false;
-  bool _isRightSidebarOpen = false;
+  
+  // Right sidebar state management
+  RightSidebarType _rightSidebarOpen = RightSidebarType.none;
+  
+  // Track previous activeGroup to detect when a group is opened
+  MlsGroup? _previousActiveGroup;
+  
   Uint8List? _selectedImageBytes;
   String? _selectedImageMimeType;
   bool _hasFetchedDiscoveredGroups = false;
@@ -91,19 +101,47 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
       // This ensures data is available even when sidebar isn't open (mobile)
       _fetchDiscoveredGroupsIfNeeded(groupState);
 
-      // Listen for profile tap events from the titlebar
+      // Listen for profile and settings tap events from the titlebar
       final appState = context.read<AppState>();
       appState.profileTapNotifier.addListener(_onProfileTap);
+      appState.settingsTapNotifier.addListener(_onSettingsTap);
     });
   }
 
   void _onProfileTap() {
-    if (mounted) {
-      setState(() {
-        _isRightSidebarOpen = true;
-      });
-    }
+    _toggleRightSidebar(RightSidebarType.profile);
   }
+
+  void _onSettingsTap() {
+    _toggleRightSidebar(RightSidebarType.settings);
+  }
+
+
+  void _toggleRightSidebar(RightSidebarType type) {
+    setState(() {
+      if (_rightSidebarOpen == type) {
+        // Close if same sidebar is already open
+        _rightSidebarOpen = RightSidebarType.none;
+      } else {
+        // Open new sidebar (closes any other open sidebar)
+        _rightSidebarOpen = type;
+      }
+    });
+    // Sync to AppState for titlebar buttons
+    context.read<AppState>().setRightSidebarType(
+      _rightSidebarOpen == RightSidebarType.none ? null : _rightSidebarOpen,
+    );
+  }
+
+  void _closeRightSidebar() {
+    setState(() {
+      _rightSidebarOpen = RightSidebarType.none;
+    });
+    // Sync to AppState for titlebar buttons
+    context.read<AppState>().setRightSidebarType(null);
+  }
+
+
 
   /// Fetches discovered groups if connected and not yet fetched
   void _fetchDiscoveredGroupsIfNeeded(GroupState groupState) {
@@ -217,9 +255,11 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _messageController.dispose();
-    // Remove profile tap listener
+    // Remove profile and settings tap listeners
     try {
-      context.read<AppState>().profileTapNotifier.removeListener(_onProfileTap);
+      final appState = context.read<AppState>();
+      appState.profileTapNotifier.removeListener(_onProfileTap);
+      appState.settingsTapNotifier.removeListener(_onSettingsTap);
     } catch (_) {
       // Context may not be available during dispose
     }
@@ -447,12 +487,31 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
         final isWideScreen = screenWidth > 1000;
         final sidebarWidth = 320.0;
 
+        // Detect when a group is opened or switched
+        // Compare by group ID to detect actual group changes
+        final previousGroupId = _previousActiveGroup?.id.bytes.toString();
+        final currentGroupId = activeGroup?.id.bytes.toString();
+        final groupChanged = previousGroupId != currentGroupId && activeGroup != null;
+        
+        if (groupChanged) {
+          // Group just opened or switched - close all sidebars and open channels sidebar
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              _rightSidebarOpen = RightSidebarType.channels;
+              context.read<AppState>().setRightSidebarType(RightSidebarType.channels);
+              setState(() {});
+            }
+          });
+        }
+        _previousActiveGroup = activeGroup;
+
         // For wide screens, use persistent sidebars in a Row layout
         if (isWideScreen) {
           return Row(
             children: [
               // Left sidebar (Groups) - always visible on wide screens
               GroupsSidebar(
+                key: const ValueKey('groups-sidebar'),
                 onClose: () {
                   // On wide screens, sidebars are persistent, so this is a no-op
                   // But we keep it for consistency with the sidebar widget
@@ -461,10 +520,11 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
               ),
               // Main feed content
               Expanded(
+                flex: _rightSidebarOpen != RightSidebarType.none ? 2 : 3,
                 child: activeGroup != null
                     // Group view: no navigation bar, banner reaches top
                     ? ColoredBox(
-                        color: CupertinoColors.systemBackground,
+                        color: CupertinoColors.white,
                         child: _buildFeedContent(
                           feedState,
                           groupState,
@@ -472,11 +532,9 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                         ),
                       )
                     : groupState.isExploreMode
-                    // Explore view: show discoverable groups
-                    ? CupertinoPageScaffold(
-                        navigationBar: const CupertinoNavigationBar(
-                          middle: Text('Explore Groups'),
-                        ),
+                    // Explore view: no navigation bar (title bar shows "Comunifi")
+                    ? ColoredBox(
+                        color: CupertinoColors.white,
                         child: SafeArea(
                           child: _ExploreGroupsView(
                             onJoinRequested: () {
@@ -486,13 +544,9 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                           ),
                         ),
                       )
-                    // Main feed: show navigation bar with "Comunifi"
-                    : CupertinoPageScaffold(
-                        navigationBar: CupertinoNavigationBar(
-                          middle: Text(
-                            _getGroupDisplayName(groupState, activeGroup),
-                          ),
-                        ),
+                    // Main feed: no navigation bar (title bar shows "Comunifi")
+                    : ColoredBox(
+                        color: CupertinoColors.white,
                         child: SafeArea(
                           child: _buildFeedContent(
                             feedState,
@@ -502,22 +556,21 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                         ),
                       ),
               ),
-              // Right sidebar - shows Profile (global/explore) or Members (group)
-              Container(
-                width: sidebarWidth,
-                decoration: const BoxDecoration(
-                  color: CupertinoColors.systemBackground,
-                  border: Border(
-                    left: BorderSide(
-                      color: CupertinoColors.separator,
-                      width: 0.5,
+              // Right sidebar - shows Profile, Settings, Channels, or Members
+              if (_rightSidebarOpen != RightSidebarType.none)
+                Container(
+                  width: sidebarWidth,
+                  decoration: const BoxDecoration(
+                    color: CupertinoColors.systemBackground,
+                    border: Border(
+                      left: BorderSide(
+                        color: CupertinoColors.separator,
+                        width: 0.5,
+                      ),
                     ),
                   ),
+                  child: _buildRightSidebarContent(),
                 ),
-                child: activeGroup != null
-                    ? GroupRightSidebar(onClose: () {}, showCloseButton: false)
-                    : ProfileSidebar(onClose: () {}, showCloseButton: false),
-              ),
             ],
           );
         }
@@ -528,7 +581,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
             // Group view: no navigation bar, content reaches top with floating buttons
             if (activeGroup != null)
               ColoredBox(
-                color: CupertinoColors.systemBackground,
+                color: CupertinoColors.white,
                 child: Stack(
                   children: [
                     _buildFeedContent(feedState, groupState, activeGroup),
@@ -563,9 +616,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                         borderRadius: BorderRadius.circular(20),
                         minSize: 36,
                         onPressed: () {
-                          setState(() {
-                            _isRightSidebarOpen = true;
-                          });
+                          _toggleRightSidebar(RightSidebarType.members);
                         },
                         child: const Icon(CupertinoIcons.person_2, size: 20),
                       ),
@@ -573,46 +624,76 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   ],
                 ),
               )
-            // Explore view: show navigation bar with "Explore Groups"
+            // Explore view: no navigation bar (title bar shows "Comunifi")
+            // Floating menu button for sidebar toggle
             else if (groupState.isExploreMode)
-              CupertinoPageScaffold(
-                navigationBar: CupertinoNavigationBar(
-                  leading: CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    onPressed: () {
-                      setState(() {
-                        _isLeftSidebarOpen = true;
-                      });
-                    },
-                    child: const Icon(CupertinoIcons.bars),
-                  ),
-                  middle: const Text('Explore Groups'),
-                ),
-                child: SafeArea(
-                  child: _ExploreGroupsView(
-                    onJoinRequested: () {
-                      groupState.refreshDiscoveredGroups(limit: 1000);
-                    },
-                  ),
+              ColoredBox(
+                color: CupertinoColors.white,
+                child: Stack(
+                  children: [
+                    SafeArea(
+                      child: _ExploreGroupsView(
+                        onJoinRequested: () {
+                          groupState.refreshDiscoveredGroups(limit: 1000);
+                        },
+                      ),
+                    ),
+                    // Floating menu button (left)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 8,
+                      left: 8,
+                      child: CupertinoButton(
+                        padding: const EdgeInsets.all(8),
+                        color: CupertinoColors.systemBackground.withOpacity(
+                          0.8,
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        minSize: 36,
+                        onPressed: () {
+                          setState(() {
+                            _isLeftSidebarOpen = true;
+                          });
+                        },
+                        child: const Icon(CupertinoIcons.bars, size: 20),
+                      ),
+                    ),
+                  ],
                 ),
               )
-            // Main feed: show navigation bar with "Comunifi"
+            // Main feed: no navigation bar (title bar shows "Comunifi")
+            // Floating menu button for sidebar toggle
             else
-              CupertinoPageScaffold(
-                navigationBar: CupertinoNavigationBar(
-                  leading: CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    onPressed: () {
-                      setState(() {
-                        _isLeftSidebarOpen = true;
-                      });
-                    },
-                    child: const Icon(CupertinoIcons.bars),
-                  ),
-                  middle: Text(_getGroupDisplayName(groupState, activeGroup)),
-                ),
-                child: SafeArea(
-                  child: _buildFeedContent(feedState, groupState, activeGroup),
+              ColoredBox(
+                color: CupertinoColors.white,
+                child: Stack(
+                  children: [
+                    SafeArea(
+                      child: _buildFeedContent(
+                        feedState,
+                        groupState,
+                        activeGroup,
+                      ),
+                    ),
+                    // Floating menu button (left)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 8,
+                      left: 8,
+                      child: CupertinoButton(
+                        padding: const EdgeInsets.all(8),
+                        color: CupertinoColors.systemBackground.withOpacity(
+                          0.8,
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        minSize: 36,
+                        onPressed: () {
+                          setState(() {
+                            _isLeftSidebarOpen = true;
+                          });
+                        },
+                        child: const Icon(CupertinoIcons.bars, size: 20),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             // Left sidebar (Groups) - overlay on narrow screens
@@ -626,6 +707,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
               position: SlideInSidebarPosition.left,
               width: 108,
               child: GroupsSidebar(
+                key: const ValueKey('groups-sidebar'),
                 onClose: () {
                   setState(() {
                     _isLeftSidebarOpen = false;
@@ -633,36 +715,45 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                 },
               ),
             ),
-            // Right sidebar - Profile (global feed) or Members (group) - overlay on narrow screens
+            // Right sidebar - overlay on narrow screens
             SlideInSidebar(
-              isOpen: _isRightSidebarOpen,
-              onClose: () {
-                setState(() {
-                  _isRightSidebarOpen = false;
-                });
-              },
+              isOpen: _rightSidebarOpen != RightSidebarType.none,
+              onClose: _closeRightSidebar,
               position: SlideInSidebarPosition.right,
               width: sidebarWidth,
-              child: activeGroup != null
-                  ? GroupRightSidebar(
-                      onClose: () {
-                        setState(() {
-                          _isRightSidebarOpen = false;
-                        });
-                      },
-                    )
-                  : ProfileSidebar(
-                      onClose: () {
-                        setState(() {
-                          _isRightSidebarOpen = false;
-                        });
-                      },
-                    ),
+              child: _buildRightSidebarContent(),
             ),
           ],
         );
       },
     );
+  }
+
+  Widget _buildRightSidebarContent() {
+    switch (_rightSidebarOpen) {
+      case RightSidebarType.profile:
+        return ProfileSidebar(
+          onClose: _closeRightSidebar,
+          showCloseButton: false,
+        );
+      case RightSidebarType.settings:
+        return SettingsSidebar(
+          onClose: _closeRightSidebar,
+          showCloseButton: false,
+        );
+      case RightSidebarType.channels:
+        return ChannelsSidebar(
+          onClose: _closeRightSidebar,
+          showCloseButton: false,
+        );
+      case RightSidebarType.members:
+        return MembersSidebar(
+          onClose: _closeRightSidebar,
+          showCloseButton: false,
+        );
+      case RightSidebarType.none:
+        return const SizedBox.shrink();
+    }
   }
 
   Widget _buildFeedContent(
@@ -687,7 +778,12 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                   const SizedBox(height: 16),
                   CupertinoButton(
                     onPressed: groupState.retryConnection,
-                    child: const Text('Retry'),
+                    child: Builder(
+                      builder: (context) {
+                        final localizations = AppLocalizations.of(context);
+                        return Text(localizations?.retry ?? 'Retry');
+                      },
+                    ),
                   ),
                 ],
               ),
@@ -718,6 +814,12 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                       _GroupHeaderSliver(
                         group: groupState.activeGroup!,
                         groupState: groupState,
+                        onChannelsTap: () {
+                          _toggleRightSidebar(RightSidebarType.channels);
+                        },
+                        onMembersTap: () {
+                          _toggleRightSidebar(RightSidebarType.members);
+                        },
                       ),
                       CupertinoSliverRefreshControl(
                         onRefresh: () async {
@@ -783,22 +885,27 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                     ],
                   ),
                 ),
-                _ComposeMessageWidget(
-                  controller: _messageController,
-                  isPublishing: _isPublishing,
-                  error: _publishError,
-                  onPublish: _publishMessage,
-                  placeholder: 'Write a message',
-                  onErrorDismiss: () {
-                    setState(() {
-                      _publishError = null;
-                    });
+                Builder(
+                  builder: (context) {
+                    final localizations = AppLocalizations.of(context);
+                    return _ComposeMessageWidget(
+                      controller: _messageController,
+                      isPublishing: _isPublishing,
+                      error: _publishError,
+                      onPublish: _publishMessage,
+                      placeholder: localizations?.writeMessage ?? 'Write a message',
+                      onErrorDismiss: () {
+                        setState(() {
+                          _publishError = null;
+                        });
+                      },
+                      onPickImage: _pickImage,
+                      selectedImageBytes: _selectedImageBytes,
+                      onClearImage: _clearSelectedImage,
+                      showImagePicker: true,
+                      groupState: groupState,
+                    );
                   },
-                  onPickImage: _pickImage,
-                  selectedImageBytes: _selectedImageBytes,
-                  onClearImage: _clearSelectedImage,
-                  showImagePicker: true,
-                  groupState: groupState,
                 ),
               ],
             ),
@@ -819,7 +926,12 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                 const SizedBox(height: 16),
                 CupertinoButton(
                   onPressed: feedState.retryConnection,
-                  child: const Text('Retry'),
+                  child: Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Text(localizations?.retry ?? 'Retry');
+                    },
+                  ),
                 ),
               ],
             ),
@@ -1340,6 +1452,9 @@ class _EventItemContentWidget extends StatelessWidget {
   /// Profile sidebar width (right)
   static const double profileSidebarWidth = 320;
 
+  /// Optimal max width for post content (for readability)
+  static const double optimalPostMaxWidth = 700;
+
   const _EventItemContentWidget({
     required this.event,
     required this.displayName,
@@ -1391,6 +1506,7 @@ class _EventItemContentWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final groupState = context.watch<GroupState>();
+    final appState = context.read<AppState>();
     final activeGroup = groupState.activeGroup;
 
     // Only show group name when no active group is selected
@@ -1410,35 +1526,42 @@ class _EventItemContentWidget extends StatelessWidget {
     // Calculate max width based on feed area (screen width minus sidebars on wide screens)
     final screenWidth = MediaQuery.of(context).size.width;
     final isWideScreen = screenWidth > wideScreenBreakpoint;
-    final maxContentWidth = isWideScreen
-        ? screenWidth - groupsSidebarWidth - profileSidebarWidth
+    final rightSidebarOpen = appState.rightSidebarType.value != null;
+    final availableWidth = isWideScreen
+        ? screenWidth - groupsSidebarWidth - (rightSidebarOpen ? profileSidebarWidth : 0)
         : screenWidth;
+    // Use optimal post width or available width, whichever is smaller
+    final maxContentWidth = availableWidth < optimalPostMaxWidth
+        ? availableWidth
+        : optimalPostMaxWidth;
 
     final hasGroupFrame = groupName != null && groupIdHex != null;
 
+    // Center align posts on wide screens (with or without right sidebar), left align on narrow screens
+    final alignment = isWideScreen
+        ? Alignment.center
+        : Alignment.centerLeft;
+
     return Align(
-      alignment: Alignment.centerLeft,
+      alignment: alignment,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxContentWidth),
         child: Container(
           margin: hasGroupFrame
               ? const EdgeInsets.symmetric(horizontal: 8, vertical: 4)
-              : EdgeInsets.zero,
+              : const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: hasGroupFrame
               ? BoxDecoration(
+                  color: AppColors.surface,
                   border: Border.all(
                     color: CupertinoColors.systemIndigo.withOpacity(0.3),
                     width: 1,
                   ),
                   borderRadius: BorderRadius.circular(12),
                 )
-              : const BoxDecoration(
-                  border: Border(
-                    bottom: BorderSide(
-                      color: CupertinoColors.separator,
-                      width: 0.5,
-                    ),
-                  ),
+              : BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(12),
                 ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1484,6 +1607,8 @@ class _EventItemContentWidget extends StatelessWidget {
                                     groupPicture,
                                     width: 24,
                                     height: 24,
+                                    cacheWidth: 24,
+                                    cacheHeight: 24,
                                     fit: BoxFit.cover,
                                     loadingBuilder:
                                         (context, child, loadingProgress) {
@@ -1640,19 +1765,10 @@ class _RichContentText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final spans = _buildTextSpans(context);
-    return Localizations(
-      locale: Localizations.localeOf(context),
-      delegates: [
-        material.DefaultMaterialLocalizations.delegate,
-        material.DefaultWidgetsLocalizations.delegate,
-      ],
-      child: material.SelectionArea(
-        child: RichText(
-          text: TextSpan(
-            style: DefaultTextStyle.of(context).style.copyWith(fontSize: 15),
-            children: spans,
-          ),
-        ),
+    return RichText(
+      text: TextSpan(
+        style: DefaultTextStyle.of(context).style.copyWith(fontSize: 15),
+        children: spans,
       ),
     );
   }
@@ -1903,6 +2019,8 @@ class _AuthorAvatarState extends State<_AuthorAvatar> {
                 _profilePictureUrl!,
                 width: widget.size,
                 height: widget.size,
+                cacheWidth: widget.size.toInt(),
+                cacheHeight: widget.size.toInt(),
                 fit: BoxFit.cover,
                 loadingBuilder: (context, child, loadingProgress) {
                   if (loadingProgress == null) {
@@ -2002,6 +2120,8 @@ class _MentionBadgeState extends State<_MentionBadge> {
                         _profilePictureUrl!,
                         width: 16,
                         height: 16,
+                        cacheWidth: 16,
+                        cacheHeight: 16,
                         fit: BoxFit.cover,
                         loadingBuilder: (context, child, loadingProgress) {
                           if (loadingProgress == null) {
@@ -2126,6 +2246,9 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   final bool isAdmin;
   final VoidCallback? onEditTap;
   final VoidCallback? onSettingsTap;
+  final VoidCallback? onChannelsTap;
+  final VoidCallback? onMembersTap;
+  final RightSidebarType? rightSidebarOpen;
   final bool hasFloatingOverlay;
 
   // Banner heights
@@ -2134,7 +2257,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   // Profile photo and info section
   static const double _profilePhotoSize = 80.0;
   static const double _profileOverlap = 40.0;
-  static const double _infoSectionHeight = 80.0;
+  static const double _infoSectionHeight = 55.0;
 
   static const LinearGradient _defaultGroupCoverGradient = LinearGradient(
     colors: <Color>[AppColors.primary, AppColors.accent],
@@ -2149,6 +2272,9 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
     required this.isAdmin,
     this.onEditTap,
     this.onSettingsTap,
+    this.onChannelsTap,
+    this.onMembersTap,
+    this.rightSidebarOpen,
     this.hasFloatingOverlay = false,
   });
 
@@ -2169,6 +2295,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
         announcement?.about != oldDelegate.announcement?.about ||
         topPadding != oldDelegate.topPadding ||
         isAdmin != oldDelegate.isAdmin ||
+        rightSidebarOpen != oldDelegate.rightSidebarOpen ||
         hasFloatingOverlay != oldDelegate.hasFloatingOverlay;
   }
 
@@ -2195,7 +2322,7 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
     final scaledPhotoSize = _profilePhotoSize * photoScale;
 
     return Container(
-      color: CupertinoColors.systemBackground,
+      color: AppColors.surface,
       child: Stack(
         children: [
           // Banner - extends to top of screen (cover photo or gradient fallback)
@@ -2330,49 +2457,122 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
                 currentBannerHeight +
                 _profileOverlap +
                 8, // 8px spacing
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                GestureDetector(
-                  onTap: isAdmin ? onEditTap : null,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Flexible(
-                        child: Text(
-                          groupName,
-                          style: const TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold,
+            child: Builder(
+              builder: (context) {
+                final localizations = AppLocalizations.of(context);
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: isAdmin ? onEditTap : null,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      groupName,
+                                      style: const TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                  if (isAdmin) ...[
+                                    const SizedBox(width: 8),
+                                    Icon(
+                                      CupertinoIcons.pencil,
+                                      size: 16,
+                                      color: CupertinoColors.activeBlue.resolveFrom(
+                                        context,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
                           ),
-                        ),
-                      ),
-                      if (isAdmin) ...[
-                        const SizedBox(width: 8),
-                        Icon(
-                          CupertinoIcons.pencil,
-                          size: 16,
-                          color: CupertinoColors.activeBlue.resolveFrom(
-                            context,
-                          ),
-                        ),
+                          // Channels and Members buttons
+                          if (onChannelsTap != null || onMembersTap != null) ...[
+                            if (onChannelsTap != null)
+                              CupertinoButton(
+                                padding: EdgeInsets.zero,
+                                minSize: 0,
+                                onPressed: onChannelsTap,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      CupertinoIcons.bubble_left_bubble_right,
+                                      size: 20,
+                                      color: rightSidebarOpen == RightSidebarType.channels
+                                          ? CupertinoColors.activeBlue
+                                          : CupertinoColors.label,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      localizations?.discussions ?? 'Discussions',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        color: rightSidebarOpen == RightSidebarType.channels
+                                            ? CupertinoColors.activeBlue
+                                            : CupertinoColors.label,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            if (onChannelsTap != null && onMembersTap != null)
+                              const SizedBox(width: 12),
+                            if (onMembersTap != null)
+                              CupertinoButton(
+                                padding: EdgeInsets.zero,
+                                minSize: 0,
+                                onPressed: onMembersTap,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      CupertinoIcons.person_2,
+                                      size: 20,
+                                      color: rightSidebarOpen == RightSidebarType.members
+                                          ? CupertinoColors.activeBlue
+                                          : CupertinoColors.label,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      localizations?.members ?? 'Members',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        color: rightSidebarOpen == RightSidebarType.members
+                                            ? CupertinoColors.activeBlue
+                                            : CupertinoColors.label,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
                       ],
-                    ],
-                  ),
-                ),
-                if (groupAbout != null && groupAbout.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    groupAbout,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      color: CupertinoColors.secondaryLabel,
                     ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ],
+                    if (groupAbout != null && groupAbout.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        groupAbout,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: CupertinoColors.secondaryLabel,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ],
+                );
+              },
             ),
           ),
           // Bottom divider
@@ -2392,8 +2592,15 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
 class _GroupHeaderSliver extends StatefulWidget {
   final MlsGroup group;
   final GroupState groupState;
+  final VoidCallback? onChannelsTap;
+  final VoidCallback? onMembersTap;
 
-  const _GroupHeaderSliver({required this.group, required this.groupState});
+  const _GroupHeaderSliver({
+    required this.group,
+    required this.groupState,
+    this.onChannelsTap,
+    this.onMembersTap,
+  });
 
   @override
   State<_GroupHeaderSliver> createState() => _GroupHeaderSliverState();
@@ -2484,6 +2691,10 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
       groupIdHex,
     );
 
+    // Get current right sidebar state for active button styling
+    final appState = context.watch<AppState>();
+    final rightSidebarOpen = appState.rightSidebarType.value;
+
     return SliverPersistentHeader(
       pinned: true,
       delegate: _CollapsingGroupHeaderDelegate(
@@ -2493,6 +2704,9 @@ class _GroupHeaderSliverState extends State<_GroupHeaderSliver> {
         isAdmin: _isAdmin,
         onEditTap: _showEditModal,
         onSettingsTap: _isAdmin ? _showSettingsModal : null,
+        onChannelsTap: widget.onChannelsTap,
+        onMembersTap: widget.onMembersTap,
+        rightSidebarOpen: rightSidebarOpen,
         hasFloatingOverlay: isNarrowScreen,
       ),
     );
@@ -2759,10 +2973,7 @@ class _HashtagPillsRow extends StatelessWidget {
   final List<String> hashtags;
   final void Function(String) onRemove;
 
-  const _HashtagPillsRow({
-    required this.hashtags,
-    required this.onRemove,
-  });
+  const _HashtagPillsRow({required this.hashtags, required this.onRemove});
 
   @override
   Widget build(BuildContext context) {
@@ -2820,10 +3031,7 @@ class _HashtagPill extends StatelessWidget {
               : CupertinoColors.secondarySystemFill,
           borderRadius: BorderRadius.circular(12.0),
         ),
-        padding: EdgeInsets.symmetric(
-          horizontal: 10.0,
-          vertical: 4.0,
-        ),
+        padding: EdgeInsets.symmetric(horizontal: 10.0, vertical: 4.0),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -2859,10 +3067,7 @@ class _InlineHashtagBadges extends StatelessWidget {
   final List<String> hashtags;
   final void Function(String) onRemove;
 
-  const _InlineHashtagBadges({
-    required this.hashtags,
-    required this.onRemove,
-  });
+  const _InlineHashtagBadges({required this.hashtags, required this.onRemove});
 
   @override
   Widget build(BuildContext context) {
@@ -2956,7 +3161,8 @@ class _ComposeMessageWidget extends StatefulWidget {
   final Uint8List? selectedImageBytes;
   final VoidCallback? onClearImage;
   final bool showImagePicker;
-  final GroupState? groupState; // Optional, for showing channel in group context
+  final GroupState?
+  groupState; // Optional, for showing channel in group context
 
   const _ComposeMessageWidget({
     required this.controller,
@@ -3009,13 +3215,18 @@ class _ComposeMessageWidgetState extends State<_ComposeMessageWidget> {
     final content = widget.controller.text;
     // Use regex to remove the hashtag (with #) but preserve surrounding text
     final regex = RegExp(r'#\b' + RegExp.escape(hashtag) + r'\b');
-    final updated = content.replaceAll(regex, '').replaceAll(RegExp(r'\s+'), ' ').trim();
-    
+    final updated = content
+        .replaceAll(regex, '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
     final selectionOffset = widget.controller.selection.baseOffset;
     widget.controller.text = updated;
-    
+
     // Try to preserve cursor position, but clamp to valid range
-    final newOffset = selectionOffset > updated.length ? updated.length : selectionOffset;
+    final newOffset = selectionOffset > updated.length
+        ? updated.length
+        : selectionOffset;
     widget.controller.selection = TextSelection.collapsed(offset: newOffset);
 
     _extractHashtags(); // Re-extract
@@ -3119,7 +3330,9 @@ class _ComposeMessageWidgetState extends State<_ComposeMessageWidget> {
                     CupertinoButton(
                       padding: EdgeInsets.zero,
                       minSize: 0,
-                      onPressed: widget.isPublishing ? null : widget.onPickImage,
+                      onPressed: widget.isPublishing
+                          ? null
+                          : widget.onPickImage,
                       child: Container(
                         width: 36,
                         height: 36,
@@ -3159,27 +3372,34 @@ class _ComposeMessageWidgetState extends State<_ComposeMessageWidget> {
                       child: Stack(
                         alignment: Alignment.bottomLeft,
                         children: [
-                          CupertinoTextField(
-                            controller: widget.controller,
-                            placeholder: widget.placeholder ?? 'Write a message...',
-                            maxLines: null,
-                            minLines: 1,
-                            textInputAction: TextInputAction.newline,
-                            padding: EdgeInsets.only(
-                              left: 12.0,
-                              right: 12.0,
-                              top: 8.0,
-                              bottom: widget.groupState != null &&
-                                      widget.groupState!.activeGroup != null &&
-                                      widget.controller.text.isNotEmpty &&
-                                      _extractedHashtags.isNotEmpty
-                                  ? 40.0 // Space for badges
-                                  : 8.0,
-                            ),
-                            decoration: BoxDecoration(
-                              color: CupertinoColors.systemGrey6,
-                              borderRadius: BorderRadius.circular(20.0),
-                            ),
+                          Builder(
+                            builder: (context) {
+                              final localizations = AppLocalizations.of(context);
+                              return CupertinoTextField(
+                                controller: widget.controller,
+                                placeholder: widget.placeholder ?? 
+                                    (localizations?.writeMessageEllipsis ?? 'Write a message...'),
+                                maxLines: null,
+                                minLines: 1,
+                                textInputAction: TextInputAction.newline,
+                                padding: EdgeInsets.only(
+                                  left: 12.0,
+                                  right: 12.0,
+                                  top: 8.0,
+                                  bottom:
+                                      widget.groupState != null &&
+                                          widget.groupState!.activeGroup != null &&
+                                          widget.controller.text.isNotEmpty &&
+                                          _extractedHashtags.isNotEmpty
+                                      ? 40.0 // Space for badges
+                                      : 8.0,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: CupertinoColors.systemGrey6,
+                                  borderRadius: BorderRadius.circular(20.0),
+                                ),
+                              );
+                            },
                           ),
                           // Inline badges overlay
                           if (widget.groupState != null &&
@@ -3528,9 +3748,14 @@ class _ExploreGroupsViewState extends State<_ExploreGroupsView> {
             // Search field
             Padding(
               padding: const EdgeInsets.all(16),
-              child: CupertinoSearchTextField(
-                controller: _searchController,
-                placeholder: 'Search groups on relay...',
+              child: Builder(
+                builder: (context) {
+                  final localizations = AppLocalizations.of(context);
+                  return CupertinoSearchTextField(
+                    controller: _searchController,
+                    placeholder: localizations?.searchGroupsOnRelay ?? 'Search groups on relay...',
+                  );
+                },
               ),
             ),
             // Loading indicator for search
@@ -3579,7 +3804,10 @@ class _ExploreGroupsViewState extends State<_ExploreGroupsView> {
                       ),
                     )
                   : ListView.builder(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
                       itemCount: explorableGroups.length,
                       itemBuilder: (context, index) {
                         final announcement = explorableGroups[index];
@@ -3640,7 +3868,13 @@ class _ExploreGroupListItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.separator, width: 0.5),
+      ),
       child: Row(
         children: [
           // Group avatar
@@ -3767,19 +4001,9 @@ class _WelcomeCard extends StatelessWidget {
       margin: const EdgeInsets.all(16),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            CupertinoColors.activeBlue.withOpacity(0.1),
-            CupertinoColors.systemIndigo.withOpacity(0.1),
-          ],
-        ),
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: CupertinoColors.activeBlue.withOpacity(0.3),
-          width: 1,
-        ),
+        border: Border.all(color: AppColors.separator, width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3799,22 +4023,32 @@ class _WelcomeCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 12),
-              const Expanded(
-                child: Text(
-                  'Welcome to Comunifi!',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              Expanded(
+                child: Builder(
+                  builder: (context) {
+                    final localizations = AppLocalizations.of(context);
+                    return Text(
+                      localizations?.welcomeToComunifi ?? 'Welcome to Comunifi!',
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    );
+                  },
                 ),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          const Text(
-            'Create your first group or explore existing ones to get started. Groups are private spaces where you can share posts with members.',
-            style: TextStyle(
-              fontSize: 15,
-              color: CupertinoColors.secondaryLabel,
-              height: 1.4,
-            ),
+          Builder(
+            builder: (context) {
+              final localizations = AppLocalizations.of(context);
+              return Text(
+                localizations?.welcomeDescription ?? 'Create your first group or explore existing ones to get started. Groups are private spaces where you can share posts with members.',
+                style: const TextStyle(
+                  fontSize: 15,
+                  color: CupertinoColors.secondaryLabel,
+                  height: 1.4,
+                ),
+              );
+            },
           ),
           const SizedBox(height: 16),
           Row(
@@ -3825,23 +4059,28 @@ class _WelcomeCard extends StatelessWidget {
                   color: CupertinoColors.activeBlue,
                   borderRadius: BorderRadius.circular(10),
                   onPressed: onCreateGroup,
-                  child: const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        CupertinoIcons.plus_circle_fill,
-                        size: 18,
-                        color: CupertinoColors.white,
-                      ),
-                      SizedBox(width: 6),
-                      Text(
-                        'Create Group',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: CupertinoColors.white,
-                        ),
-                      ),
-                    ],
+                  child: Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            CupertinoIcons.plus_circle_fill,
+                            size: 18,
+                            color: CupertinoColors.white,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            localizations?.createGroup ?? 'Create Group',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: CupertinoColors.white,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
                 ),
               ),

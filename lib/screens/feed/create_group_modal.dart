@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 
 /// Modal for creating a new group
 /// Shows as a bottom sheet with form fields
@@ -151,9 +152,14 @@ class _CreateGroupModalState extends State<CreateGroupModal> {
                     onPressed: () => Navigator.of(context).pop(),
                     child: const Text('Cancel'),
                   ),
-                  const Text(
-                    'Create Group',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Text(
+                        localizations?.createGroup ?? 'Create Group',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      );
+                    },
                   ),
                   CupertinoButton(
                     padding: EdgeInsets.zero,
@@ -240,33 +246,48 @@ class _CreateGroupModalState extends State<CreateGroupModal> {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  Center(
-                    child: Text(
-                      _isUploadingPhoto
-                          ? 'Uploading...'
-                          : _selectedPhotoBytes != null
-                          ? 'Tap to change'
-                          : 'Add photo (optional)',
-                      style: const TextStyle(
-                        color: CupertinoColors.secondaryLabel,
-                        fontSize: 12,
-                      ),
-                    ),
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return Center(
+                        child: Text(
+                          _isUploadingPhoto
+                              ? (localizations?.uploading ?? 'Uploading...')
+                              : _selectedPhotoBytes != null
+                              ? (localizations?.tapToChange ?? 'Tap to change')
+                              : (localizations?.addPhotoOptional ?? 'Add photo (optional)'),
+                          style: const TextStyle(
+                            color: CupertinoColors.secondaryLabel,
+                            fontSize: 12,
+                          ),
+                        ),
+                      );
+                    },
                   ),
                   const SizedBox(height: 20),
-                  CupertinoTextField(
-                    controller: _nameController,
-                    placeholder: 'Group name',
-                    padding: const EdgeInsets.all(12),
-                    enabled: !_isCreating,
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return CupertinoTextField(
+                        controller: _nameController,
+                        placeholder: localizations?.groupName ?? 'Group name',
+                        padding: const EdgeInsets.all(12),
+                        enabled: !_isCreating,
+                      );
+                    },
                   ),
                   const SizedBox(height: 12),
-                  CupertinoTextField(
-                    controller: _aboutController,
-                    placeholder: 'About (optional)',
-                    padding: const EdgeInsets.all(12),
-                    maxLines: 2,
-                    enabled: !_isCreating,
+                  Builder(
+                    builder: (context) {
+                      final localizations = AppLocalizations.of(context);
+                      return CupertinoTextField(
+                        controller: _aboutController,
+                        placeholder: localizations?.aboutOptional ?? 'About (optional)',
+                        padding: const EdgeInsets.all(12),
+                        maxLines: 2,
+                        enabled: !_isCreating,
+                      );
+                    },
                   ),
                 ],
               ),

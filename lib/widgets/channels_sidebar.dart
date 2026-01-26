@@ -2,6 +2,7 @@ import 'package:comunifi/state/group.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/services/nostr/group_channel.dart';
 import 'package:comunifi/theme/colors.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
 
@@ -159,7 +160,7 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
               padding: const EdgeInsets.all(16),
               child: Center(
                 child: Text(
-                  'No channels',
+                  'No discussions',
                   style: TextStyle(
                     color: CupertinoColors.secondaryLabel.resolveFrom(context),
                   ),
@@ -179,6 +180,7 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
                   vertical: 12,
                 ),
                 decoration: const BoxDecoration(
+                  color: CupertinoColors.white,
                   border: Border(
                     bottom: BorderSide(
                       color: AppColors.separator,
@@ -188,12 +190,17 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
                 ),
                 child: Row(
                   children: [
-                    const Text(
-                      'Channels',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
+                    Builder(
+                      builder: (context) {
+                        final localizations = AppLocalizations.of(context);
+                        return Text(
+                          localizations?.discussions ?? 'Discussions',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        );
+                      },
                     ),
                     if (widget.showCloseButton) ...[
                       const Spacer(),
@@ -211,9 +218,14 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
               // Search field
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: CupertinoSearchTextField(
-                  controller: _searchController,
-                  placeholder: 'Search channels...',
+                child: Builder(
+                  builder: (context) {
+                    final localizations = AppLocalizations.of(context);
+                    return CupertinoSearchTextField(
+                      controller: _searchController,
+                      placeholder: localizations?.searchDiscussions ?? 'Search discussions...',
+                    );
+                  },
                 ),
               ),
 

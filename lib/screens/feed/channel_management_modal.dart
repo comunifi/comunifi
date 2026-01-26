@@ -98,7 +98,7 @@ class _ChannelManagementModalState extends State<ChannelManagementModal> {
                   ),
                   const Expanded(
                     child: Text(
-                      'Manage Channels',
+                      'Manage Discussions',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 17,
@@ -216,9 +216,9 @@ class _ChannelManagementModalState extends State<ChannelManagementModal> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        // Pinned Channels Section
+        // Pinned Discussions Section
         if (pinnedChannels.isNotEmpty) ...[
-          _buildSectionHeader(context, 'Pinned Channels'),
+          _buildSectionHeader(context, 'Pinned Discussions'),
           const SizedBox(height: 8),
           _buildSettingsCard(
             context,
@@ -236,8 +236,8 @@ class _ChannelManagementModalState extends State<ChannelManagementModal> {
           const SizedBox(height: 24),
         ],
 
-        // Unpinned Channels Section
-        _buildSectionHeader(context, 'Unpinned Channels'),
+        // Unpinned Discussions Section
+        _buildSectionHeader(context, 'Unpinned Discussions'),
         const SizedBox(height: 8),
         _buildSettingsCard(
           context,

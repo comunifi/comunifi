@@ -6,13 +6,19 @@ import 'package:comunifi/routes/routes.dart';
 import 'package:comunifi/theme/app_theme.dart';
 import 'package:comunifi/services/db/db.dart';
 import 'package:comunifi/services/deep_link/deep_link_service.dart';
+import 'package:comunifi/services/preferences/language_preferences.dart';
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/state/localization.dart';
 import 'package:comunifi/state/state.dart';
 import 'package:comunifi/widgets/titlebar.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
+import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 
 /// Global route observer for detecting when screens become visible
 final RouteObserver<ModalRoute<void>> routeObserver =
@@ -24,6 +30,10 @@ late final GroupState _groupState;
 void main() {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+
+    // Configure image cache to prevent images from disappearing on resize
+    PaintingBinding.instance.imageCache.maximumSize = 2000; // Maximum number of images
+    PaintingBinding.instance.imageCache.maximumSizeBytes = 200 * 1024 * 1024; // 200MB
 
     // Initialize window manager for Windows (hide native title bar)
     if (Platform.isWindows) {
@@ -44,6 +54,9 @@ void main() {
     // Initialize database factory for desktop platforms (Windows/Linux)
     // Must be called before any database operations
     await initializeDatabaseFactory();
+
+    // Initialize language preferences service early
+    await LanguagePreferencesService.instance.ensureInitialized();
 
     // Initialize deep link service early to capture initial links
     await DeepLinkService.instance.initialize();
@@ -133,31 +146,59 @@ class _ComunifiState extends State<Comunifi> {
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoApp.router(
-      debugShowCheckedModeBanner: false,
-      routerConfig: router,
-      theme: theme,
-      title: 'Comunifi',
-      builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(
-          context,
-        ).copyWith(textScaler: const TextScaler.linear(1.0)),
-        child: CupertinoPageScaffold(
-          key: const Key('main'),
-          backgroundColor: theme.scaffoldBackgroundColor,
-          child: Column(
-            children: [
-              // Offline indicator banner at the top
-              const Titlebar(),
-              Expanded(
-                child: child != null
-                    ? CupertinoTheme(data: theme, child: child)
-                    : const SizedBox(),
-              ),
+    return Consumer<LocalizationState>(
+      builder: (context, localizationState, _) {
+        return Localizations(
+          locale: localizationState.locale,
+          delegates: [
+            AppLocalizations.delegate,
+            DefaultWidgetsLocalizations.delegate,
+            DefaultCupertinoLocalizations.delegate,
+          ],
+          child: CupertinoApp.router(
+            debugShowCheckedModeBanner: false,
+            routerConfig: router,
+            theme: theme,
+            title: 'Comunifi',
+            locale: localizationState.locale,
+            supportedLocales: const [
+              Locale('en'),
+              Locale('fr'),
+              Locale('nl'),
+              Locale('de'),
+              Locale('es'),
             ],
+            localizationsDelegates: [
+              AppLocalizations.delegate,
+              DefaultWidgetsLocalizations.delegate,
+              DefaultCupertinoLocalizations.delegate,
+            ],
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(1.0)),
+              child: CupertinoPageScaffold(
+                key: const Key('main'),
+                backgroundColor: theme.scaffoldBackgroundColor,
+                child: Column(
+                  children: [
+                    // Offline indicator banner at the top
+                    Titlebar(rootNavigatorKey: _rootNavigatorKey),
+                    Expanded(
+                      child: child != null
+                          ? CupertinoTheme(
+                              data: theme,
+                              child: child,
+                            )
+                          : const SizedBox(),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

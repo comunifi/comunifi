@@ -1,5 +1,6 @@
 import 'package:comunifi/state/app.dart';
 import 'package:comunifi/state/group.dart';
+import 'package:comunifi/state/localization.dart';
 import 'package:comunifi/state/mls.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:flutter/cupertino.dart';
@@ -17,6 +18,7 @@ Widget provideAppState(
       create: (_) => groupState ?? GroupState(),
     ),
     ChangeNotifierProvider(create: (_) => ProfileState()),
+    ChangeNotifierProvider(create: (_) => LocalizationState()),
   ],
   builder: builder,
   child: child,

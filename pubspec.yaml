@@ -59,6 +59,9 @@ dependencies:
   share_plus: ^9.0.0
   window_manager: ^0.4.3
   audioplayers: ^6.5.1
+  intl: ^0.20.0
+  flutter_localizations:
+    sdk: flutter
 
 dev_dependencies:
   flutter_test:
@@ -103,6 +106,7 @@ flutter:
     - .env
     - .env.debug
     - assets/sounds/ding.mp3
+    - assets/logo.png
 
   fonts:
     - family: ComunifiRounded

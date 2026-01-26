@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/theme/colors.dart';
+import 'package:comunifi/l10n/app_localizations.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:provider/provider.dart';
 
@@ -407,6 +408,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
                   vertical: 12,
                 ),
                 decoration: const BoxDecoration(
+                  color: CupertinoColors.white,
                   border: Border(
                     bottom: BorderSide(
                       color: AppColors.separator,
@@ -416,12 +418,17 @@ class _MembersSidebarState extends State<MembersSidebar> {
                 ),
                 child: Row(
                   children: [
-                    Text(
-                      'Members${_members.isNotEmpty ? ' (${_members.length})' : ''}',
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
+                    Builder(
+                      builder: (context) {
+                        final localizations = AppLocalizations.of(context);
+                        return Text(
+                          '${localizations?.members ?? 'Members'}${_members.isNotEmpty ? ' (${_members.length})' : ''}',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        );
+                      },
                     ),
                     if (_isLoadingMembers) ...[
                       const SizedBox(width: 8),

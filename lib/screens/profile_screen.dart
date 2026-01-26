@@ -819,6 +819,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+
   void _showDeleteConfirmation() {
     showCupertinoDialog(
       context: context,

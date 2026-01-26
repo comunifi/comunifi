@@ -127,8 +127,8 @@ class GroupSettingsModal extends StatelessWidget {
 
                   const SizedBox(height: 24),
 
-                  // Section: Channels
-                  _buildSectionHeader(context, 'Channels'),
+                  // Section: Discussions
+                  _buildSectionHeader(context, 'Discussions'),
                   const SizedBox(height: 8),
                   _buildSettingsCard(
                     context,
@@ -136,8 +136,8 @@ class GroupSettingsModal extends StatelessWidget {
                       _SettingsTile(
                         icon: CupertinoIcons.tag,
                         iconColor: CupertinoColors.systemBlue,
-                        title: 'Manage Channels',
-                        subtitle: 'Pin, unpin, and reorder channels',
+                        title: 'Manage Discussions',
+                        subtitle: 'Pin, unpin, and reorder discussions',
                         onTap: () => _showChannelManagementModal(context),
                       ),
                     ],
