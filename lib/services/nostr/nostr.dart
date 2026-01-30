@@ -501,6 +501,35 @@ class NostrService {
     try {
       final event = NostrEventModel.fromJson(eventData);
 
+      // #region agent log
+      if (event.kind == 9009) {
+        try {
+          final pTags = event.tags
+              .where((t) => t.isNotEmpty && t[0] == 'p')
+              .map((t) => t.length > 1 ? t[1] : '')
+              .where((v) => v.isNotEmpty)
+              .toList();
+          final logEntry = {
+            'location': 'nostr.dart:502',
+            'message': '_handleEventMessage: Received kind:9009 event',
+            'data': {
+              'eventId': event.id.substring(0, 8),
+              'subscriptionId': subscriptionId,
+              'pTags': pTags,
+              'kind': event.kind,
+            },
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+            'sessionId': 'debug-session',
+            'runId': 'run1',
+            'hypothesisId': 'E',
+          };
+          // File logging removed - using debugPrint only due to permissions
+        } catch (e) {
+          // Ignore logging errors
+        }
+      }
+      // #endregion
+
       // If this is an encrypted envelope (kind 1059), decrypt it
       if (event.isEncryptedEnvelope) {
         // Track the decryption future so we can wait for it before completing EOSE
@@ -765,11 +794,9 @@ class NostrService {
     debugPrint('Event $eventId ${success ? 'accepted' : 'rejected'}: $message');
 
     // Emit to the publish results stream
-    _publishResultController.add(PublishResult(
-      eventId: eventId,
-      success: success,
-      message: message,
-    ));
+    _publishResultController.add(
+      PublishResult(eventId: eventId, success: success, message: message),
+    );
   }
 
   /// Generate a random subscription ID
@@ -1116,6 +1143,7 @@ class NostrService {
   /// Request past events and return them as a Future that completes when EOSE is received
   /// Perfect for pagination by requesting chunks of events
   /// If useCache is true, will check cache first before querying relay
+  /// Always fetches from relay in background to keep cache fresh, even when cache exists
   /// [tagKey] - Optional tag key to filter by (e.g., 'u' for username, 'g' for group, 't' for hashtag)
   ///            If not provided, will auto-detect based on tag value format
   Future<List<NostrEventModel>> requestPastEvents({
@@ -1123,20 +1151,24 @@ class NostrService {
     List<String>? authors,
     List<String>? tags,
     String? tagKey,
+    List<String>? pTags,
     DateTime? since,
     DateTime? until,
     int? limit,
     bool useCache = true,
   }) async {
-    // Try to get from cache first if enabled
+    List<NostrEventModel>? cachedEvents;
+
+    // Try to get from cache first if enabled (for immediate display)
     // Skip cache if 'until' is set (pagination - we want to query relay for older events)
     if (useCache && until == null && _cacheInitialized && _eventTable != null) {
       try {
-        final cachedEvents = await _getCachedEvents(
+        cachedEvents = await _getCachedEvents(
           kind: kind,
           authors: authors,
           tags: tags,
           tagKey: tagKey,
+          pTags: pTags,
           since: since,
           until: until,
           limit: limit,
@@ -1147,10 +1179,37 @@ class NostrService {
         );
 
         // If we have cached events and no 'since' filter (meaning we want latest),
-        // or if we got enough events, return cached results
+        // or if we got enough events, return cached results immediately
+        // But we'll still fetch from relay in background to keep cache fresh
         if (cachedEvents.isNotEmpty &&
             (since == null || cachedEvents.length >= (limit ?? 100))) {
-          debugPrint('Returning ${cachedEvents.length} cached events');
+          debugPrint(
+            'Returning ${cachedEvents.length} cached events immediately, fetching from relay in background',
+          );
+
+          // Always fetch from relay in background to keep cache fresh
+          // This follows the pattern: display local -> async fetch remote -> merge -> display updated
+          if (_isConnected) {
+            Future.microtask(() async {
+              try {
+                await _fetchPastEventsFromRelay(
+                  kind: kind,
+                  authors: authors,
+                  tags: tags,
+                  tagKey: tagKey,
+                  pTags: pTags,
+                  since: since,
+                  until: until,
+                  limit: limit,
+                );
+                debugPrint('Background fetch completed for kind $kind');
+              } catch (e) {
+                debugPrint('Background fetch failed (non-critical): $e');
+                // Don't throw - cache is already displayed
+              }
+            });
+          }
+
           return cachedEvents;
         }
       } catch (e) {
@@ -1160,6 +1219,35 @@ class NostrService {
     }
 
     // Query relay if not connected, throw error
+    if (!_isConnected) {
+      throw Exception('Not connected to relay. Call connect() first.');
+    }
+
+    // Fetch from relay (events will be automatically cached via event stream)
+    return await _fetchPastEventsFromRelay(
+      kind: kind,
+      authors: authors,
+      tags: tags,
+      tagKey: tagKey,
+      pTags: pTags,
+      since: since,
+      until: until,
+      limit: limit,
+    );
+  }
+
+  /// Internal method to fetch past events from relay
+  /// Events are automatically cached via the event stream handler
+  Future<List<NostrEventModel>> _fetchPastEventsFromRelay({
+    required int kind,
+    List<String>? authors,
+    List<String>? tags,
+    String? tagKey,
+    List<String>? pTags,
+    DateTime? since,
+    DateTime? until,
+    int? limit,
+  }) async {
     if (!_isConnected) {
       throw Exception('Not connected to relay. Call connect() first.');
     }
@@ -1180,9 +1268,20 @@ class NostrService {
     // Listen to events and collect them
     controller.stream.listen(
       (event) {
+        if (kind == 9009) {
+          debugPrint(
+            'DEBUG: _fetchPastEventsFromRelay - Received kind:9009 event ${event.id.substring(0, 8)}... (total: ${events.length + 1})',
+          );
+        }
         events.add(event);
+        // Events are automatically cached via _cacheEvent in the message handler
       },
       onDone: () {
+        if (kind == 9009) {
+          debugPrint(
+            'DEBUG: _fetchPastEventsFromRelay - Stream done for kind:9009, eoseReceived: $eoseReceived, total events: ${events.length}',
+          );
+        }
         // If EOSE was received and stream is done, complete the future
         if (eoseReceived && !completer.isCompleted) {
           completer.complete(events);
@@ -1218,6 +1317,11 @@ class NostrService {
       }
     }
 
+    // Filter by recipient pubkey (#p tag)
+    if (pTags != null && pTags.isNotEmpty) {
+      filter['#p'] = pTags;
+    }
+
     if (since != null) {
       filter['since'] = (since.millisecondsSinceEpoch / 1000).floor();
     }
@@ -1229,6 +1333,31 @@ class NostrService {
     if (limit != null) {
       filter['limit'] = limit;
     }
+
+    // #region agent log
+    try {
+      final logEntry = {
+        'location': 'nostr.dart:1282',
+        'message': '_fetchPastEventsFromRelay: Filter being sent',
+        'data': {
+          'kind': kind,
+          'pTags': pTags,
+          'filter': filter,
+          'subscriptionId': subscriptionId,
+        },
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'sessionId': 'debug-session',
+        'runId': 'run1',
+        'hypothesisId': 'A',
+      };
+      debugPrint(
+        'DEBUG: _fetchPastEventsFromRelay - kind: $kind, pTags: $pTags, filter: $filter',
+      );
+      // File logging removed - using debugPrint only due to permissions
+    } catch (e) {
+      debugPrint('DEBUG: Failed to write log: $e');
+    }
+    // #endregion
 
     // Send the REQ message
     final List<dynamic> request = ['REQ', subscriptionId, filter];
@@ -1254,6 +1383,7 @@ class NostrService {
     List<String>? authors,
     List<String>? tags,
     String? tagKey,
+    List<String>? pTags,
     DateTime? since,
     DateTime? until,
     int? limit,
@@ -1289,6 +1419,12 @@ class NostrService {
       }
     }
 
+    // If pTags is provided, use 'p' tag for filtering
+    if (pTags != null && pTags.isNotEmpty && queryTagKey == null) {
+      queryTagKey = 'p';
+      queryTagValue = pTags.first;
+    }
+
     // Query the database (increase limit to allow for date filtering)
     var events = await _eventTable!.query(
       pubkey: queryPubkey,
@@ -1297,6 +1433,21 @@ class NostrService {
       tagValue: queryTagValue,
       limit: limit != null ? limit * 2 : null, // Get more to filter by date
     );
+
+    // If pTags was provided, filter events to only those with our pubkey in 'p' tag
+    if (pTags != null && pTags.isNotEmpty) {
+      final pTagsSet = pTags.map((p) => p.toLowerCase()).toSet();
+      events = events.where((event) {
+        for (final tag in event.tags) {
+          if (tag.isNotEmpty && tag[0] == 'p' && tag.length > 1) {
+            if (pTagsSet.contains(tag[1].toLowerCase())) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }).toList();
+    }
 
     // Filter by date range if specified
     if (since != null || until != null) {
@@ -1427,9 +1578,7 @@ class NostrService {
     }
 
     // Build channel metadata JSON (per NIP-28)
-    final metadata = <String, dynamic>{
-      'name': name,
-    };
+    final metadata = <String, dynamic>{'name': name};
     if (about != null) metadata['about'] = about;
     if (picture != null) metadata['picture'] = picture;
     // Add relay URL to metadata (per NIP-28)
@@ -1446,7 +1595,10 @@ class NostrService {
     final createdAt = DateTime.now();
 
     // Add client signature tags
-    final signedTags = await addClientTagsWithSignature(tags, createdAt: createdAt);
+    final signedTags = await addClientTagsWithSignature(
+      tags,
+      createdAt: createdAt,
+    );
     final nostrEvent = NostrEvent.fromPartialData(
       kind: kindChannelCreate,
       content: content,
@@ -1466,10 +1618,7 @@ class NostrService {
     );
 
     // Publish to relay (not encrypted, this is a public channel creation event)
-    await publishEvent(
-      eventModel.toJson(),
-      keyPairs: keyPairs,
-    );
+    await publishEvent(eventModel.toJson(), keyPairs: keyPairs);
 
     // Cache the event
     if (_cacheInitialized && _eventTable != null) {
@@ -1478,7 +1627,9 @@ class NostrService {
       });
     }
 
-    debugPrint('Created channel "$name" in group $groupIdHex: ${eventModel.id}');
+    debugPrint(
+      'Created channel "$name" in group $groupIdHex: ${eventModel.id}',
+    );
     return eventModel;
   }
 
@@ -1526,7 +1677,10 @@ class NostrService {
     final createdAt = DateTime.now();
 
     // Add client signature tags
-    final signedTags = await addClientTagsWithSignature(tags, createdAt: createdAt);
+    final signedTags = await addClientTagsWithSignature(
+      tags,
+      createdAt: createdAt,
+    );
     final nostrEvent = NostrEvent.fromPartialData(
       kind: kindChannelMetadata,
       content: content,
@@ -1546,10 +1700,7 @@ class NostrService {
     );
 
     // Publish to relay (not encrypted, this is a public metadata update)
-    await publishEvent(
-      eventModel.toJson(),
-      keyPairs: keyPairs,
-    );
+    await publishEvent(eventModel.toJson(), keyPairs: keyPairs);
 
     // Cache the event
     if (_cacheInitialized && _eventTable != null) {
@@ -1571,9 +1722,7 @@ class NostrService {
   ///
   /// The stream emits whenever channel metadata changes (new channels created,
   /// existing channels updated, etc.)
-  Stream<List<GroupChannelMetadata>> watchGroupChannels(
-    String groupIdHex,
-  ) {
+  Stream<List<GroupChannelMetadata>> watchGroupChannels(String groupIdHex) {
     if (!_isConnected) {
       throw Exception('Not connected to relay. Call connect() first.');
     }
@@ -1586,23 +1735,27 @@ class NostrService {
 
     // Initialize with existing channels before listening for updates
     // This ensures the stream always emits the complete channel list
-    fetchGroupChannelsOnce(groupIdHex, useCache: true).then((existingChannels) {
-      // Populate map with existing channels
-      for (final channel in existingChannels) {
-        channelsMap[channel.id] = channel;
-      }
+    fetchGroupChannelsOnce(groupIdHex, useCache: true)
+        .then((existingChannels) {
+          // Populate map with existing channels
+          for (final channel in existingChannels) {
+            channelsMap[channel.id] = channel;
+          }
 
-      // Emit initial state with all existing channels
-      if (channelsMap.isNotEmpty) {
-        final initialSorted = _sortChannels(channelsMap.values.toList());
-        if (!controller.isClosed) {
-          controller.add(initialSorted);
-        }
-      }
-    }).catchError((error) {
-      debugPrint('Error fetching initial channels in watchGroupChannels: $error');
-      // Continue anyway - stream will still work with incoming events
-    });
+          // Emit initial state with all existing channels
+          if (channelsMap.isNotEmpty) {
+            final initialSorted = _sortChannels(channelsMap.values.toList());
+            if (!controller.isClosed) {
+              controller.add(initialSorted);
+            }
+          }
+        })
+        .catchError((error) {
+          debugPrint(
+            'Error fetching initial channels in watchGroupChannels: $error',
+          );
+          // Continue anyway - stream will still work with incoming events
+        });
 
     // Subscribe to kind 39004 events with #h = [groupIdHex]
     final eventStream = listenToEvents(
@@ -1616,16 +1769,28 @@ class NostrService {
         try {
           final channel = GroupChannelMetadata.fromNostrEvent(event);
 
-          // Merge extra field if channel already exists
+          // Merge extra field if channel already exists (prioritize new event extra)
           if (channelsMap.containsKey(channel.id)) {
             final existingChannel = channelsMap[channel.id]!;
             Map<String, dynamic>? mergedExtra;
 
-            if (existingChannel.extra != null || channel.extra != null) {
-              mergedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
-              if (channel.extra != null) {
-                mergedExtra.addAll(channel.extra!);
+            if (channel.extra != null) {
+              // New event is authoritative - start with it
+              final mergedExtraNonNull = Map<String, dynamic>.from(
+                channel.extra!,
+              );
+              // Only supplement with existing values for keys not in new event
+              if (existingChannel.extra != null) {
+                existingChannel.extra!.forEach((key, value) {
+                  if (!mergedExtraNonNull.containsKey(key)) {
+                    mergedExtraNonNull[key] = value;
+                  }
+                });
               }
+              mergedExtra = mergedExtraNonNull;
+            } else if (existingChannel.extra != null) {
+              // Fallback to existing if new event doesn't have extra
+              mergedExtra = Map<String, dynamic>.from(existingChannel.extra!);
             }
 
             // Create new channel with merged extra, but use new event's other fields
@@ -1664,7 +1829,9 @@ class NostrService {
         }
       },
       onDone: () {
-        debugPrint('watchGroupChannels event stream closed for group $groupIdHex');
+        debugPrint(
+          'watchGroupChannels event stream closed for group $groupIdHex',
+        );
         // Don't close the controller - it should stay open for future events
       },
     );

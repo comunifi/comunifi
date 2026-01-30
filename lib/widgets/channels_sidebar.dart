@@ -83,8 +83,9 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
     super.didChangeDependencies();
     final groupState = context.watch<GroupState>();
     final activeGroup = groupState.activeGroup;
-    final currentGroupIdHex =
-        activeGroup != null ? _groupIdToHex(activeGroup) : null;
+    final currentGroupIdHex = activeGroup != null
+        ? _groupIdToHex(activeGroup)
+        : null;
     if (currentGroupIdHex != _lastGroupIdHex) {
       _lastGroupIdHex = currentGroupIdHex;
       _checkAdminStatus();
@@ -182,10 +183,7 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
                 decoration: const BoxDecoration(
                   color: CupertinoColors.white,
                   border: Border(
-                    bottom: BorderSide(
-                      color: AppColors.separator,
-                      width: 0.5,
-                    ),
+                    bottom: BorderSide(color: AppColors.separator, width: 0.5),
                   ),
                 ),
                 child: Row(
@@ -193,12 +191,42 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
                     Builder(
                       builder: (context) {
                         final localizations = AppLocalizations.of(context);
-                        return Text(
-                          localizations?.discussions ?? 'Discussions',
-                          style: const TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
+                        final totalUnread = groupState
+                            .getTotalUnreadCountForGroup(groupIdHex);
+                        return Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              localizations?.discussions ?? 'Discussions',
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            if (totalUnread > 0) ...[
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: CupertinoColors.systemRed,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Text(
+                                  totalUnread > 99
+                                      ? '99+'
+                                      : totalUnread.toString(),
+                                  style: const TextStyle(
+                                    color: CupertinoColors.white,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         );
                       },
                     ),
@@ -223,7 +251,9 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
                     final localizations = AppLocalizations.of(context);
                     return CupertinoSearchTextField(
                       controller: _searchController,
-                      placeholder: localizations?.searchDiscussions ?? 'Search discussions...',
+                      placeholder:
+                          localizations?.searchDiscussions ??
+                          'Search discussions...',
                     );
                   },
                 ),
@@ -243,6 +273,11 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
                     final isGeneral = channel.name.toLowerCase() == 'general';
                     final showPinButton = _isAdmin && !isGeneral;
 
+                    final unreadCount = groupState.getUnreadCountForChannel(
+                      groupIdHex,
+                      channel.name,
+                    );
+
                     return Container(
                       margin: const EdgeInsets.only(bottom: 8),
                       child: _ChannelTile(
@@ -252,6 +287,7 @@ class _ChannelsSidebarState extends State<ChannelsSidebar> {
                         isPinning: isPinning,
                         showPinButton: showPinButton,
                         groupIdHex: groupIdHex,
+                        unreadCount: unreadCount,
                         onTap: () {
                           groupState.setActiveChannel(channel.name);
                         },
@@ -280,6 +316,7 @@ class _ChannelTile extends StatelessWidget {
   final bool isPinning;
   final bool showPinButton;
   final String groupIdHex;
+  final int unreadCount;
   final VoidCallback onTap;
   final VoidCallback? onPinToggle;
 
@@ -290,6 +327,7 @@ class _ChannelTile extends StatelessWidget {
     required this.isPinning,
     required this.showPinButton,
     required this.groupIdHex,
+    required this.unreadCount,
     required this.onTap,
     this.onPinToggle,
   });
@@ -307,10 +345,7 @@ class _ChannelTile extends StatelessWidget {
               : AppColors.surface,
           borderRadius: BorderRadius.circular(10),
           border: isActive
-              ? Border.all(
-                  color: AppColors.primary.withOpacity(0.4),
-                  width: 1,
-                )
+              ? Border.all(color: AppColors.primary.withOpacity(0.4), width: 1)
               : null,
         ),
         child: Row(
@@ -339,6 +374,26 @@ class _ChannelTile extends StatelessWidget {
                 ),
               ),
             ),
+
+            // Unread badge
+            if (unreadCount > 0) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: CupertinoColors.systemRed,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  unreadCount > 99 ? '99+' : unreadCount.toString(),
+                  style: const TextStyle(
+                    color: CupertinoColors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
 
             // Pin button (admin-only)
             if (showPinButton) ...[

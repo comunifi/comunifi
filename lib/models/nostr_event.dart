@@ -27,6 +27,10 @@ const int kindCreateGroup = 9007;
 /// Kind 9008: delete-group - Delete a group (moderation event)
 const int kindDeleteGroup = 9008;
 
+/// Kind 9009: create-invite - Admin creates an invite for a user (moderation event)
+/// Tags: ['h', groupId], ['p', pubkey, ...] (one or more p tags for target users)
+const int kindCreateInvite = 9009;
+
 /// Kind 9021: join-request - User requests to join a group
 /// Tags: ['h', groupId], optional ['code', inviteCode]
 const int kindJoinRequest = 9021;

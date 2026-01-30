@@ -28,6 +28,7 @@ import 'package:comunifi/services/mls/storage/secure_storage.dart'
 import 'package:comunifi/models/nostr_event.dart'
     show
         kindCreateGroup,
+        kindCreateInvite,
         kindEditMetadata,
         kindEncryptedEnvelope,
         kindEncryptedIdentity,
@@ -59,6 +60,8 @@ import 'package:comunifi/services/backup/backup_service.dart';
 import 'package:comunifi/services/backup/backup_models.dart';
 import 'package:comunifi/services/recovery/recovery_service.dart';
 import 'package:comunifi/services/db/preference.dart';
+import 'package:comunifi/services/sound/sound_service.dart';
+import 'package:comunifi/services/preferences/notification_preferences.dart';
 
 /// Represents a group announcement from the relay
 class GroupAnnouncement {
@@ -130,6 +133,8 @@ class GroupState with ChangeNotifier {
 
   // Migration key for one-time group list sync
   static const _prefKeyGroupListMigration = 'group_list_migration_v1';
+  // Migration key for one-time member list sync
+  static const _prefKeyMemberListMigration = 'member_list_migration_v1';
   MlsGroup? _personalGroup;
 
   // Completer for personal group initialization (needed before checking identity)
@@ -188,6 +193,9 @@ class GroupState with ChangeNotifier {
   )?
   _ensureProfileCallback;
 
+  /// Callback to notify FeedState about group comment updates (post IDs)
+  void Function(String postId)? _onGroupCommentUpdate;
+
   GroupState() {
     _initialize();
   }
@@ -208,6 +216,13 @@ class GroupState with ChangeNotifier {
     _ensureProfileCallback = callback;
     // If we already have keys, call it immediately
     _tryEnsureProfile();
+  }
+
+  /// Set callback to notify FeedState about group comment updates
+  /// Called by FeedScreen to bridge GroupState comments to FeedState
+  void setGroupCommentUpdateCallback(void Function(String postId) callback) {
+    _onGroupCommentUpdate = callback;
+    debugPrint('GroupState: Set group comment update callback');
   }
 
   /// Try to ensure profile if we have keys and callback is set
@@ -235,6 +250,20 @@ class GroupState with ChangeNotifier {
 
       // Load or generate Nostr key
       await _ensureNostrKey();
+
+      // Load and cache the user's Nostr pubkey for filtering self-authored
+      // posts when playing notification sounds.
+      try {
+        _userPubkey = await getNostrPublicKey();
+      } catch (e) {
+        debugPrint(
+          'Failed to load Nostr public key for group notifications: $e',
+        );
+      }
+
+      // Initialize notification preferences so we can respect the user's
+      // sound settings when new messages arrive.
+      await NotificationPreferencesService.instance.ensureInitialized();
 
       // Load environment variables
       try {
@@ -288,35 +317,48 @@ class GroupState with ChangeNotifier {
 
       // Connect to relay
       await _nostrService!.connect((connected) async {
-        if (connected) {
-          _isConnected = true;
-          _errorMessage = null;
-          safeNotifyListeners();
+        try {
+          debugPrint('DEBUG: Connection callback - connected: $connected');
+          if (connected) {
+            _isConnected = true;
+            _errorMessage = null;
+            safeNotifyListeners();
 
-          // Listen for publish results (relay errors)
-          _setupPublishResultListener();
+            // Listen for publish results (relay errors)
+            _setupPublishResultListener();
 
-          // Recover or generate Nostr key from relay (if needed)
-          await _recoverOrGenerateNostrKey();
+            // Recover or generate Nostr key from relay (if needed)
+            await _recoverOrGenerateNostrKey();
 
-          // Ensure locally cached key is synced to relay
-          await _ensureKeyIsSyncedToRelay();
+            // Ensure locally cached key is synced to relay
+            await _ensureKeyIsSyncedToRelay();
 
-          // Refresh groups from relay (will update cache)
-          await _loadSavedGroups();
-          await _startListeningForGroupEvents();
-          // Sync group announcements to local DB
-          _syncGroupAnnouncementsToDB();
-          // Run one-time group list migration for existing users
-          _runGroupListMigrationIfNeeded();
-          // Note: Personal group creation is now handled in onboarding flow
-          // Try to ensure user profile if callback is set
-          _tryEnsureProfile();
-        } else {
-          _isConnected = false;
-          _errorMessage = 'Failed to connect to relay';
-          safeNotifyListeners();
-          // Groups are already loaded from cache above, so UI will still work offline
+            // Refresh groups from relay (will update cache)
+            await _loadSavedGroups();
+            debugPrint('DEBUG: About to call _startListeningForGroupEvents()');
+            await _startListeningForGroupEvents();
+            debugPrint('DEBUG: About to call loadPendingInvitations()');
+            // Load pending invitations now that we're connected (will fetch from relay)
+            await loadPendingInvitations();
+            debugPrint('DEBUG: Completed loadPendingInvitations()');
+            // Sync group announcements to local DB
+            _syncGroupAnnouncementsToDB();
+            // Run one-time group list migration for existing users
+            _runGroupListMigrationIfNeeded();
+            // Run one-time member list migration for existing users (non-blocking)
+            _runMemberListMigrationIfNeeded();
+            // Note: Personal group creation is now handled in onboarding flow
+            // Try to ensure user profile if callback is set
+            _tryEnsureProfile();
+          } else {
+            _isConnected = false;
+            _errorMessage = 'Failed to connect to relay';
+            safeNotifyListeners();
+            // Groups are already loaded from cache above, so UI will still work offline
+          }
+        } catch (e, stackTrace) {
+          debugPrint('DEBUG: Connection callback - EXCEPTION: $e');
+          debugPrint('DEBUG: Connection callback - STACK TRACE: $stackTrace');
         }
       });
     } catch (e) {
@@ -337,16 +379,14 @@ class GroupState with ChangeNotifier {
       await _decryptedMediaCacheTable!.create(_dbService!.database!);
 
       // Initialize channel metadata table
-      _channelMetadataTable = ChannelMetadataTable(
-        _dbService!.database!,
-      );
+      _channelMetadataTable = ChannelMetadataTable(_dbService!.database!);
       await _channelMetadataTable!.create(_dbService!.database!);
 
       // Initialize pending invitations table
-      _pendingInvitationTable = PendingInvitationTable(
-        _dbService!.database!,
-      );
+      _pendingInvitationTable = PendingInvitationTable(_dbService!.database!);
       await _pendingInvitationTable!.create(_dbService!.database!);
+      // Ensure schema is correct (handles case where table exists with wrong schema)
+      await _pendingInvitationTable!.migrate(_dbService!.database!, 0, 1);
 
       // Initialize encrypted media service with database
       _encryptedMediaService.initWithDatabase(_dbService!.database!);
@@ -990,6 +1030,158 @@ class GroupState with ChangeNotifier {
     }
   }
 
+  /// Run one-time migration to sync member list events from relay (for existing users only)
+  /// This migration fetches kind 39002 (group-members) and kind 39001 (group-admins) events
+  /// for all groups the user is a member of, following the cache-first pattern:
+  /// 1. Check cache first (display local data immediately)
+  /// 2. Async fetch remote data (only what's missing)
+  /// 3. Merge into storage (automatic via _cacheEvent())
+  /// 4. Display local data (now includes merged data)
+  Future<void> _runMemberListMigrationIfNeeded() async {
+    if (_preferenceTable == null || _nostrService == null || !_isConnected) {
+      debugPrint('Member list migration: prerequisites not ready');
+      return;
+    }
+
+    try {
+      // Check if local groups exist (loaded by _loadSavedGroups)
+      if (_groups.isEmpty) {
+        // New user - mark migration as done and skip
+        await _preferenceTable!.set(_prefKeyMemberListMigration, 'done');
+        debugPrint('Member list migration: new user, skipping');
+        return;
+      }
+
+      // Check if migration already ran
+      final migrationStatus = await _preferenceTable!.get(
+        _prefKeyMemberListMigration,
+      );
+      if (migrationStatus == 'done') {
+        debugPrint('Member list migration: already completed');
+        return;
+      }
+
+      debugPrint(
+        'Member list migration: starting for existing user with ${_groups.length} local groups',
+      );
+
+      int groupsProcessed = 0;
+      int eventsCached = 0;
+      int eventsFetched = 0;
+
+      // Process each group sequentially
+      for (final group in _groups) {
+        try {
+          final mlsGroupIdHex = _groupIdToHex(group.id);
+          final nip29GroupId = getNip29GroupId(mlsGroupIdHex);
+
+          debugPrint(
+            'Member list migration: processing group $nip29GroupId (MLS: $mlsGroupIdHex)',
+          );
+
+          // STEP 1: Check cache first (display local data immediately)
+          final cachedMemberEvents = await _nostrService!.queryCachedEvents(
+            kind: kindGroupMembers,
+            tagKey: 'd',
+            tagValue: nip29GroupId,
+            limit: 1,
+          );
+
+          final cachedAdminEvents = await _nostrService!.queryCachedEvents(
+            kind: kindGroupAdmins,
+            tagKey: 'd',
+            tagValue: nip29GroupId,
+            limit: 1,
+          );
+
+          final hasMemberEvent = cachedMemberEvents.isNotEmpty;
+          final hasAdminEvent = cachedAdminEvents.isNotEmpty;
+
+          if (hasMemberEvent && hasAdminEvent) {
+            debugPrint(
+              'Member list migration: group $nip29GroupId already has cached events, skipping',
+            );
+            eventsCached += 2; // Both events already cached
+            groupsProcessed++;
+            continue;
+          }
+
+          // STEP 2: Async fetch missing data (only what's missing)
+          if (!hasMemberEvent) {
+            debugPrint(
+              'Member list migration: fetching kind 39002 for group $nip29GroupId',
+            );
+            try {
+              final memberEvents = await _nostrService!.requestPastEvents(
+                kind: kindGroupMembers,
+                tags: [nip29GroupId],
+                tagKey: 'd',
+                limit: 1,
+                useCache: true, // Checks cache first, fetches if missing
+              );
+              if (memberEvents.isNotEmpty) {
+                eventsFetched++;
+                debugPrint(
+                  'Member list migration: fetched and cached kind 39002 event for group $nip29GroupId',
+                );
+              }
+            } catch (e) {
+              debugPrint(
+                'Member list migration: failed to fetch kind 39002 for group $nip29GroupId: $e',
+              );
+            }
+          }
+
+          if (!hasAdminEvent) {
+            debugPrint(
+              'Member list migration: fetching kind 39001 for group $nip29GroupId',
+            );
+            try {
+              final adminEvents = await _nostrService!.requestPastEvents(
+                kind: kindGroupAdmins,
+                tags: [nip29GroupId],
+                tagKey: 'd',
+                limit: 1,
+                useCache: true, // Checks cache first, fetches if missing
+              );
+              if (adminEvents.isNotEmpty) {
+                eventsFetched++;
+                debugPrint(
+                  'Member list migration: fetched and cached kind 39001 event for group $nip29GroupId',
+                );
+              }
+            } catch (e) {
+              debugPrint(
+                'Member list migration: failed to fetch kind 39001 for group $nip29GroupId: $e',
+              );
+            }
+          }
+
+          groupsProcessed++;
+
+          // Small delay between groups to avoid overwhelming the relay
+          await Future.delayed(const Duration(milliseconds: 100));
+        } catch (e) {
+          debugPrint(
+            'Member list migration: error processing group ${_groupIdToHex(group.id)}: $e',
+          );
+          // Continue with next group even if one fails
+        }
+      }
+
+      debugPrint(
+        'Member list migration: completed - processed $groupsProcessed groups, $eventsCached events already cached, $eventsFetched events fetched',
+      );
+
+      // Mark migration as complete
+      await _preferenceTable!.set(_prefKeyMemberListMigration, 'done');
+      debugPrint('Member list migration: completed successfully');
+    } catch (e) {
+      debugPrint('Member list migration failed: $e');
+      // Don't mark as done on failure - will retry next time
+    }
+  }
+
   /// Initialize backup service for MLS group backup/restore
   Future<void> _initializeBackupService() async {
     if (_nostrService == null || _dbService?.database == null) {
@@ -1137,6 +1329,61 @@ class GroupState with ChangeNotifier {
       }
 
       debugPrint('Loaded ${_groupNameCache.length} group names from local DB');
+
+      // Always fetch remote group metadata events in background to keep cache fresh
+      // This follows the pattern: display local -> async fetch remote -> merge -> display updated
+      if (_nostrService != null && _isConnected) {
+        Future.microtask(() async {
+          try {
+            // Fetch kind 39000 events (NIP-29 group metadata) from relay
+            final remoteMetadataEvents = await _nostrService!.requestPastEvents(
+              kind: kindGroupMetadata,
+              limit: 1000,
+              useCache:
+                  true, // Will return cache immediately and fetch in background
+            );
+
+            // Update cache with new metadata events
+            for (final event in remoteMetadataEvents) {
+              final announcement = _parseGroupMetadataEvent(event);
+              if (announcement != null &&
+                  announcement.mlsGroupId != null &&
+                  announcement.name != null) {
+                _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+              }
+            }
+
+            // Also fetch kind 9007 events (create-group) from relay
+            final remoteCreateEvents = await _nostrService!.requestPastEvents(
+              kind: kindCreateGroup,
+              limit: 1000,
+              useCache:
+                  true, // Will return cache immediately and fetch in background
+            );
+
+            // Update cache with new create events
+            for (final event in remoteCreateEvents) {
+              final announcement = _parseCreateGroupEvent(event);
+              if (announcement != null &&
+                  announcement.mlsGroupId != null &&
+                  announcement.name != null &&
+                  !_groupNameCache.containsKey(announcement.mlsGroupId)) {
+                _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+              }
+            }
+
+            debugPrint(
+              'Updated group names cache from remote: ${_groupNameCache.length} total',
+            );
+            safeNotifyListeners(); // Notify UI of updates
+          } catch (e) {
+            debugPrint(
+              'Background fetch of group names failed (non-critical): $e',
+            );
+            // Don't throw - cache is already displayed
+          }
+        });
+      }
     } catch (e) {
       debugPrint('Failed to load group names from DB: $e');
     }
@@ -1144,6 +1391,7 @@ class GroupState with ChangeNotifier {
 
   /// Load group announcements from local database cache (instant display)
   /// Returns list of GroupAnnouncement objects loaded from cache
+  /// Always fetches remote group announcements in background to keep cache fresh
   Future<List<GroupAnnouncement>> loadGroupAnnouncementsFromCache() async {
     if (_eventTable == null) return [];
 
@@ -1194,6 +1442,95 @@ class GroupState with ChangeNotifier {
       debugPrint(
         'Loaded ${announcements.length} group announcements from cache',
       );
+
+      // Always fetch remote group announcements in background to keep cache fresh
+      // This follows the pattern: display local -> async fetch remote -> merge -> display updated
+      if (_nostrService != null && _isConnected) {
+        Future.microtask(() async {
+          try {
+            // Fetch kind 39000 events (NIP-29 group metadata) from relay
+            final remoteMetadataEvents = await _nostrService!.requestPastEvents(
+              kind: kindGroupMetadata,
+              limit: 1000,
+              useCache:
+                  true, // Will return cache immediately and fetch in background
+            );
+
+            // Fetch kind 9007 events (create-group) from relay
+            final remoteCreateEvents = await _nostrService!.requestPastEvents(
+              kind: kindCreateGroup,
+              limit: 1000,
+              useCache:
+                  true, // Will return cache immediately and fetch in background
+            );
+
+            // Parse and merge remote events
+            final remoteAnnouncements = <GroupAnnouncement>[];
+            final remoteSeenGroupIds = <String>{};
+
+            // Parse 39000 events first
+            for (final event in remoteMetadataEvents) {
+              final announcement = _parseGroupMetadataEvent(event);
+              if (announcement != null &&
+                  announcement.mlsGroupId != null &&
+                  !announcement.isPersonal) {
+                remoteAnnouncements.add(announcement);
+                remoteSeenGroupIds.add(announcement.mlsGroupId!);
+              }
+            }
+
+            // Parse 9007 events as fallback
+            for (final event in remoteCreateEvents) {
+              final announcement = _parseCreateGroupEvent(event);
+              if (announcement != null &&
+                  announcement.mlsGroupId != null &&
+                  !announcement.isPersonal &&
+                  !remoteSeenGroupIds.contains(announcement.mlsGroupId)) {
+                remoteAnnouncements.add(announcement);
+                remoteSeenGroupIds.add(announcement.mlsGroupId!);
+              }
+            }
+
+            // Merge with existing discovered groups
+            if (remoteAnnouncements.isNotEmpty) {
+              final mergedGroups = <GroupAnnouncement>[];
+              final seenEventIds = <String>{};
+
+              // Add remote groups first (they take precedence)
+              for (final group in remoteAnnouncements) {
+                if (!seenEventIds.contains(group.eventId)) {
+                  mergedGroups.add(group);
+                  seenEventIds.add(group.eventId);
+                }
+              }
+
+              // Add existing groups that weren't in the remote fetch
+              for (final group in _discoveredGroups) {
+                if (!seenEventIds.contains(group.eventId)) {
+                  mergedGroups.add(group);
+                  seenEventIds.add(group.eventId);
+                }
+              }
+
+              // Sort by creation date (newest first)
+              mergedGroups.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+              _discoveredGroups = mergedGroups;
+              _rebuildAnnouncementCache(clearFirst: true);
+              debugPrint(
+                'Updated discovered groups from remote: ${_discoveredGroups.length} total',
+              );
+              safeNotifyListeners(); // Notify UI of updates
+            }
+          } catch (e) {
+            debugPrint(
+              'Background fetch of group announcements failed (non-critical): $e',
+            );
+            // Don't throw - cache is already displayed
+          }
+        });
+      }
+
       return announcements;
     } catch (e) {
       debugPrint('Failed to load group announcements from cache: $e');
@@ -1206,7 +1543,7 @@ class GroupState with ChangeNotifier {
   /// Merges with existing groups instead of replacing to preserve data
   void setDiscoveredGroupsFromCache(List<GroupAnnouncement> announcements) {
     if (announcements.isEmpty) return;
-    
+
     // Merge with existing groups (avoid duplicates by eventId)
     // Only update if we don't already have groups, or merge to preserve existing
     if (_discoveredGroups.isEmpty) {
@@ -1217,7 +1554,7 @@ class GroupState with ChangeNotifier {
       // Merge with existing groups (preserve existing, add new from cache)
       final mergedGroups = <GroupAnnouncement>[];
       final seenEventIds = <String>{};
-      
+
       // Add existing groups first (they take precedence)
       for (final group in _discoveredGroups) {
         if (!seenEventIds.contains(group.eventId)) {
@@ -1225,7 +1562,7 @@ class GroupState with ChangeNotifier {
           seenEventIds.add(group.eventId);
         }
       }
-      
+
       // Add cached groups that aren't already present
       for (final group in announcements) {
         if (!seenEventIds.contains(group.eventId)) {
@@ -1233,21 +1570,22 @@ class GroupState with ChangeNotifier {
           seenEventIds.add(group.eventId);
         }
       }
-      
+
       _discoveredGroups = mergedGroups;
       // Update cache incrementally (don't overwrite entries with picture/cover)
       for (final announcement in announcements) {
         if (announcement.mlsGroupId != null) {
           final existing = _groupAnnouncementCache[announcement.mlsGroupId!];
-          
+
           if (existing == null) {
             // No existing entry - add it
             _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
           } else {
             // Only update if existing doesn't have picture/cover (preserve fresh data)
-            final existingHasImage = (existing.picture != null && existing.picture!.isNotEmpty) ||
-                                     (existing.cover != null && existing.cover!.isNotEmpty);
-            
+            final existingHasImage =
+                (existing.picture != null && existing.picture!.isNotEmpty) ||
+                (existing.cover != null && existing.cover!.isNotEmpty);
+
             if (!existingHasImage) {
               // Existing entry has no images - safe to update with cached data
               _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
@@ -1730,6 +2068,14 @@ class GroupState with ChangeNotifier {
   final Map<String, String> _activeChannelNameByGroupId = {};
   StreamSubscription<List<GroupChannelMetadata>>? _channelSubscription;
 
+  // Unread message tracking
+  // Map<groupIdHex, Map<channelName, unreadCount>>
+  final Map<String, Map<String, int>> _unreadCountsByGroupAndChannel = {};
+  // Map<groupIdHex, Map<channelName, lastViewedTime>>
+  final Map<String, Map<String, DateTime>> _lastViewedByGroupAndChannel = {};
+  // Cached user pubkey for filtering self-messages
+  String? _userPubkey;
+
   // Explore mode (shows discoverable groups in feed area)
   bool _isExploreMode = false;
 
@@ -1879,7 +2225,97 @@ class GroupState with ChangeNotifier {
 
     final groupIdHex = _groupIdToHex(_activeGroup!.id);
     _activeChannelNameByGroupId[groupIdHex] = channelName.toLowerCase();
+
+    // Mark channel as read when viewing it
+    markChannelAsRead(groupIdHex, channelName.toLowerCase());
+
     safeNotifyListeners();
+  }
+
+  /// Get unread count for a specific channel in a group
+  int getUnreadCountForChannel(String groupIdHex, String channelName) {
+    final channelMap = _unreadCountsByGroupAndChannel[groupIdHex];
+    if (channelMap == null) return 0;
+    return channelMap[channelName.toLowerCase()] ?? 0;
+  }
+
+  /// Get total unread count across all channels in a group
+  int getTotalUnreadCountForGroup(String groupIdHex) {
+    final channelMap = _unreadCountsByGroupAndChannel[groupIdHex];
+    if (channelMap == null) return 0;
+    return channelMap.values.fold(0, (sum, count) => sum + count);
+  }
+
+  /// Mark a channel as read (clear unread count)
+  void markChannelAsRead(String groupIdHex, String channelName) {
+    final normalizedChannel = channelName.toLowerCase();
+
+    // Initialize maps if needed
+    if (!_unreadCountsByGroupAndChannel.containsKey(groupIdHex)) {
+      _unreadCountsByGroupAndChannel[groupIdHex] = {};
+    }
+    if (!_lastViewedByGroupAndChannel.containsKey(groupIdHex)) {
+      _lastViewedByGroupAndChannel[groupIdHex] = {};
+    }
+
+    // Clear unread count
+    _unreadCountsByGroupAndChannel[groupIdHex]![normalizedChannel] = 0;
+
+    // Update last viewed time
+    _lastViewedByGroupAndChannel[groupIdHex]![normalizedChannel] =
+        DateTime.now();
+
+    safeNotifyListeners();
+  }
+
+  /// Update unread counts for a message
+  /// Increments unread count for each channel the message belongs to
+  void _updateUnreadCounts(NostrEventModel post, String groupIdHex) {
+    // Initialize maps if needed
+    if (!_unreadCountsByGroupAndChannel.containsKey(groupIdHex)) {
+      _unreadCountsByGroupAndChannel[groupIdHex] = {};
+    }
+    if (!_lastViewedByGroupAndChannel.containsKey(groupIdHex)) {
+      _lastViewedByGroupAndChannel[groupIdHex] = {};
+    }
+
+    // Get channels for this message
+    final channels = _channelsForEvent(post);
+    final activeGroupIdHex = _activeGroup != null
+        ? _groupIdToHex(_activeGroup!.id)
+        : null;
+    final activeChannel = activeGroupIdHex == groupIdHex
+        ? activeChannelName.toLowerCase()
+        : null;
+
+    // For each channel, increment unread if:
+    // 1. This is the active group AND
+    // 2. The channel is not currently active OR
+    // 3. The message timestamp is newer than the last viewed time for that channel
+    for (final channelName in channels) {
+      final normalizedChannel = channelName.toLowerCase();
+
+      // Skip if this is the currently active channel (user is viewing it)
+      if (activeChannel != null && normalizedChannel == activeChannel) {
+        continue;
+      }
+
+      // Check if message is newer than last viewed time
+      final lastViewed =
+          _lastViewedByGroupAndChannel[groupIdHex]![normalizedChannel];
+      if (lastViewed != null) {
+        if (post.createdAt.isBefore(lastViewed)) {
+          // Message is older than last viewed, skip
+          continue;
+        }
+      }
+
+      // Increment unread count
+      final currentCount =
+          _unreadCountsByGroupAndChannel[groupIdHex]![normalizedChannel] ?? 0;
+      _unreadCountsByGroupAndChannel[groupIdHex]![normalizedChannel] =
+          currentCount + 1;
+    }
   }
 
   /// Get the primary channel for a message event
@@ -2005,8 +2441,9 @@ class GroupState with ChangeNotifier {
       channelNames.addAll(tTags);
 
       // Also get hashtags from content
-      final contentHashtags =
-          NostrEventModel.extractHashtagsFromContent(event.content);
+      final contentHashtags = NostrEventModel.extractHashtagsFromContent(
+        event.content,
+      );
       channelNames.addAll(contentHashtags.map((h) => h.toLowerCase()));
     } else {
       // If we have an explicit channel, also include any additional 't' tags
@@ -2146,7 +2583,9 @@ class GroupState with ChangeNotifier {
     // Load from database first (fast, offline-capable)
     if (_channelMetadataTable != null) {
       try {
-        final cachedChannels = await _channelMetadataTable!.getByGroupId(groupIdHex);
+        final cachedChannels = await _channelMetadataTable!.getByGroupId(
+          groupIdHex,
+        );
         if (cachedChannels.isNotEmpty) {
           // Sort cached channels (general first, then pinned, then by order, then alphabetical)
           final sortedCached = List<GroupChannelMetadata>.from(cachedChannels);
@@ -2178,7 +2617,7 @@ class GroupState with ChangeNotifier {
             // 5. Fallback: alphabetical
             return a.name.toLowerCase().compareTo(b.name.toLowerCase());
           });
-          
+
           _channelsByGroupId[groupIdHex] = sortedCached;
 
           // Ensure active channel is set (default to general)
@@ -2195,28 +2634,42 @@ class GroupState with ChangeNotifier {
 
     // Fetch initial channels from relay (for updates)
     try {
-      final fetchedChannels = await _nostrService!.fetchGroupChannelsOnce(groupIdHex);
-      
-      // Merge with database-loaded channels to preserve extra fields (pinned, order)
+      final fetchedChannels = await _nostrService!.fetchGroupChannelsOnce(
+        groupIdHex,
+      );
+
+      // Merge with database-loaded channels (prioritize relay extra over database)
       final existingChannels = _channelsByGroupId[groupIdHex] ?? [];
       final channelMap = <String, GroupChannelMetadata>{
         for (final ch in existingChannels) ch.id: ch,
       };
-      
-      // Merge fetched channels with existing (preserve extra from database)
+
+      // Merge fetched channels with existing (prioritize relay extra over database)
       for (final fetchedChannel in fetchedChannels) {
         if (channelMap.containsKey(fetchedChannel.id)) {
-          // Merge: preserve extra from database, update other fields from relay
+          // Merge: prioritize relay extra, supplement with database if needed
           final existingChannel = channelMap[fetchedChannel.id]!;
           Map<String, dynamic>? mergedExtra;
-          
-          if (existingChannel.extra != null || fetchedChannel.extra != null) {
-            mergedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
-            if (fetchedChannel.extra != null) {
-              mergedExtra.addAll(fetchedChannel.extra!);
+
+          if (fetchedChannel.extra != null) {
+            // Stream/relay is authoritative - start with it
+            final mergedExtraNonNull = Map<String, dynamic>.from(
+              fetchedChannel.extra!,
+            );
+            // Only supplement with database values for keys not in stream
+            if (existingChannel.extra != null) {
+              existingChannel.extra!.forEach((key, value) {
+                if (!mergedExtraNonNull.containsKey(key)) {
+                  mergedExtraNonNull[key] = value;
+                }
+              });
             }
+            mergedExtra = mergedExtraNonNull;
+          } else if (existingChannel.extra != null) {
+            // Fallback to database if stream doesn't have extra
+            mergedExtra = Map<String, dynamic>.from(existingChannel.extra!);
           }
-          
+
           channelMap[fetchedChannel.id] = GroupChannelMetadata(
             id: fetchedChannel.id,
             groupId: fetchedChannel.groupId,
@@ -2233,9 +2686,9 @@ class GroupState with ChangeNotifier {
           channelMap[fetchedChannel.id] = fetchedChannel;
         }
       }
-      
+
       final mergedChannels = channelMap.values.toList();
-      
+
       // Sort merged channels (general first, then pinned, then by order, then alphabetical)
       mergedChannels.sort((a, b) {
         // 1. #general always comes first (even if pinned)
@@ -2265,7 +2718,7 @@ class GroupState with ChangeNotifier {
         // 5. Fallback: alphabetical
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
-      
+
       _channelsByGroupId[groupIdHex] = mergedChannels;
 
       // Persist merged channels to database
@@ -2288,92 +2741,108 @@ class GroupState with ChangeNotifier {
       _channelSubscription = _nostrService!
           .watchGroupChannels(groupIdHex)
           .listen(
-        (channels) {
-          // Merge stream channels with database to preserve extra fields (pinned, order)
-          final existingChannels = _channelsByGroupId[groupIdHex] ?? [];
-          final channelMap = <String, GroupChannelMetadata>{
-            for (final ch in existingChannels) ch.id: ch,
-          };
-          
-          // Merge stream channels with existing (preserve extra from database)
-          for (final streamChannel in channels) {
-            if (channelMap.containsKey(streamChannel.id)) {
-              // Merge: preserve extra from database, update other fields from stream
-              final existingChannel = channelMap[streamChannel.id]!;
-              Map<String, dynamic>? mergedExtra;
-              
-              if (existingChannel.extra != null || streamChannel.extra != null) {
-                mergedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
-                if (streamChannel.extra != null) {
-                  mergedExtra.addAll(streamChannel.extra!);
+            (channels) {
+              // Merge stream channels with database (prioritize stream extra over database)
+              final existingChannels = _channelsByGroupId[groupIdHex] ?? [];
+              final channelMap = <String, GroupChannelMetadata>{
+                for (final ch in existingChannels) ch.id: ch,
+              };
+
+              // Merge stream channels with existing (prioritize stream extra over database)
+              for (final streamChannel in channels) {
+                if (channelMap.containsKey(streamChannel.id)) {
+                  // Merge: prioritize stream extra, supplement with database if needed
+                  final existingChannel = channelMap[streamChannel.id]!;
+                  Map<String, dynamic>? mergedExtra;
+
+                  if (streamChannel.extra != null) {
+                    // Stream/relay is authoritative - start with it
+                    final mergedExtraNonNull = Map<String, dynamic>.from(
+                      streamChannel.extra!,
+                    );
+                    // Only supplement with database values for keys not in stream
+                    if (existingChannel.extra != null) {
+                      existingChannel.extra!.forEach((key, value) {
+                        if (!mergedExtraNonNull.containsKey(key)) {
+                          mergedExtraNonNull[key] = value;
+                        }
+                      });
+                    }
+                    mergedExtra = mergedExtraNonNull;
+                  } else if (existingChannel.extra != null) {
+                    // Fallback to database if stream doesn't have extra
+                    mergedExtra = Map<String, dynamic>.from(
+                      existingChannel.extra!,
+                    );
+                  }
+
+                  channelMap[streamChannel.id] = GroupChannelMetadata(
+                    id: streamChannel.id,
+                    groupId: streamChannel.groupId,
+                    name: streamChannel.name,
+                    about: streamChannel.about,
+                    picture: streamChannel.picture,
+                    relays: streamChannel.relays,
+                    creator: streamChannel.creator,
+                    extra: mergedExtra,
+                    createdAt: streamChannel.createdAt,
+                  );
+                } else {
+                  // New channel from stream
+                  channelMap[streamChannel.id] = streamChannel;
                 }
               }
-              
-              channelMap[streamChannel.id] = GroupChannelMetadata(
-                id: streamChannel.id,
-                groupId: streamChannel.groupId,
-                name: streamChannel.name,
-                about: streamChannel.about,
-                picture: streamChannel.picture,
-                relays: streamChannel.relays,
-                creator: streamChannel.creator,
-                extra: mergedExtra,
-                createdAt: streamChannel.createdAt,
+
+              final mergedChannels = channelMap.values.toList();
+
+              // Sort merged channels (general first, then pinned, then by order, then alphabetical)
+              mergedChannels.sort((a, b) {
+                // 1. #general always comes first (even if pinned)
+                final aIsGeneral = a.name.toLowerCase() == 'general';
+                final bIsGeneral = b.name.toLowerCase() == 'general';
+                if (aIsGeneral != bIsGeneral) {
+                  return aIsGeneral ? -1 : 1;
+                }
+                if (aIsGeneral && bIsGeneral) return 0;
+
+                // 3. Pinned channels next (excluding general)
+                final aPinned = a.extra?['pinned'] == true;
+                final bPinned = b.extra?['pinned'] == true;
+                if (aPinned != bPinned) {
+                  return aPinned ? -1 : 1;
+                }
+
+                // 4. Then by order (if available)
+                final aOrder = a.extra?['order'] as num?;
+                final bOrder = b.extra?['order'] as num?;
+                if (aOrder != null && bOrder != null && aOrder != bOrder) {
+                  return aOrder.compareTo(bOrder);
+                }
+                if (aOrder != null && bOrder == null) return -1;
+                if (aOrder == null && bOrder != null) return 1;
+
+                // 5. Fallback: alphabetical
+                return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+              });
+
+              _channelsByGroupId[groupIdHex] = mergedChannels;
+
+              // Persist merged channels to database
+              if (_channelMetadataTable != null) {
+                _persistChannels(groupIdHex, mergedChannels);
+              }
+
+              safeNotifyListeners();
+            },
+            onError: (error) {
+              debugPrint(
+                'Error in channel subscription for group $groupIdHex: $error',
               );
-            } else {
-              // New channel from stream
-              channelMap[streamChannel.id] = streamChannel;
-            }
-          }
-          
-          final mergedChannels = channelMap.values.toList();
-          
-          // Sort merged channels (general first, then pinned, then by order, then alphabetical)
-          mergedChannels.sort((a, b) {
-            // 1. #general always comes first (even if pinned)
-            final aIsGeneral = a.name.toLowerCase() == 'general';
-            final bIsGeneral = b.name.toLowerCase() == 'general';
-            if (aIsGeneral != bIsGeneral) {
-              return aIsGeneral ? -1 : 1;
-            }
-            if (aIsGeneral && bIsGeneral) return 0;
-
-            // 3. Pinned channels next (excluding general)
-            final aPinned = a.extra?['pinned'] == true;
-            final bPinned = b.extra?['pinned'] == true;
-            if (aPinned != bPinned) {
-              return aPinned ? -1 : 1;
-            }
-
-            // 4. Then by order (if available)
-            final aOrder = a.extra?['order'] as num?;
-            final bOrder = b.extra?['order'] as num?;
-            if (aOrder != null && bOrder != null && aOrder != bOrder) {
-              return aOrder.compareTo(bOrder);
-            }
-            if (aOrder != null && bOrder == null) return -1;
-            if (aOrder == null && bOrder != null) return 1;
-
-            // 5. Fallback: alphabetical
-            return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-          });
-          
-          _channelsByGroupId[groupIdHex] = mergedChannels;
-
-          // Persist merged channels to database
-          if (_channelMetadataTable != null) {
-            _persistChannels(groupIdHex, mergedChannels);
-          }
-
-          safeNotifyListeners();
-        },
-        onError: (error) {
-          debugPrint('Error in channel subscription for group $groupIdHex: $error');
-          // Don't cancel subscription on error - continue listening
-          // The stream should handle errors internally and continue
-        },
-        cancelOnError: false, // Keep listening even if errors occur
-      );
+              // Don't cancel subscription on error - continue listening
+              // The stream should handle errors internally and continue
+            },
+            cancelOnError: false, // Keep listening even if errors occur
+          );
     } catch (e) {
       debugPrint('Failed to watch channels: $e');
     }
@@ -2445,13 +2914,15 @@ class GroupState with ChangeNotifier {
       final channelIndex = channels.indexWhere((c) => c.id == channelId);
       if (channelIndex >= 0) {
         final existingChannel = channels[channelIndex];
-        final updatedExtra = Map<String, dynamic>.from(existingChannel.extra ?? {});
+        final updatedExtra = Map<String, dynamic>.from(
+          existingChannel.extra ?? {},
+        );
         if (pinned) {
           updatedExtra['pinned'] = true;
         } else {
           updatedExtra.remove('pinned');
         }
-        
+
         final updatedChannel = GroupChannelMetadata(
           id: existingChannel.id,
           groupId: existingChannel.groupId,
@@ -2463,7 +2934,7 @@ class GroupState with ChangeNotifier {
           extra: updatedExtra.isEmpty ? null : updatedExtra,
           createdAt: existingChannel.createdAt,
         );
-        
+
         channels[channelIndex] = updatedChannel;
         // Re-sort channels with new pinned state
         channels.sort((a, b) {
@@ -2494,14 +2965,14 @@ class GroupState with ChangeNotifier {
           // 5. Fallback: alphabetical
           return a.name.toLowerCase().compareTo(b.name.toLowerCase());
         });
-        
+
         _channelsByGroupId[groupIdHex] = channels;
-        
+
         // Persist optimistic update to database
         if (_channelMetadataTable != null) {
           await _persistChannels(groupIdHex, channels);
         }
-        
+
         safeNotifyListeners();
       }
 
@@ -2517,10 +2988,14 @@ class GroupState with ChangeNotifier {
         keyPairs: keyPair,
       );
 
-      debugPrint('${pinned ? 'Pinned' : 'Unpinned'} channel $channelId in group $groupIdHex');
+      debugPrint(
+        '${pinned ? 'Pinned' : 'Unpinned'} channel $channelId in group $groupIdHex',
+      );
     } catch (e) {
       debugPrint('Failed to ${pinned ? 'pin' : 'unpin'} channel: $e');
-      _relayErrorController.add('Failed to ${pinned ? 'pin' : 'unpin'} channel: $e');
+      _relayErrorController.add(
+        'Failed to ${pinned ? 'pin' : 'unpin'} channel: $e',
+      );
       rethrow;
     }
   }
@@ -2577,7 +3052,9 @@ class GroupState with ChangeNotifier {
         keyPairs: keyPair,
       );
 
-      debugPrint('Updated channel $channelId order to $order in group $groupIdHex');
+      debugPrint(
+        'Updated channel $channelId order to $order in group $groupIdHex',
+      );
     } catch (e) {
       debugPrint('Failed to update channel order: $e');
       _relayErrorController.add('Failed to update channel order: $e');
@@ -2614,9 +3091,7 @@ class GroupState with ChangeNotifier {
 
       // Get current channel metadata to preserve names
       final channels = _channelsByGroupId[groupIdHex] ?? [];
-      final channelMap = {
-        for (final ch in channels) ch.id: ch,
-      };
+      final channelMap = {for (final ch in channels) ch.id: ch};
 
       // Update each channel with its new order value
       for (int i = 0; i < channelIds.length; i++) {
@@ -2628,13 +3103,17 @@ class GroupState with ChangeNotifier {
         await _nostrService!.updateChannelMetadata(
           groupIdHex: groupIdHex,
           channelId: channelId,
-          name: (channelName != null && channelName.isNotEmpty) ? channelName : null,
+          name: (channelName != null && channelName.isNotEmpty)
+              ? channelName
+              : null,
           extra: {'order': order},
           keyPairs: keyPair,
         );
       }
 
-      debugPrint('Reordered ${channelIds.length} channels in group $groupIdHex');
+      debugPrint(
+        'Reordered ${channelIds.length} channels in group $groupIdHex',
+      );
     } catch (e) {
       debugPrint('Failed to reorder channels: $e');
       _relayErrorController.add('Failed to reorder channels: $e');
@@ -3424,7 +3903,8 @@ class GroupState with ChangeNotifier {
             tag.isNotEmpty &&
             tag[0] == 'e' &&
             tag.length > 1 &&
-            (tag.length < 4 || tag[3] != 'root'), // Exclude channel reference tags
+            (tag.length < 4 ||
+                tag[3] != 'root'), // Exclude channel reference tags
       );
       if (isComment) {
         // Emit to comment stream for post detail views
@@ -3494,110 +3974,214 @@ class GroupState with ChangeNotifier {
   StreamSubscription<NostrEventModel>? _groupAdminsSubscription;
   StreamSubscription<NostrEventModel>? _groupMembersSubscription;
 
+  // Subscription for kind:9009 invite events
+  StreamSubscription<NostrEventModel>? _inviteEventSubscription;
+
+  // Subscription for kind:9000 put-user events (to detect auto-approval after join requests)
+  StreamSubscription<NostrEventModel>? _putUserEventSubscription;
+
   Future<void> _startListeningForGroupEvents() async {
-    if (_nostrService == null || !_isConnected) return;
+    debugPrint(
+      'DEBUG: _startListeningForGroupEvents - ENTRY - service: ${_nostrService != null}, connected: $_isConnected',
+    );
+    if (_nostrService == null || !_isConnected) {
+      debugPrint(
+        'DEBUG: _startListeningForGroupEvents - EARLY RETURN: service: ${_nostrService != null}, connected: $_isConnected',
+      );
+      return;
+    }
 
     try {
-      // Get our pubkey to filter Welcome messages addressed to us
+      // Get our pubkey directly without waiting for keys group init
+      // UNCONDITIONAL LISTENER SETUP: Start listening as soon as connected
       final ourPubkey = await getNostrPublicKey();
-      if (ourPubkey == null) {
-        debugPrint('Cannot listen for Welcome messages: no pubkey available');
-        return;
+      debugPrint(
+        'LISTENING FOR INVITES: Setting up listener - pubkey: ${ourPubkey != null ? "${ourPubkey.substring(0, 8)}..." : "NULL (will filter in handler)"}',
+      );
+
+      // Listen for kind:9009 invite events targeting us
+      // Set up listener unconditionally - if pubkey is not available, we'll filter in handler
+      _inviteEventSubscription?.cancel();
+      
+      if (ourPubkey != null) {
+        // Pubkey available - set up filtered listener
+        debugPrint(
+          'LISTENING FOR INVITES: Setting up filtered listener for pubkey ${ourPubkey.substring(0, 8)}...',
+        );
+        _inviteEventSubscription = _nostrService!
+            .listenToEvents(
+              kind: kindCreateInvite,
+              pTags: [ourPubkey], // Filter by target user pubkey in #p tag
+              limit: null,
+            )
+            .listen(
+              (event) {
+                debugPrint(
+                  'LISTENING FOR INVITES: Received event ${event.id.substring(0, 8)}... for pubkey ${ourPubkey.substring(0, 8)}...',
+                );
+                final groupId = event.tags.firstWhere(
+                  (t) => t.isNotEmpty && t[0] == 'h',
+                  orElse: () => [],
+                ).length > 1
+                    ? event.tags.firstWhere((t) => t.isNotEmpty && t[0] == 'h')[1]
+                    : 'unknown';
+                debugPrint(
+                  'LISTENING FOR INVITES: Event ${event.id.substring(0, 8)}... is for group $groupId',
+                );
+                // Store as pending invitation
+                storePendingInvitation(event).catchError((error) {
+                  debugPrint('LISTENING FOR INVITES: Error storing pending invitation: $error');
+                });
+              },
+              onError: (error) {
+                debugPrint('LISTENING FOR INVITES: Error listening to invite events: $error');
+              },
+            );
+        debugPrint(
+          'LISTENING FOR INVITES: Listener subscription created with pTags filter for ${ourPubkey.substring(0, 8)}...',
+        );
+      } else {
+        // Pubkey not available yet - set up listener for all kind:9009 events and filter in handler
+        debugPrint(
+          'LISTENING FOR INVITES: Pubkey not available, setting up unfiltered listener (will filter in handler)',
+        );
+        _inviteEventSubscription = _nostrService!
+            .listenToEvents(
+              kind: kindCreateInvite,
+              limit: null,
+            )
+            .listen(
+              (event) async {
+                // Get pubkey and filter in handler
+                final currentPubkey = await getNostrPublicKey();
+                if (currentPubkey == null) {
+                  debugPrint(
+                    'LISTENING FOR INVITES: Received event ${event.id.substring(0, 8)}... but pubkey still not available, skipping',
+                  );
+                  return;
+                }
+                
+                // Check if this event targets us
+                final pTags = event.tags
+                    .where((t) => t.isNotEmpty && t[0] == 'p')
+                    .map((t) => t.length > 1 ? t[1] : '')
+                    .where((v) => v.isNotEmpty)
+                    .toList();
+                
+                if (pTags.contains(currentPubkey)) {
+                  debugPrint(
+                    'LISTENING FOR INVITES: Received event ${event.id.substring(0, 8)}... targeting our pubkey ${currentPubkey.substring(0, 8)}...',
+                  );
+                  final groupId = event.tags.firstWhere(
+                    (t) => t.isNotEmpty && t[0] == 'h',
+                    orElse: () => [],
+                  ).length > 1
+                      ? event.tags.firstWhere((t) => t.isNotEmpty && t[0] == 'h')[1]
+                      : 'unknown';
+                  debugPrint(
+                    'LISTENING FOR INVITES: Event ${event.id.substring(0, 8)}... is for group $groupId',
+                  );
+                  // Store as pending invitation
+                  storePendingInvitation(event).catchError((error) {
+                    debugPrint('LISTENING FOR INVITES: Error storing pending invitation: $error');
+                  });
+                } else {
+                  debugPrint(
+                    'LISTENING FOR INVITES: Received event ${event.id.substring(0, 8)}... but not targeting our pubkey, ignoring',
+                  );
+                }
+              },
+              onError: (error) {
+                debugPrint('LISTENING FOR INVITES: Error listening to invite events: $error');
+              },
+            );
+        debugPrint(
+          'LISTENING FOR INVITES: Listener subscription created without filter (will filter in handler)',
+        );
       }
 
-      // Listen for Welcome messages (kind 1060) addressed to us
-      _nostrService!
-          .listenToEvents(
-            kind: kindMlsWelcome,
-            pTags: [ourPubkey], // Filter by recipient pubkey
-            limit: null,
-          )
-          .listen(
-            (event) {
-              // Store as pending invitation instead of auto-processing
-              storePendingInvitation(event).catchError((error) {
-                debugPrint('Error storing pending invitation: $error');
-              });
-            },
-            onError: (error) {
-              debugPrint('Error listening to Welcome messages: $error');
-            },
-          );
+      // Listen for kind:9000 put-user events where we're added (auto-approval after join request)
+      if (ourPubkey != null) {
+        _putUserEventSubscription?.cancel();
+        _putUserEventSubscription = _nostrService!
+            .listenToEvents(
+              kind: kindPutUser,
+              pTags: [ourPubkey], // Filter by our pubkey in #p tag
+              limit: null,
+            )
+            .listen(
+              (event) {
+                // Handle auto-approval: check if this matches a pending join request
+                _handlePutUserEvent(event).catchError((error) {
+                  debugPrint('Error handling put-user event: $error');
+                });
+              },
+              onError: (error) {
+                debugPrint('Error listening to put-user events: $error');
+              },
+            );
+      }
 
-      // Fetch past Welcome messages we might have missed (e.g., app was closed when invited)
+      // Fetch past invite events (kind:9009) we might have missed (e.g., app was closed when invited)
       // Do this in background so it doesn't block UI after groups are loaded from DB
+      // UNCONDITIONAL FETCH: No conditions, just fetch for user's pubkey
       Future.microtask(() async {
         try {
-          final pastWelcomes = await _nostrService!.requestPastEvents(
-            kind: kindMlsWelcome,
-            tags: [ourPubkey],
-            tagKey: 'p',
-            limit: 50,
-            useCache: true, // Check cache first, then network for new ones
-          );
-
-          debugPrint(
-            'Fetched ${pastWelcomes.length} past Welcome messages to process',
-          );
-
-          for (final welcomeEvent in pastWelcomes) {
-            // Extract group ID from 'g' tag
-            String? groupIdHex;
-            for (final tag in welcomeEvent.tags) {
-              if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
-                groupIdHex = tag[1].toLowerCase();
-                break;
+          // Get pubkey directly (may have been null when listener was set up)
+          final fetchPubkey = ourPubkey ?? await getNostrPublicKey();
+          
+          if (fetchPubkey == null) {
+            debugPrint(
+              'FETCHING INVITES (background): Pubkey not available yet, will retry',
+            );
+            // Retry after delay
+            Future.delayed(const Duration(seconds: 2), () async {
+              final retryPubkey = await getNostrPublicKey();
+              if (retryPubkey != null && _nostrService != null && _isConnected) {
+                debugPrint(
+                  'FETCHING INVITES (background): Retrying past invite fetch with pubkey ${retryPubkey.substring(0, 8)}...',
+                );
+                await _fetchPastInvitesForPubkey(retryPubkey);
               }
-            }
-
-            // Only store as pending if we don't already have this group
-            if (groupIdHex != null) {
-              // Check if we already have the MLS group
-              try {
-                final welcome = Welcome.fromJson(welcomeEvent.content);
-                final welcomeGroupIdHex = welcome.groupId.bytes
-                    .map((b) => b.toRadixString(16).padLeft(2, '0'))
-                    .join()
-                    .toLowerCase();
-                if (!_mlsGroups.containsKey(welcomeGroupIdHex)) {
-                  debugPrint(
-                    'Storing missed Welcome as pending for group: ${groupIdHex.substring(0, 8)}...',
-                  );
-                  try {
-                    await storePendingInvitation(welcomeEvent);
-                  } catch (e) {
-                    debugPrint('Failed to store past Welcome: $e');
-                  }
-                }
-              } catch (e) {
-                debugPrint('Failed to parse Welcome for pending storage: $e');
-              }
-            }
+            });
+            return;
           }
-        } catch (e) {
-          debugPrint('Failed to fetch past Welcome messages: $e');
+          
+          debugPrint(
+            'FETCHING INVITES (background): Starting past invite fetch for pubkey ${fetchPubkey.substring(0, 8)}...',
+          );
+          await _fetchPastInvitesForPubkey(fetchPubkey);
+        } catch (e, stackTrace) {
+          debugPrint(
+            'FETCHING INVITES (background): EXCEPTION in past invite fetch: $e',
+          );
+          debugPrint(
+            'FETCHING INVITES (background): STACK TRACE: $stackTrace',
+          );
         }
       });
 
       // Listen for MLS Commit messages (kind 1061) addressed to us
       // These are sent when a new member is added to a group we're already in
-      _nostrService!
-          .listenToEvents(
-            kind: kindMlsCommit,
-            pTags: [ourPubkey], // Filter by recipient pubkey
-            limit: null,
-          )
-          .listen(
-            (event) {
-              // Handle Commit message to update our MLS state
-              handleExternalCommit(event).catchError((error) {
-                debugPrint('Error handling Commit message: $error');
-              });
-            },
-            onError: (error) {
-              debugPrint('Error listening to Commit messages: $error');
-            },
-          );
+      if (ourPubkey != null) {
+        _nostrService!
+            .listenToEvents(
+              kind: kindMlsCommit,
+              pTags: [ourPubkey], // Filter by recipient pubkey
+              limit: null,
+            )
+            .listen(
+              (event) {
+                // Handle Commit message to update our MLS state
+                handleExternalCommit(event).catchError((error) {
+                  debugPrint('Error handling Commit message: $error');
+                });
+              },
+              onError: (error) {
+                debugPrint('Error listening to Commit messages: $error');
+              },
+            );
+      }
 
       // Listen for new NIP-29 create-group events (kind 9007) to keep DB and cache updated
       _nostrService!
@@ -3741,6 +4325,8 @@ class GroupState with ChangeNotifier {
       _groupMetadataSubscription?.cancel();
       _groupAdminsSubscription?.cancel();
       _groupMembersSubscription?.cancel();
+      _inviteEventSubscription?.cancel();
+      _putUserEventSubscription?.cancel();
 
       // Subscribe to kind 39000 (group metadata) updates
       _groupMetadataSubscription = _nostrService!
@@ -3900,6 +4486,73 @@ class GroupState with ChangeNotifier {
     safeNotifyListeners();
   }
 
+  /// Handle kind:9000 put-user event (auto-approval after join request)
+  /// This is called when the relay auto-approves a join request by generating a put-user event
+  Future<void> _handlePutUserEvent(NostrEventModel event) async {
+    if (event.kind != kindPutUser) return;
+
+    // Extract group ID from 'h' tag
+    String? groupIdHex;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'h' && tag.length >= 2) {
+        groupIdHex = tag[1];
+        break;
+      }
+    }
+
+    if (groupIdHex == null) {
+      debugPrint('Put-user event missing group ID (h tag)');
+      return;
+    }
+
+    // Check if our pubkey is in the 'p' tag (we were added)
+    final ourPubkey = await getNostrPublicKey();
+    if (ourPubkey == null) return;
+
+    bool isForUs = false;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
+        if (tag[1] == ourPubkey) {
+          isForUs = true;
+          break;
+        }
+      }
+    }
+
+    if (!isForUs) {
+      return; // Not for us
+    }
+
+    debugPrint(
+      'Received put-user event (kind:9000) - auto-approved for group $groupIdHex',
+    );
+
+    // Remove any pending invitations for this group
+    if (_pendingInvitationTable != null) {
+      try {
+        final invitations = await _pendingInvitationTable!.getAll();
+        for (final invitation in invitations) {
+          if (invitation.groupIdHex == groupIdHex) {
+            await _pendingInvitationTable!.remove(invitation.id);
+            debugPrint(
+              'Removed pending invitation for group $groupIdHex after auto-approval',
+            );
+          }
+        }
+        await loadPendingInvitations();
+      } catch (e) {
+        debugPrint('Error removing pending invitation after auto-approval: $e');
+      }
+    }
+
+    // Invalidate membership cache to force refresh
+    invalidateMembershipCache(notify: true);
+
+    // Note: The actual MLS group join may still need to happen separately
+    // if Welcome messages are required for encryption. This depends on the
+    // implementation details of how MLS groups are created after NIP-29 membership.
+  }
+
   /// Handle kind 39002 (group members) event from relay
   void _handleGroupMembersUpdate(NostrEventModel event) {
     if (event.kind != kindGroupMembers) return;
@@ -3939,11 +4592,19 @@ class GroupState with ChangeNotifier {
 
   /// Handle a decrypted kind 1 post from any group
   void _handleDecryptedPost(NostrEventModel post, String groupIdHex) {
-    // Check if this is a comment (has 'e' tag for reply)
+    // Check if this is a comment (has 'e' tag for reply, but NOT for channel reference)
+    // Channel references use 'e' tag with 'root' marker, comments use 'reply' or no marker
     bool isComment = false;
+    String? commentedPostId;
     for (final tag in post.tags) {
-      if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+      if (tag.isNotEmpty &&
+          tag[0] == 'e' &&
+          tag.length > 1 &&
+          (tag.length < 4 || tag[3] != 'root')) {
+        // This is an 'e' tag that's NOT a channel reference (root marker)
+        // It's a reply/comment - extract the post ID being commented on
         isComment = true;
+        commentedPostId = tag[1];
         break;
       }
     }
@@ -3959,10 +4620,23 @@ class GroupState with ChangeNotifier {
     if (isComment) {
       _commentUpdateController.add(post);
       debugPrint(
-        'Emitted comment ${post.id.substring(0, 8)}... to comment stream (not added to feed)',
+        '>>> ALL GROUPS LISTENER: Emitted comment ${post.id.substring(0, 8)}... to comment stream (postId: ${commentedPostId?.substring(0, 8) ?? 'unknown'}, not added to feed)',
       );
+
+      // Also emit post ID to feed comment updates if we have a callback
+      if (commentedPostId != null && _onGroupCommentUpdate != null) {
+        _onGroupCommentUpdate!(commentedPostId);
+        debugPrint(
+          '>>> ALL GROUPS LISTENER: Notified FeedState about comment on post ${commentedPostId.substring(0, 8)}...',
+        );
+      }
       return;
     }
+
+    // Check if this is a new message (not already in our lists)
+    final isNewMessage =
+        !_allDecryptedMessages.any((e) => e.id == post.id) &&
+        (_activeGroup == null || !_groupMessages.any((e) => e.id == post.id));
 
     // Add posts (not comments) to unified messages list (all groups)
     if (!_allDecryptedMessages.any((e) => e.id == post.id)) {
@@ -3981,6 +4655,24 @@ class GroupState with ChangeNotifier {
           debugPrint(
             'Added new post to groupMessages: ${post.id.substring(0, 8)}...',
           );
+        }
+      }
+    }
+
+    // Update unread counts for this message (only for active group)
+    // Also play sound notification for new messages in the active group
+    if (_activeGroup != null) {
+      final activeGroupIdHex = _groupIdToHex(_activeGroup!.id);
+      if (groupIdHex == activeGroupIdHex) {
+        _updateUnreadCounts(post, groupIdHex);
+
+        // Play sound notification for new messages from others in the active group
+        if (isNewMessage) {
+          final prefs = NotificationPreferencesService.instance;
+          if (prefs.isNewPostSoundEnabled &&
+              (_userPubkey == null || post.pubkey != _userPubkey)) {
+            SoundService.instance.playNewPostSound();
+          }
         }
       }
     }
@@ -4104,11 +4796,27 @@ class GroupState with ChangeNotifier {
               // Skip kind 7 reactions - they are handled by _startListeningForAllGroupEvents()
               if (event.kind == 7) return;
 
-              // Check if this is a comment (has 'e' tag for reply)
+              // Cache to database (both posts and comments)
+              // Note: NostrService also caches decrypted events, but we cache here too for consistency
+              if (_eventTable != null) {
+                _eventTable!.insert(event).catchError((e) {
+                  debugPrint('Failed to cache event in group listener: $e');
+                });
+              }
+
+              // Check if this is a comment (has 'e' tag for reply, but NOT for channel reference)
+              // Channel references use 'e' tag with 'root' marker, comments use 'reply' or no marker
               bool isComment = false;
+              String? commentedPostId;
               for (final tag in event.tags) {
-                if (tag.isNotEmpty && tag[0] == 'e' && tag.length > 1) {
+                if (tag.isNotEmpty &&
+                    tag[0] == 'e' &&
+                    tag.length > 1 &&
+                    (tag.length < 4 || tag[3] != 'root')) {
+                  // This is an 'e' tag that's NOT a channel reference (root marker)
+                  // It's a reply/comment - extract the post ID being commented on
                   isComment = true;
+                  commentedPostId = tag[1];
                   break;
                 }
               }
@@ -4117,8 +4825,16 @@ class GroupState with ChangeNotifier {
               if (isComment) {
                 _commentUpdateController.add(event);
                 debugPrint(
-                  '>>> GROUP LISTENER: Emitted comment ${event.id.substring(0, 8)}... to comment stream (not added to feed)',
+                  '>>> GROUP LISTENER: Emitted comment ${event.id.substring(0, 8)}... to comment stream (postId: ${commentedPostId?.substring(0, 8) ?? 'unknown'}, not added to feed)',
                 );
+
+                // Also emit post ID to feed comment updates if we have a callback
+                if (commentedPostId != null && _onGroupCommentUpdate != null) {
+                  _onGroupCommentUpdate!(commentedPostId);
+                  debugPrint(
+                    '>>> GROUP LISTENER: Notified FeedState about comment on post ${commentedPostId.substring(0, 8)}...',
+                  );
+                }
                 return;
               }
 
@@ -5075,7 +5791,10 @@ class GroupState with ChangeNotifier {
 
     try {
       // Try to fetch from network
-      final newGroups = await fetchGroupsFromRelay(limit: limit, useCache: false);
+      final newGroups = await fetchGroupsFromRelay(
+        limit: limit,
+        useCache: false,
+      );
 
       if (newGroups.isNotEmpty) {
         // Merge new groups with existing ones (avoid duplicates by eventId)
@@ -5123,7 +5842,9 @@ class GroupState with ChangeNotifier {
         final cachedAnnouncements = await loadGroupAnnouncementsFromCache();
         if (cachedAnnouncements.isNotEmpty && _discoveredGroups.isEmpty) {
           _discoveredGroups = cachedAnnouncements;
-          _rebuildAnnouncementCache(clearFirst: true); // Clear and rebuild for database fallback
+          _rebuildAnnouncementCache(
+            clearFirst: true,
+          ); // Clear and rebuild for database fallback
         }
       }
     } catch (e) {
@@ -5144,7 +5865,9 @@ class GroupState with ChangeNotifier {
         final cachedAnnouncements = await loadGroupAnnouncementsFromCache();
         if (cachedAnnouncements.isNotEmpty) {
           _discoveredGroups = cachedAnnouncements;
-          _rebuildAnnouncementCache(clearFirst: true); // Clear and rebuild for database fallback
+          _rebuildAnnouncementCache(
+            clearFirst: true,
+          ); // Clear and rebuild for database fallback
         }
       }
       // If we have data (either existing or from DB), keep it
@@ -5591,12 +6314,12 @@ class GroupState with ChangeNotifier {
   /// [username] - The username of the person to invite
   ///
   /// This will:
-  /// 1. Search for the user by username to get their pubkey
-  /// 2. Generate temporary MLS keys (since key exchange isn't implemented yet)
-  /// 3. Create an AddProposal and send Welcome message
+  /// 1. Verify the current user is an admin of the group
+  /// 2. Search for the user by username to get their pubkey
+  /// 3. Check if the user is already a member
+  /// 4. Create a kind:9009 invite event (NIP-29 admin invite flow)
   ///
-  /// Note: The invitee will need to provide their real MLS keys later.
-  /// For now, we generate temporary keys to allow the invitation flow to work.
+  /// The invitee will discover the invite and can accept it by sending a join request.
   Future<void> inviteMemberByUsername(String username) async {
     if (_activeGroup == null) {
       throw Exception('No active group selected. Please select a group first.');
@@ -5606,35 +6329,21 @@ class GroupState with ChangeNotifier {
       throw Exception('Not connected to relay. Please connect first.');
     }
 
-    if (_mlsService == null) {
-      throw Exception('MLS service not initialized');
-    }
-
     try {
-      // Search for user by username
-      // Note: This requires ProfileState to be available
-      // We'll need to get it from context or pass it in
-      // For now, we'll create a ProfileService directly
-      final profileService = ProfileService(_nostrService!);
+      final groupIdHex = _groupIdToHex(_activeGroup!.id);
 
-      // First search to get the pubkey
-      var profile = await profileService.searchByUsername(username);
+      // Verify admin status
+      final isAdmin = await isGroupAdmin(groupIdHex);
+      if (!isAdmin) {
+        throw Exception('Only group admins can create invites');
+      }
+
+      // Search for user by username
+      final profileService = ProfileService(_nostrService!);
+      final profile = await profileService.searchByUsername(username);
 
       if (profile == null) {
         throw Exception('User not found: $username');
-      }
-
-      // If no HPKE key in cached profile, force refresh from relay
-      // The user might have just updated their profile
-      if (profile.mlsHpkePublicKey == null ||
-          profile.mlsHpkePublicKey!.isEmpty) {
-        debugPrint('No HPKE key in cached profile, refreshing from relay...');
-        final freshProfile = await profileService.getProfileFresh(
-          profile.pubkey,
-        );
-        if (freshProfile != null) {
-          profile = freshProfile;
-        }
       }
 
       final inviteeNostrPubkey = profile.pubkey;
@@ -5646,49 +6355,57 @@ class GroupState with ChangeNotifier {
         throw Exception('You cannot invite yourself to the group');
       }
 
-      // Get invitee's HPKE public key from their profile
-      final inviteeHpkePublicKeyHex = profile.mlsHpkePublicKey;
-      if (inviteeHpkePublicKeyHex == null || inviteeHpkePublicKeyHex.isEmpty) {
-        throw Exception(
-          'User $username has not published their MLS keys. '
-          'They need to update their profile first.',
-        );
+      // Check if user is already a member
+      final members = await getGroupMembers(groupIdHex);
+      final isAlreadyMember = members.any(
+        (m) => m.pubkey == inviteeNostrPubkey,
+      );
+      if (isAlreadyMember) {
+        throw Exception('User is already a member of this group');
       }
 
+      // Get NIP-29 group ID (may differ from MLS ID)
+      final nip29GroupId = getNip29GroupId(groupIdHex);
+
+      // Create kind:9009 invite event
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+      final createdAt = DateTime.now();
+
+      // Create invite event with h tag (group ID) and p tag (target user)
+      final inviteTags = await addClientTagsWithSignature([
+        ['h', nip29GroupId], // Group ID
+        ['p', inviteeNostrPubkey], // Target user pubkey
+      ], createdAt: createdAt);
+
+      final inviteEvent = NostrEvent.fromPartialData(
+        kind: kindCreateInvite,
+        content:
+            'You\'re invited to join ${_activeGroup!.name ?? 'the group'}!',
+        keyPairs: keyPair,
+        tags: inviteTags,
+        createdAt: createdAt,
+      );
+
+      final inviteEventModel = NostrEventModel(
+        id: inviteEvent.id,
+        pubkey: inviteEvent.pubkey,
+        kind: inviteEvent.kind,
+        content: inviteEvent.content,
+        tags: inviteEvent.tags,
+        sig: inviteEvent.sig,
+        createdAt: inviteEvent.createdAt,
+      );
+
+      // Publish invite event
+      await _nostrService!.publishEvent(inviteEventModel.toJson());
+
       debugPrint(
-        'Inviting with HPKE public key from profile: ${inviteeHpkePublicKeyHex.substring(0, 16)}...',
-      );
-
-      // Convert hex to bytes for the HPKE public key
-      final hpkePublicKeyBytes = Uint8List.fromList(
-        List.generate(
-          inviteeHpkePublicKeyHex.length ~/ 2,
-          (i) => int.parse(
-            inviteeHpkePublicKeyHex.substring(i * 2, i * 2 + 2),
-            radix: 16,
-          ),
-        ),
-      );
-
-      // Generate identity key (still needed for MLS)
-      final cryptoProvider = DefaultMlsCryptoProvider();
-      final identityKeyPair = await cryptoProvider.signatureScheme
-          .generateKeyPair();
-
-      // Create public key from the invitee's published HPKE public key
-      final inviteeHpkePublicKey = DefaultPublicKey(hpkePublicKeyBytes);
-
-      // Invite the member with their actual HPKE public key
-      // Use Nostr pubkey as userId for consistent profile resolution
-      await inviteMember(
-        inviteeNostrPubkey: inviteeNostrPubkey,
-        inviteeIdentityKey: identityKeyPair.publicKey,
-        inviteeHpkePublicKey: inviteeHpkePublicKey,
-        inviteeUserId: inviteeNostrPubkey,
-      );
-
-      debugPrint(
-        'Invited user $username (${inviteeNostrPubkey.substring(0, 8)}...) to group',
+        'Created invite (kind:9009) for user $username (${inviteeNostrPubkey.substring(0, 8)}...) to group $nip29GroupId',
       );
     } catch (e) {
       debugPrint('Failed to invite member by username: $e');
@@ -6001,168 +6718,440 @@ class GroupState with ChangeNotifier {
     }
   }
 
-  /// Store a Welcome message as a pending invitation (instead of auto-processing)
-  Future<void> storePendingInvitation(NostrEventModel welcomeEvent) async {
-    if (welcomeEvent.kind != kindMlsWelcome) {
-      debugPrint('Event is not a Welcome message (kind 1060)');
+  /// Store a kind:9009 invite event as a pending invitation
+  /// Simple: if it's kind 9009 and has our pubkey in a p tag, store it
+  Future<void> storePendingInvitation(NostrEventModel inviteEvent) async {
+    if (inviteEvent.kind != kindCreateInvite) {
       return;
     }
 
-    // Check if this Welcome is for us (check 'p' tag)
-    final recipientPubkey =
-        welcomeEvent.tags
-                .firstWhere(
-                  (tag) => tag.isNotEmpty && tag[0] == 'p',
-                  orElse: () => [],
-                )
-                .length >
-            1
-        ? welcomeEvent.tags.firstWhere(
-            (tag) => tag.isNotEmpty && tag[0] == 'p',
-          )[1]
-        : null;
+    debugPrint(
+      '>>> storePendingInvitation: Processing invite event ${inviteEvent.id.substring(0, 8)}...',
+    );
 
-    if (recipientPubkey == null) {
-      debugPrint('Welcome message has no recipient tag');
-      return;
-    }
-
-    // Check if this Welcome is for our Nostr pubkey
+    // Get our pubkey
     final ourPubkey = await getNostrPublicKey();
-    if (ourPubkey != recipientPubkey) {
+    if (ourPubkey == null) {
+      debugPrint('>>> storePendingInvitation: No pubkey available');
+      return;
+    }
+
+    // Check if our pubkey is in any 'p' tag (case-insensitive)
+    bool isForUs = false;
+    List<String> foundPTags = [];
+    for (final tag in inviteEvent.tags) {
+      if (tag.isNotEmpty && tag[0] == 'p' && tag.length > 1) {
+        foundPTags.add(tag[1]);
+        if (tag[1].toLowerCase() == ourPubkey.toLowerCase()) {
+          isForUs = true;
+          break;
+        }
+      }
+    }
+
+    // #region agent log
+    try {
+      final logEntry = {
+        'location': 'group.dart:6630',
+        'message': 'storePendingInvitation: Pubkey comparison',
+        'data': {
+          'eventId': inviteEvent.id.substring(0, 8),
+          'ourPubkey': ourPubkey,
+          'foundPTags': foundPTags,
+          'isForUs': isForUs,
+        },
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'sessionId': 'debug-session',
+        'runId': 'run1',
+        'hypothesisId': 'C',
+      };
       debugPrint(
-        'Welcome message is not for us (ours: $ourPubkey, theirs: $recipientPubkey)',
+        'DEBUG: storePendingInvitation - eventId: ${inviteEvent.id.substring(0, 8)}, ourPubkey: ${ourPubkey.substring(0, 8)}..., foundPTags: $foundPTags, isForUs: $isForUs',
+      );
+      try {
+        final appDir = await getApplicationDocumentsDirectory();
+        final logFile = File('${appDir.path}/debug.log');
+        await logFile.writeAsString(
+          '${jsonEncode(logEntry)}\n',
+          mode: FileMode.append,
+        );
+      } catch (e) {
+        // File write failed, but debugPrint already logged
+      }
+    } catch (e) {
+      debugPrint('DEBUG: Failed to write storePendingInvitation log: $e');
+    }
+    // #endregion
+
+    if (!isForUs) {
+      debugPrint(
+        '>>> storePendingInvitation: Invite not for us (our pubkey: ${ourPubkey.substring(0, 8)}..., found p tags: $foundPTags)',
       );
       return;
     }
 
     if (_pendingInvitationTable == null) {
-      debugPrint('Pending invitation table not initialized');
+      debugPrint('>>> storePendingInvitation: Table not initialized');
       return;
     }
 
     try {
-      // Extract NIP-29 group ID from 'g' tag
+      // Extract group ID from 'h' tag
       String? groupIdHex;
-      for (final tag in welcomeEvent.tags) {
-        if (tag.isNotEmpty && tag[0] == 'g' && tag.length > 1) {
+      for (final tag in inviteEvent.tags) {
+        if (tag.isNotEmpty && tag[0] == 'h' && tag.length > 1) {
           groupIdHex = tag[1].toLowerCase();
           break;
         }
       }
 
-      // Check if we already have this group (deduplication)
-      if (groupIdHex != null) {
-        // Check if we already have the MLS group
-        final welcome = Welcome.fromJson(welcomeEvent.content);
-        final welcomeGroupIdHex = welcome.groupId.bytes
-            .map((b) => b.toRadixString(16).padLeft(2, '0'))
-            .join()
-            .toLowerCase();
-        if (_mlsGroups.containsKey(welcomeGroupIdHex)) {
-          debugPrint(
-            'Already have group ${welcomeGroupIdHex.substring(0, 8)}..., skipping pending invitation',
-          );
-          return;
-        }
+      if (groupIdHex == null) {
+        debugPrint('>>> storePendingInvitation: No group ID (h tag) found');
+        return;
+      }
 
-        // Check if we already have a pending invitation for this group
-        final exists = await _pendingInvitationTable!.existsForGroup(groupIdHex);
-        if (exists) {
-          debugPrint(
-            'Already have pending invitation for group ${groupIdHex.substring(0, 8)}..., skipping',
-          );
-          return;
-        }
+      // Check if we already have this invitation stored (by event ID)
+      final existing = await _pendingInvitationTable!.getById(inviteEvent.id);
+      if (existing != null) {
+        debugPrint(
+          '>>> storePendingInvitation: Already have this invite stored (ID: ${inviteEvent.id.substring(0, 8)}...)',
+        );
+        return;
       }
 
       // Convert event to JSON for storage
       // Convert DateTime to Unix timestamp (seconds)
-      final createdAtTimestamp = welcomeEvent.createdAt.millisecondsSinceEpoch ~/ 1000;
+      final createdAtTimestamp =
+          inviteEvent.createdAt.millisecondsSinceEpoch ~/ 1000;
       final eventJson = {
-        'id': welcomeEvent.id,
-        'pubkey': welcomeEvent.pubkey,
+        'id': inviteEvent.id,
+        'pubkey': inviteEvent.pubkey,
         'created_at': createdAtTimestamp,
-        'kind': welcomeEvent.kind,
-        'tags': welcomeEvent.tags,
-        'content': welcomeEvent.content,
-        'sig': welcomeEvent.sig,
+        'kind': inviteEvent.kind,
+        'tags': inviteEvent.tags,
+        'content': inviteEvent.content,
+        'sig': inviteEvent.sig,
       };
 
       final invitation = PendingInvitation(
-        id: welcomeEvent.id,
-        welcomeEventJson: eventJson,
+        id: inviteEvent.id,
+        inviteEventJson: eventJson,
         groupIdHex: groupIdHex,
-        inviterPubkey: welcomeEvent.pubkey,
-        receivedAt: welcomeEvent.createdAt,
+        inviterPubkey: inviteEvent.pubkey,
+        receivedAt: inviteEvent.createdAt,
       );
 
       await _pendingInvitationTable!.add(invitation);
       debugPrint(
-        'Stored pending invitation for group ${groupIdHex?.substring(0, 8) ?? "unknown"}...',
+        '>>> storePendingInvitation: SUCCESS - Stored invite ${inviteEvent.id.substring(0, 8)}... for group ${groupIdHex.substring(0, 8)}...',
       );
 
-      // Reload pending invitations and notify listeners
+      // Reload to update UI
       await loadPendingInvitations();
     } catch (e) {
       debugPrint('Failed to store pending invitation: $e');
     }
   }
 
+  /// Helper method to fetch past invites for a given pubkey
+  Future<void> _fetchPastInvitesForPubkey(String pubkey) async {
+    if (_nostrService == null || !_isConnected) {
+      debugPrint('FETCHING INVITES (background): Not connected, skipping fetch');
+      return;
+    }
+    
+    try {
+      debugPrint(
+        'FETCHING INVITES (background): Fetching past invite events for pubkey ${pubkey.substring(0, 8)}...',
+      );
+      
+      // Force fresh fetch to ensure we get all invites
+      final pastInvites = await _nostrService!.requestPastEvents(
+        kind: kindCreateInvite,
+        pTags: [pubkey], // Filter by #p tag containing our pubkey
+        limit: 100,
+        useCache: false, // Force fresh fetch from relay
+      );
+
+      debugPrint(
+        'FETCHING INVITES (background): Received ${pastInvites.length} past invite events',
+      );
+
+      for (final inviteEvent in pastInvites) {
+        debugPrint(
+          'FETCHING INVITES (background): Processing past invite ${inviteEvent.id.substring(0, 8)}...',
+        );
+        try {
+          // Check if already stored
+          final existing = await _pendingInvitationTable?.getById(
+            inviteEvent.id,
+          );
+          if (existing == null) {
+            debugPrint(
+              'FETCHING INVITES (background): Storing missed invite ${inviteEvent.id.substring(0, 8)}...',
+            );
+            await storePendingInvitation(inviteEvent);
+            debugPrint(
+              'FETCHING INVITES (background): Successfully stored invite ${inviteEvent.id.substring(0, 8)}...',
+            );
+          } else {
+            debugPrint(
+              'FETCHING INVITES (background): Invite ${inviteEvent.id.substring(0, 8)}... already stored',
+            );
+          }
+        } catch (e) {
+          debugPrint(
+            'FETCHING INVITES (background): Failed to process invite ${inviteEvent.id.substring(0, 8)}...: $e',
+          );
+        }
+      }
+      
+      debugPrint(
+        'FETCHING INVITES (background): Completed processing ${pastInvites.length} past invite events',
+      );
+    } catch (e) {
+      debugPrint(
+        'FETCHING INVITES (background): Failed to fetch past invite events: $e',
+      );
+    }
+  }
+
   /// Load pending invitations from database
+  /// Fetches remote kind:9009 invite events to keep cache fresh
   Future<void> loadPendingInvitations() async {
+    // #region agent log
+    try {
+      final logEntry = {
+        'location': 'group.dart:6790',
+        'message': 'loadPendingInvitations: Entry',
+        'data': {
+          'tableInitialized': _pendingInvitationTable != null,
+          'nostrServiceAvailable': _nostrService != null,
+          'isConnected': _isConnected,
+        },
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'sessionId': 'debug-session',
+        'runId': 'run1',
+        'hypothesisId': 'A',
+      };
+      debugPrint(
+        'DEBUG: loadPendingInvitations ENTRY - table: ${_pendingInvitationTable != null}, service: ${_nostrService != null}, connected: $_isConnected',
+      );
+      try {
+        final appDir = await getApplicationDocumentsDirectory();
+        final logFile = File('${appDir.path}/debug.log');
+        await logFile.writeAsString(
+          '${jsonEncode(logEntry)}\n',
+          mode: FileMode.append,
+        );
+      } catch (e) {
+        // File write failed, but debugPrint already logged
+      }
+    } catch (e) {
+      debugPrint('DEBUG: Failed to write entry log: $e');
+    }
+    // #endregion
+
     if (_pendingInvitationTable == null) {
+      debugPrint('DEBUG: loadPendingInvitations - EARLY RETURN: table is null');
       return;
     }
 
     try {
       _pendingInvitations = await _pendingInvitationTable!.getAll();
       safeNotifyListeners();
-      debugPrint('Loaded ${_pendingInvitations.length} pending invitations');
-    } catch (e) {
+      debugPrint(
+        '>>> loadPendingInvitations: Loaded ${_pendingInvitations.length} pending invitations from database',
+      );
+
+      // Fetch remote invite events (kind:9009) with our pubkey in #p tag
+      // UNCONDITIONAL FETCH: No conditions, just fetch for user's pubkey
+      debugPrint(
+        'FETCHING INVITES: Starting unconditional fetch - service=${_nostrService != null}, connected=$_isConnected',
+      );
+      if (_nostrService != null && _isConnected) {
+        // Get pubkey directly without waiting for keys group init
+        final ourPubkey = await getNostrPublicKey();
+        debugPrint(
+          'FETCHING INVITES: Pubkey check - ${ourPubkey != null ? "available (${ourPubkey.substring(0, 8)}...)" : "NULL - will retry"}',
+        );
+        
+        if (ourPubkey != null) {
+          debugPrint(
+            'FETCHING INVITES: Starting fetch for pubkey ${ourPubkey.substring(0, 8)}...',
+          );
+          // Fetch immediately to ensure we get invites
+          try {
+            // Build filter for debugging
+            final filter = {
+              'kinds': [kindCreateInvite],
+              '#p': [ourPubkey],
+              'limit': 100,
+            };
+            debugPrint(
+              'FETCHING INVITES: Query sent with filter: $filter',
+            );
+            
+            // Query: kind 9009, filter by #p tag containing our pubkey
+            final pastInvites = await _nostrService!.requestPastEvents(
+              kind: kindCreateInvite,
+              pTags: [ourPubkey], // Filter by #p tag containing our pubkey
+              limit: 100,
+              useCache: false, // Always fetch fresh from relay
+            );
+            
+            debugPrint(
+              'FETCHING INVITES: Received ${pastInvites.length} events from relay',
+            );
+
+            // Process any new invite events that aren't already stored
+            for (final inviteEvent in pastInvites) {
+              debugPrint(
+                'FETCHING INVITES: Processing event ${inviteEvent.id.substring(0, 8)}...',
+              );
+              try {
+                // Check if we already have this invitation stored
+                final existing = _pendingInvitations.firstWhere(
+                  (inv) => inv.id == inviteEvent.id,
+                  orElse: () => PendingInvitation(
+                    id: '',
+                    inviteEventJson: {},
+                    receivedAt: DateTime.now(),
+                  ),
+                );
+
+                // If not stored, store it (storePendingInvitation will handle validation)
+                if (existing.id.isEmpty) {
+                  debugPrint(
+                    'FETCHING INVITES: New invite found, storing: ${inviteEvent.id.substring(0, 8)}...',
+                  );
+                  try {
+                    await storePendingInvitation(inviteEvent);
+                    debugPrint(
+                      'FETCHING INVITES: Successfully stored invite ${inviteEvent.id.substring(0, 8)}...',
+                    );
+                  } catch (e) {
+                    debugPrint(
+                      'FETCHING INVITES: Failed to store invite ${inviteEvent.id.substring(0, 8)}...: $e',
+                    );
+                  }
+                } else {
+                  debugPrint(
+                    'FETCHING INVITES: Invite ${inviteEvent.id.substring(0, 8)}... already stored, skipping',
+                  );
+                }
+              } catch (e) {
+                debugPrint(
+                  'FETCHING INVITES: Failed to process invite event ${inviteEvent.id.substring(0, 8)}...: $e',
+                );
+                // Continue processing other events
+              }
+            }
+
+            debugPrint(
+              'FETCHING INVITES: Completed processing ${pastInvites.length} invite events from relay',
+            );
+          } catch (e) {
+            debugPrint(
+              'FETCHING INVITES: Failed to fetch invite events: $e',
+            );
+            // Continue - at least we have database cache
+          }
+        } else {
+          debugPrint(
+            'FETCHING INVITES: Pubkey not available yet, will retry when available',
+          );
+          // Retry after a short delay if pubkey becomes available
+          Future.delayed(const Duration(seconds: 2), () async {
+            final retryPubkey = await getNostrPublicKey();
+            if (retryPubkey != null && _nostrService != null && _isConnected) {
+              debugPrint(
+                'FETCHING INVITES: Retrying fetch with pubkey ${retryPubkey.substring(0, 8)}...',
+              );
+              await loadPendingInvitations();
+            }
+          });
+        }
+      } else {
+        debugPrint(
+          'DEBUG: loadPendingInvitations - SKIPPING QUERY: service=${_nostrService != null}, connected=$_isConnected',
+        );
+      }
+    } catch (e, stackTrace) {
+      debugPrint('DEBUG: loadPendingInvitations - EXCEPTION CAUGHT: $e');
+      debugPrint('DEBUG: loadPendingInvitations - STACK TRACE: $stackTrace');
       debugPrint('Failed to load pending invitations: $e');
     }
   }
 
-  /// Accept a pending invitation and join the group
+  /// Accept a pending invitation by sending a join request (kind:9021)
+  /// The relay will auto-approve if a valid invite exists and generate kind:9000
   Future<void> acceptInvitation(PendingInvitation invitation) async {
     if (_pendingInvitationTable == null) {
       throw Exception('Pending invitation table not initialized');
     }
 
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay');
+    }
+
     try {
-      // Convert stored JSON back to NostrEventModel
-      final eventJson = invitation.welcomeEventJson;
-      final createdAtValue = eventJson['created_at'];
-      final createdAt = createdAtValue is int
-          ? DateTime.fromMillisecondsSinceEpoch(createdAtValue * 1000)
-          : DateTime.now();
-      
-      final tagsList = (eventJson['tags'] as List).map((t) {
-        if (t is List) {
-          return t.map((item) => item.toString()).toList();
-        }
-        return [t.toString()];
-      }).toList();
-      
-      final welcomeEvent = NostrEventModel(
-        id: eventJson['id'] as String,
-        pubkey: eventJson['pubkey'] as String,
+      // Get group ID from invitation
+      final groupIdHex = invitation.groupIdHex;
+      if (groupIdHex == null) {
+        throw Exception('Invitation missing group ID');
+      }
+
+      // Get invite event ID to reference in join request
+      final inviteEventId = invitation.id;
+
+      // Create kind:9021 join request
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+
+      final keyPair = NostrKeyPairs(private: privateKey);
+      final createdAt = DateTime.now();
+
+      // Create join request with h tag (group ID) and optional e tag (invite event ID)
+      final joinRequestTags = await addClientTagsWithSignature([
+        ['h', groupIdHex], // Group ID
+        ['e', inviteEventId], // Reference to the invite event
+      ], createdAt: createdAt);
+
+      final joinRequestEvent = NostrEvent.fromPartialData(
+        kind: kindJoinRequest,
+        content: 'Accepting invite',
+        keyPairs: keyPair,
+        tags: joinRequestTags,
         createdAt: createdAt,
-        kind: eventJson['kind'] as int,
-        tags: tagsList,
-        content: eventJson['content'] as String,
-        sig: eventJson['sig'] as String,
       );
 
-      // Process the Welcome message (existing logic)
-      await handleWelcomeInvitation(welcomeEvent);
+      final joinRequestModel = NostrEventModel(
+        id: joinRequestEvent.id,
+        pubkey: joinRequestEvent.pubkey,
+        kind: joinRequestEvent.kind,
+        content: joinRequestEvent.content,
+        tags: joinRequestEvent.tags,
+        sig: joinRequestEvent.sig,
+        createdAt: joinRequestEvent.createdAt,
+      );
 
-      // Remove from pending invitations
+      // Publish join request
+      await _nostrService!.publishEvent(joinRequestModel.toJson());
+
+      debugPrint(
+        'Published join request (kind:9021) for group $groupIdHex, referencing invite $inviteEventId',
+      );
+
+      // Remove from pending invitations (relay will auto-approve and generate kind:9000)
       await _pendingInvitationTable!.remove(invitation.id);
       await loadPendingInvitations();
 
-      debugPrint('Accepted invitation for group ${invitation.groupIdHex}');
+      debugPrint(
+        'Accepted invitation for group $groupIdHex (join request sent)',
+      );
     } catch (e) {
       debugPrint('Failed to accept invitation: $e');
       rethrow;

@@ -9,8 +9,8 @@ import 'package:provider/provider.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/services/mls/mls_group.dart';
 import 'package:comunifi/screens/feed/create_group_modal.dart';
-import 'package:comunifi/screens/feed/pending_invitations_modal.dart';
 import 'package:comunifi/l10n/app_localizations.dart';
+import 'package:go_router/go_router.dart';
 
 /// Helper class to combine discovered and local groups
 class _GroupItem {
@@ -158,11 +158,14 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
     );
   }
 
-  void _showPendingInvitationsModal() {
-    showCupertinoModalPopup(
-      context: context,
-      builder: (context) => const PendingInvitationsModal(),
-    );
+  void _navigateToInvitations() {
+    // Close sidebar in mobile mode before navigation
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isWideScreen = screenWidth > 1000;
+    if (!isWideScreen) {
+      widget.onClose();
+    }
+    context.push('/invitations');
   }
 
   void _showEditGroupModal(GroupAnnouncement announcement) {
@@ -339,82 +342,73 @@ class _GroupsSidebarState extends State<GroupsSidebar> {
             child: Column(
               children: [
                 SizedBox(height: topPadding),
-                // Create group button with pending invitations badge
+                // Create group button
                 Center(
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      GestureDetector(
-                        onTap: _showCreateGroupModal,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 56,
-                              height: 56,
-                              decoration: BoxDecoration(
-                                color: AppColors.chipBackground,
-                                borderRadius: BorderRadius.circular(28),
-                              ),
-                              child: const Icon(
-                                CupertinoIcons.plus,
-                                color: AppColors.primary,
-                                size: 28,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            const Text(
-                              'New',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: AppColors.secondaryLabel,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      // Pending invitations badge
-                      if (groupState.pendingInvitationCount > 0)
-                        Positioned(
-                          top: -4,
-                          right: -4,
-                          child: GestureDetector(
-                            onTap: _showPendingInvitationsModal,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: AppColors.primary,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: AppColors.surface,
-                                  width: 2,
-                                ),
-                              ),
-                              constraints: const BoxConstraints(
-                                minWidth: 20,
-                                minHeight: 20,
-                              ),
-                              child: Center(
-                                child: Text(
-                                  groupState.pendingInvitationCount > 99
-                                      ? '99+'
-                                      : '${groupState.pendingInvitationCount}',
-                                  style: const TextStyle(
-                                    color: CupertinoColors.white,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ),
+                  child: GestureDetector(
+                    onTap: _showCreateGroupModal,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 56,
+                          height: 56,
+                          decoration: BoxDecoration(
+                            color: AppColors.chipBackground,
+                            borderRadius: BorderRadius.circular(28),
+                          ),
+                          child: const Icon(
+                            CupertinoIcons.plus,
+                            color: AppColors.primary,
+                            size: 28,
                           ),
                         ),
-                    ],
+                        const SizedBox(height: 2),
+                        const Text(
+                          'New',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: AppColors.secondaryLabel,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
+                // Invitations button (only shown when there are invites)
+                if (groupState.pendingInvitationCount > 0) ...[
+                  const SizedBox(height: 8),
+                  Center(
+                    child: GestureDetector(
+                      onTap: _navigateToInvitations,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 56,
+                            height: 56,
+                            decoration: BoxDecoration(
+                              color: AppColors.chipBackground,
+                              borderRadius: BorderRadius.circular(28),
+                            ),
+                            child: const Icon(
+                              CupertinoIcons.mail,
+                              color: AppColors.primary,
+                              size: 28,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          const Text(
+                            'Invites',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: AppColors.secondaryLabel,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 8),
                 // Explore button
                 Center(

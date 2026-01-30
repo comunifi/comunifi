@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:comunifi/state/group.dart';
 import 'package:comunifi/state/profile.dart';
 import 'package:comunifi/theme/colors.dart';
@@ -410,19 +411,26 @@ class _MembersSidebarState extends State<MembersSidebar> {
                 decoration: const BoxDecoration(
                   color: CupertinoColors.white,
                   border: Border(
-                    bottom: BorderSide(
-                      color: AppColors.separator,
-                      width: 0.5,
-                    ),
+                    bottom: BorderSide(color: AppColors.separator, width: 0.5),
                   ),
                 ),
                 child: Row(
                   children: [
                     Builder(
                       builder: (context) {
-                        final localizations = AppLocalizations.of(context);
+                        // Try to get localizations, but handle gracefully if not available
+                        String membersText = 'Members';
+                        try {
+                          final localizations = AppLocalizations.of(context);
+                          if (localizations != null) {
+                            membersText = localizations.members;
+                          }
+                        } catch (e) {
+                          // Localizations not available, use default
+                          debugPrint('AppLocalizations not available: $e');
+                        }
                         return Text(
-                          '${localizations?.members ?? 'Members'}${_members.isNotEmpty ? ' (${_members.length})' : ''}',
+                          '$membersText${_members.isNotEmpty ? ' (${_members.length})' : ''}',
                           style: const TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.bold,
@@ -616,11 +624,11 @@ class _MembersSidebarState extends State<MembersSidebar> {
               padding: const EdgeInsets.all(12),
               child: Row(
                 children: [
-              const Icon(
-                CupertinoIcons.person_add,
-                color: AppColors.primary,
-                size: 20,
-              ),
+                  const Icon(
+                    CupertinoIcons.person_add,
+                    color: AppColors.primary,
+                    size: 20,
+                  ),
                   const SizedBox(width: 10),
                   const Expanded(
                     child: Text(
@@ -646,8 +654,8 @@ class _MembersSidebarState extends State<MembersSidebar> {
           // Expandable invite form
           if (_isExpanded) ...[
             Container(height: 0.5, color: CupertinoColors.separator),
-              Padding(
-                padding: const EdgeInsets.all(12),
+            Padding(
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -792,10 +800,7 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
             : AppColors.surface,
         borderRadius: BorderRadius.circular(10),
         border: widget.isCurrentUser
-            ? Border.all(
-                color: AppColors.primary.withOpacity(0.4),
-                width: 1,
-              )
+            ? Border.all(color: AppColors.primary.withOpacity(0.4), width: 1)
             : null,
       ),
       child: Row(

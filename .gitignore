@@ -45,7 +45,6 @@ app.*.map.json
 /android/app/release
 
 
-.env
 .env.debug
 
 vendor/
@@ -53,3 +52,5 @@ vendor/
 *.p12
 
 dist/
+config.bat
+node_modules

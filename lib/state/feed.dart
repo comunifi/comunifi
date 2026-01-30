@@ -36,6 +36,13 @@ class FeedState with ChangeNotifier {
   /// Stream of post IDs that received new comments (for real-time UI updates)
   Stream<String> get commentUpdates => _commentUpdateController.stream;
 
+  /// Notify about a comment update on a post (called by GroupState for group comments)
+  /// This allows group comments to trigger feed comment count updates
+  void notifyCommentUpdate(String postId) {
+    _commentUpdateController.add(postId);
+    debugPrint('FeedState: Notified about comment update on post ${postId.substring(0, 8)}...');
+  }
+
   FeedState() {
     _initialize();
   }

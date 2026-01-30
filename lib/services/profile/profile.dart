@@ -87,20 +87,43 @@ class ProfileService {
   ProfileService(this._nostrService);
 
   /// Get profile for a public key
-  /// Checks cache first, then queries the relay if not found
+  /// Returns cached profile immediately if available, then fetches from relay in background
+  /// Follows pattern: display local -> async fetch remote -> merge -> display updated
   Future<ProfileData?> getProfile(String pubkey) async {
     try {
-      // First, try to get from cache
+      // First, try to get from cache (for immediate display)
       final cachedEvents = await _nostrService.queryCachedEvents(
         pubkey: pubkey,
         kind: 0, // Kind 0 is profile metadata
         limit: 1,
       );
 
+      ProfileData? cachedProfile;
       if (cachedEvents.isNotEmpty) {
         // Get the most recent profile event
         cachedEvents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-        return ProfileData.fromEvent(cachedEvents.first);
+        cachedProfile = ProfileData.fromEvent(cachedEvents.first);
+        
+        // Always fetch from relay in background to keep cache fresh
+        // This follows the pattern: display local -> async fetch remote -> merge -> display updated
+        if (_nostrService.isConnected) {
+          Future.microtask(() async {
+            try {
+              await _nostrService.requestPastEvents(
+                kind: 0,
+                authors: [pubkey],
+                limit: 1,
+                useCache: true, // Will return cache immediately and fetch in background
+              );
+              debugPrint('Background profile fetch completed for $pubkey');
+            } catch (e) {
+              debugPrint('Background profile fetch failed (non-critical): $e');
+              // Don't throw - cache is already displayed
+            }
+          });
+        }
+        
+        return cachedProfile;
       }
 
       // If not in cache, query the relay
@@ -113,7 +136,7 @@ class ProfileService {
         kind: 0,
         authors: [pubkey],
         limit: 1,
-        useCache: false, // We already checked cache
+        useCache: false, // No cache to check
       );
 
       if (remoteEvents.isNotEmpty) {
