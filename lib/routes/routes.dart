@@ -1,4 +1,5 @@
 import 'package:comunifi/screens/feed/feed_screen.dart';
+import 'package:comunifi/screens/invitations/invitations_screen.dart';
 import 'package:comunifi/screens/onboarding_screen.dart';
 import 'package:comunifi/screens/onboarding/backup_prompt_screen.dart';
 import 'package:comunifi/screens/onboarding/profile_setup_screen.dart';
@@ -102,6 +103,14 @@ GoRouter createRouter(
           create: (_) => PostDetailState(postId),
           child: PostDetailScreen(postId: postId),
         );
+      },
+    ),
+    GoRoute(
+      name: 'Invitations',
+      path: '/invitations',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        return const InvitationsScreen();
       },
     ),
   ],

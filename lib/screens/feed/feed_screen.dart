@@ -52,13 +52,13 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
   bool _isPublishing = false;
   String? _publishError;
   bool _isLeftSidebarOpen = false;
-  
+
   // Right sidebar state management
   RightSidebarType _rightSidebarOpen = RightSidebarType.none;
-  
+
   // Track previous activeGroup to detect when a group is opened
   MlsGroup? _previousActiveGroup;
-  
+
   Uint8List? _selectedImageBytes;
   String? _selectedImageMimeType;
   bool _hasFetchedDiscoveredGroups = false;
@@ -77,6 +77,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
 
       final groupState = context.read<GroupState>();
       final profileState = context.read<ProfileState>();
+      final feedState = context.read<FeedState>();
 
       // Set callback so GroupState can trigger profile creation
       groupState.setEnsureProfileCallback((
@@ -91,6 +92,12 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
         );
       });
 
+      // Set callback so GroupState can notify FeedState about group comment updates
+      // This bridges group comments to feed comment count updates
+      groupState.setGroupCommentUpdateCallback((postId) {
+        feedState.notifyCommentUpdate(postId);
+      });
+
       // Also ensure profile immediately if GroupState already has keys
       _ensureUserProfile();
 
@@ -101,10 +108,11 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
       // This ensures data is available even when sidebar isn't open (mobile)
       _fetchDiscoveredGroupsIfNeeded(groupState);
 
-      // Listen for profile and settings tap events from the titlebar
+      // Listen for profile, settings, and channels tap events from the titlebar
       final appState = context.read<AppState>();
       appState.profileTapNotifier.addListener(_onProfileTap);
       appState.settingsTapNotifier.addListener(_onSettingsTap);
+      appState.channelsTapNotifier.addListener(_onChannelsTap);
     });
   }
 
@@ -116,6 +124,9 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     _toggleRightSidebar(RightSidebarType.settings);
   }
 
+  void _onChannelsTap() {
+    _toggleRightSidebar(RightSidebarType.channels);
+  }
 
   void _toggleRightSidebar(RightSidebarType type) {
     setState(() {
@@ -140,8 +151,6 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
     // Sync to AppState for titlebar buttons
     context.read<AppState>().setRightSidebarType(null);
   }
-
-
 
   /// Fetches discovered groups if connected and not yet fetched
   void _fetchDiscoveredGroupsIfNeeded(GroupState groupState) {
@@ -260,6 +269,7 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
       final appState = context.read<AppState>();
       appState.profileTapNotifier.removeListener(_onProfileTap);
       appState.settingsTapNotifier.removeListener(_onSettingsTap);
+      appState.channelsTapNotifier.removeListener(_onChannelsTap);
     } catch (_) {
       // Context may not be available during dispose
     }
@@ -491,14 +501,17 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
         // Compare by group ID to detect actual group changes
         final previousGroupId = _previousActiveGroup?.id.bytes.toString();
         final currentGroupId = activeGroup?.id.bytes.toString();
-        final groupChanged = previousGroupId != currentGroupId && activeGroup != null;
-        
+        final groupChanged =
+            previousGroupId != currentGroupId && activeGroup != null;
+
         if (groupChanged) {
           // Group just opened or switched - close all sidebars and open channels sidebar
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
               _rightSidebarOpen = RightSidebarType.channels;
-              context.read<AppState>().setRightSidebarType(RightSidebarType.channels);
+              context.read<AppState>().setRightSidebarType(
+                RightSidebarType.channels,
+              );
               setState(() {});
             }
           });
@@ -893,7 +906,8 @@ class _FeedScreenState extends State<FeedScreen> with RouteAware {
                       isPublishing: _isPublishing,
                       error: _publishError,
                       onPublish: _publishMessage,
-                      placeholder: localizations?.writeMessage ?? 'Write a message',
+                      placeholder:
+                          localizations?.writeMessage ?? 'Write a message',
                       onErrorDismiss: () {
                         setState(() {
                           _publishError = null;
@@ -1528,7 +1542,9 @@ class _EventItemContentWidget extends StatelessWidget {
     final isWideScreen = screenWidth > wideScreenBreakpoint;
     final rightSidebarOpen = appState.rightSidebarType.value != null;
     final availableWidth = isWideScreen
-        ? screenWidth - groupsSidebarWidth - (rightSidebarOpen ? profileSidebarWidth : 0)
+        ? screenWidth -
+              groupsSidebarWidth -
+              (rightSidebarOpen ? profileSidebarWidth : 0)
         : screenWidth;
     // Use optimal post width or available width, whichever is smaller
     final maxContentWidth = availableWidth < optimalPostMaxWidth
@@ -1538,9 +1554,7 @@ class _EventItemContentWidget extends StatelessWidget {
     final hasGroupFrame = groupName != null && groupIdHex != null;
 
     // Center align posts on wide screens (with or without right sidebar), left align on narrow screens
-    final alignment = isWideScreen
-        ? Alignment.center
-        : Alignment.centerLeft;
+    final alignment = isWideScreen ? Alignment.center : Alignment.centerLeft;
 
     return Align(
       alignment: alignment,
@@ -2257,7 +2271,23 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
   // Profile photo and info section
   static const double _profilePhotoSize = 80.0;
   static const double _profileOverlap = 40.0;
-  static const double _infoSectionHeight = 55.0;
+  // Base height for group name and navigation buttons
+  static const double _baseInfoSectionHeight = 55.0;
+  // Height for channel name (8px top padding + ~20px for text)
+  static const double _channelNameHeight = 28.0;
+  // Additional height when description is present (4px spacing + ~40px for 2 lines of text)
+  static const double _descriptionHeight = 44.0;
+
+  // Dynamic info section height based on whether description is present
+  // Always reserve space for channel name, add extra for description if present
+  double get _infoSectionHeight {
+    final groupAbout = announcement?.about;
+    final hasDescription = groupAbout != null && groupAbout.isNotEmpty;
+    // Base height + channel name (always) + description (if present)
+    return _baseInfoSectionHeight + 
+           _channelNameHeight + 
+           (hasDescription ? _descriptionHeight : 0.0);
+  }
 
   static const LinearGradient _defaultGroupCoverGradient = LinearGradient(
     colors: <Color>[AppColors.primary, AppColors.accent],
@@ -2466,97 +2496,173 @@ class _CollapsingGroupHeaderDelegate extends SliverPersistentHeaderDelegate {
                   children: [
                     Row(
                       children: [
-                          Expanded(
-                            child: GestureDetector(
-                              onTap: isAdmin ? onEditTap : null,
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: isAdmin ? onEditTap : null,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    groupName,
+                                    style: const TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                                if (isAdmin) ...[
+                                  const SizedBox(width: 8),
+                                  Icon(
+                                    CupertinoIcons.pencil,
+                                    size: 16,
+                                    color: CupertinoColors.activeBlue
+                                        .resolveFrom(context),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                        // Channels and Members buttons
+                        if (onChannelsTap != null || onMembersTap != null) ...[
+                          if (onChannelsTap != null)
+                            Builder(
+                              builder: (context) {
+                                final groupState = context.watch<GroupState>();
+                                final groupIdHex = group.id.bytes
+                                    .map(
+                                      (b) =>
+                                          b.toRadixString(16).padLeft(2, '0'),
+                                    )
+                                    .join();
+                                final totalUnread = groupState
+                                    .getTotalUnreadCountForGroup(groupIdHex);
+
+                                return CupertinoButton(
+                                  padding: EdgeInsets.zero,
+                                  minSize: 0,
+                                  onPressed: onChannelsTap,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        CupertinoIcons.bubble_left_bubble_right,
+                                        size: 20,
+                                        color:
+                                            rightSidebarOpen ==
+                                                RightSidebarType.channels
+                                            ? CupertinoColors.activeBlue
+                                            : CupertinoColors.label,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        localizations?.discussions ??
+                                            'Discussions',
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          color:
+                                              rightSidebarOpen ==
+                                                  RightSidebarType.channels
+                                              ? CupertinoColors.activeBlue
+                                              : CupertinoColors.label,
+                                        ),
+                                      ),
+                                      if (totalUnread > 0) ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 2,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: CupertinoColors.systemRed,
+                                            borderRadius: BorderRadius.circular(
+                                              10,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            totalUnread > 99
+                                                ? '99+'
+                                                : totalUnread.toString(),
+                                            style: const TextStyle(
+                                              color: CupertinoColors.white,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          if (onChannelsTap != null && onMembersTap != null)
+                            const SizedBox(width: 12),
+                          if (onMembersTap != null)
+                            CupertinoButton(
+                              padding: EdgeInsets.zero,
+                              minSize: 0,
+                              onPressed: onMembersTap,
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Flexible(
-                                    child: Text(
-                                      groupName,
-                                      style: const TextStyle(
-                                        fontSize: 22,
-                                        fontWeight: FontWeight.bold,
-                                      ),
+                                  Icon(
+                                    CupertinoIcons.person_2,
+                                    size: 20,
+                                    color:
+                                        rightSidebarOpen ==
+                                            RightSidebarType.members
+                                        ? CupertinoColors.activeBlue
+                                        : CupertinoColors.label,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    localizations?.members ?? 'Members',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      color:
+                                          rightSidebarOpen ==
+                                              RightSidebarType.members
+                                          ? CupertinoColors.activeBlue
+                                          : CupertinoColors.label,
                                     ),
                                   ),
-                                  if (isAdmin) ...[
-                                    const SizedBox(width: 8),
-                                    Icon(
-                                      CupertinoIcons.pencil,
-                                      size: 16,
-                                      color: CupertinoColors.activeBlue.resolveFrom(
-                                        context,
-                                      ),
-                                    ),
-                                  ],
                                 ],
                               ),
                             ),
-                          ),
-                          // Channels and Members buttons
-                          if (onChannelsTap != null || onMembersTap != null) ...[
-                            if (onChannelsTap != null)
-                              CupertinoButton(
-                                padding: EdgeInsets.zero,
-                                minSize: 0,
-                                onPressed: onChannelsTap,
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      CupertinoIcons.bubble_left_bubble_right,
-                                      size: 20,
-                                      color: rightSidebarOpen == RightSidebarType.channels
-                                          ? CupertinoColors.activeBlue
-                                          : CupertinoColors.label,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      localizations?.discussions ?? 'Discussions',
-                                      style: TextStyle(
-                                        fontSize: 16,
-                                        color: rightSidebarOpen == RightSidebarType.channels
-                                            ? CupertinoColors.activeBlue
-                                            : CupertinoColors.label,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            if (onChannelsTap != null && onMembersTap != null)
-                              const SizedBox(width: 12),
-                            if (onMembersTap != null)
-                              CupertinoButton(
-                                padding: EdgeInsets.zero,
-                                minSize: 0,
-                                onPressed: onMembersTap,
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      CupertinoIcons.person_2,
-                                      size: 20,
-                                      color: rightSidebarOpen == RightSidebarType.members
-                                          ? CupertinoColors.activeBlue
-                                          : CupertinoColors.label,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      localizations?.members ?? 'Members',
-                                      style: TextStyle(
-                                        fontSize: 16,
-                                        color: rightSidebarOpen == RightSidebarType.members
-                                            ? CupertinoColors.activeBlue
-                                            : CupertinoColors.label,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                          ],
+                        ],
                       ],
+                    ),
+                    // Channel name display
+                    Builder(
+                      builder: (context) {
+                        final groupState = context.watch<GroupState>();
+                        final activeChannelName = groupState.activeChannelName;
+                        return GestureDetector(
+                          onTap: onChannelsTap,
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  '#$activeChannelName',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w500,
+                                    color: rightSidebarOpen ==
+                                            RightSidebarType.channels
+                                        ? CupertinoColors.activeBlue
+                                        : CupertinoColors.secondaryLabel,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
                     ),
                     if (groupAbout != null && groupAbout.isNotEmpty) ...[
                       const SizedBox(height: 4),
@@ -3374,11 +3480,15 @@ class _ComposeMessageWidgetState extends State<_ComposeMessageWidget> {
                         children: [
                           Builder(
                             builder: (context) {
-                              final localizations = AppLocalizations.of(context);
+                              final localizations = AppLocalizations.of(
+                                context,
+                              );
                               return CupertinoTextField(
                                 controller: widget.controller,
-                                placeholder: widget.placeholder ?? 
-                                    (localizations?.writeMessageEllipsis ?? 'Write a message...'),
+                                placeholder:
+                                    widget.placeholder ??
+                                    (localizations?.writeMessageEllipsis ??
+                                        'Write a message...'),
                                 maxLines: null,
                                 minLines: 1,
                                 textInputAction: TextInputAction.newline,
@@ -3388,7 +3498,8 @@ class _ComposeMessageWidgetState extends State<_ComposeMessageWidget> {
                                   top: 8.0,
                                   bottom:
                                       widget.groupState != null &&
-                                          widget.groupState!.activeGroup != null &&
+                                          widget.groupState!.activeGroup !=
+                                              null &&
                                           widget.controller.text.isNotEmpty &&
                                           _extractedHashtags.isNotEmpty
                                       ? 40.0 // Space for badges
@@ -3753,7 +3864,9 @@ class _ExploreGroupsViewState extends State<_ExploreGroupsView> {
                   final localizations = AppLocalizations.of(context);
                   return CupertinoSearchTextField(
                     controller: _searchController,
-                    placeholder: localizations?.searchGroupsOnRelay ?? 'Search groups on relay...',
+                    placeholder:
+                        localizations?.searchGroupsOnRelay ??
+                        'Search groups on relay...',
                   );
                 },
               ),
@@ -4028,8 +4141,12 @@ class _WelcomeCard extends StatelessWidget {
                   builder: (context) {
                     final localizations = AppLocalizations.of(context);
                     return Text(
-                      localizations?.welcomeToComunifi ?? 'Welcome to Comunifi!',
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                      localizations?.welcomeToComunifi ??
+                          'Welcome to Comunifi!',
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
                     );
                   },
                 ),
@@ -4041,7 +4158,8 @@ class _WelcomeCard extends StatelessWidget {
             builder: (context) {
               final localizations = AppLocalizations.of(context);
               return Text(
-                localizations?.welcomeDescription ?? 'Create your first group or explore existing ones to get started. Groups are private spaces where you can share posts with members.',
+                localizations?.welcomeDescription ??
+                    'Create your first group or explore existing ones to get started. Groups are private spaces where you can share posts with members.',
                 style: const TextStyle(
                   fontSize: 15,
                   color: CupertinoColors.secondaryLabel,

@@ -29,6 +29,10 @@ class AppState with ChangeNotifier {
   /// FeedScreen listens to this and opens the settings sidebar.
   final ValueNotifier<int> settingsTapNotifier = ValueNotifier<int>(0);
 
+  /// Notifier for channels tap events in the titlebar.
+  /// FeedScreen listens to this and opens the channels sidebar.
+  final ValueNotifier<int> channelsTapNotifier = ValueNotifier<int>(0);
+
   /// Notifier for the current right sidebar type.
   /// Titlebar buttons watch this to show active state.
   final ValueNotifier<RightSidebarType?> rightSidebarType =
@@ -48,6 +52,11 @@ class AppState with ChangeNotifier {
   /// Call this when the settings button in the titlebar is tapped.
   void onSettingsTap() {
     settingsTapNotifier.value++;
+  }
+
+  /// Call this when the channels button/channel name in the titlebar is tapped.
+  void onChannelsTap() {
+    channelsTapNotifier.value++;
   }
 
   /// Update the current right sidebar type.
