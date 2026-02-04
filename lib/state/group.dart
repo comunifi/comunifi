@@ -916,6 +916,7 @@ class GroupState with ChangeNotifier {
     _groupEventSubscription?.cancel();
     _messageEventSubscription?.cancel();
     _encryptedEnvelopeSubscription?.cancel();
+    _joinRequestSubscription?.cancel();
     _reactionUpdateController.close();
     _commentUpdateController.close();
     _nostrService?.disconnect();
@@ -3973,12 +3974,24 @@ class GroupState with ChangeNotifier {
   StreamSubscription<NostrEventModel>? _groupMetadataSubscription;
   StreamSubscription<NostrEventModel>? _groupAdminsSubscription;
   StreamSubscription<NostrEventModel>? _groupMembersSubscription;
+  // Subscription for kind:9000 put-user events for admin's groups (to see new members)
+  StreamSubscription<NostrEventModel>? _groupPutUserSubscription;
 
   // Subscription for kind:9009 invite events
   StreamSubscription<NostrEventModel>? _inviteEventSubscription;
 
+  // Subscription for kind:1060 Welcome messages
+  StreamSubscription<NostrEventModel>? _welcomeMessageSubscription;
+
   // Subscription for kind:9000 put-user events (to detect auto-approval after join requests)
   StreamSubscription<NostrEventModel>? _putUserEventSubscription;
+
+  // Subscription for kind:9021 join request events (for admins to see new requests in real-time)
+  StreamSubscription<NostrEventModel>? _joinRequestSubscription;
+
+  // Track pending invites sent by admin: invitee pubkey -> group ID
+  // When user accepts and is added via kind:9000, we auto-send MLS Welcome
+  final Map<String, String> _pendingSentInvites = {};
 
   Future<void> _startListeningForGroupEvents() async {
     debugPrint(
@@ -4183,6 +4196,10 @@ class GroupState with ChangeNotifier {
             );
       }
 
+      // Listen for MLS Welcome messages (kind 1060) addressed to us
+      // These are sent when we accept an invite and the admin adds us to the group
+      await _setupWelcomeMessageListener();
+
       // Listen for new NIP-29 create-group events (kind 9007) to keep DB and cache updated
       _nostrService!
           .listenToEvents(kind: kindCreateGroup, limit: null)
@@ -4313,20 +4330,23 @@ class GroupState with ChangeNotifier {
   void _startListeningForGroupMetadataUpdates() {
     if (_nostrService == null || !_isConnected) return;
 
-    // Get the list of group IDs we're a member of
-    final groupIds = _mlsGroups.keys.toList();
+    // Get the list of NIP-29 group IDs we're a member of
+    // Must use NIP-29 IDs (not MLS IDs) because kind 39xxx events use NIP-29 IDs in 'd' tag
+    final mlsGroupIds = _mlsGroups.keys.toList();
+    final groupIds = mlsGroupIds.map((mlsId) => getNip29GroupId(mlsId)).toList();
     if (groupIds.isEmpty) {
       debugPrint('No groups to listen for metadata updates');
       return;
     }
 
     try {
-      // Cancel existing subscriptions
+      // Cancel existing subscriptions (only the ones we recreate here)
+      // Note: Do NOT cancel _inviteEventSubscription or _putUserEventSubscription
+      // - those are managed separately and filter by the user's pubkey
       _groupMetadataSubscription?.cancel();
       _groupAdminsSubscription?.cancel();
       _groupMembersSubscription?.cancel();
-      _inviteEventSubscription?.cancel();
-      _putUserEventSubscription?.cancel();
+      _groupPutUserSubscription?.cancel();
 
       // Subscribe to kind 39000 (group metadata) updates
       _groupMetadataSubscription = _nostrService!
@@ -4373,11 +4393,263 @@ class GroupState with ChangeNotifier {
             },
           );
 
+      // Subscribe to kind 9000 (put-user) events for our groups
+      // This lets admins see when new members are added to their groups in real-time
+      _groupPutUserSubscription?.cancel();
+      _groupPutUserSubscription = _nostrService!
+          .listenToEvents(
+            kind: kindPutUser,
+            tags: groupIds,
+            tagKey: 'h', // Filter by group ID in 'h' tag
+            limit: null,
+          )
+          .listen(
+            (event) {
+              debugPrint(
+                'Received put-user event for group (admin view): ${event.id.substring(0, 8)}...',
+              );
+              // Trigger member list refresh when any user is added to our groups
+              invalidateMembershipCache(notify: true);
+
+              // Check if this is a user we invited and auto-send Welcome message
+              _handlePutUserForInvitedMember(event);
+            },
+            onError: (error) {
+              debugPrint('Error listening to group put-user events: $error');
+            },
+          );
+
       debugPrint(
-        'Started listening for 39xxx metadata updates (${groupIds.length} groups)',
+        'Started listening for 39xxx metadata updates (${groupIds.length} groups): $groupIds',
       );
+
+      // Start listening for join requests (kind 9021) for groups where we are admin
+      _startListeningForJoinRequests();
     } catch (e) {
       debugPrint('Failed to start listening for metadata updates: $e');
+    }
+  }
+
+  /// Start listening for join requests (kind 9021) for groups where we are admin.
+  /// When a new join request comes in, this increments the membership cache version
+  /// so the MembersSidebar (and other UI) refreshes to show the new request.
+  Future<void> _startListeningForJoinRequests() async {
+    debugPrint(
+      'JOIN_REQUEST_LISTENER: Starting setup - service: ${_nostrService != null}, connected: $_isConnected',
+    );
+    if (_nostrService == null || !_isConnected) return;
+
+    final ourPubkey = await getNostrPublicKey();
+    if (ourPubkey == null) {
+      debugPrint('JOIN_REQUEST_LISTENER: No pubkey available, skipping');
+      return;
+    }
+
+    debugPrint(
+      'JOIN_REQUEST_LISTENER: Our pubkey: ${ourPubkey.substring(0, 8)}..., checking ${_mlsGroups.length} groups',
+    );
+
+    // Get NIP-29 group IDs for groups where we are admin
+    // Include both:
+    // 1. Groups where we're listed as admin (kind 39001)
+    // 2. Groups we created (we're always admin of these, even before relay confirms)
+    final adminGroupIds = <String>{};
+    for (final mlsId in _mlsGroups.keys) {
+      final nip29Id = getNip29GroupId(mlsId);
+
+      // Check if we created this group (from local cache)
+      final announcement = _groupAnnouncementCache[mlsId] ??
+          _groupAnnouncementCache[nip29Id];
+      if (announcement != null && announcement.pubkey == ourPubkey) {
+        debugPrint(
+          'JOIN_REQUEST_LISTENER: Group $nip29Id - we are creator (from cache)',
+        );
+        adminGroupIds.add(nip29Id);
+        continue;
+      }
+
+      // Check if we're admin according to relay
+      if (await isGroupAdmin(mlsId)) {
+        debugPrint(
+          'JOIN_REQUEST_LISTENER: Group $nip29Id - we are admin (from relay)',
+        );
+        adminGroupIds.add(nip29Id);
+      } else {
+        debugPrint(
+          'JOIN_REQUEST_LISTENER: Group $nip29Id - not admin (cache: ${announcement != null}, creator: ${announcement?.pubkey?.substring(0, 8) ?? "null"})',
+        );
+      }
+    }
+
+    if (adminGroupIds.isEmpty) {
+      debugPrint('No admin groups to listen for join requests');
+      return;
+    }
+
+    try {
+      _joinRequestSubscription?.cancel();
+
+      final adminGroupIdsList = adminGroupIds.toList();
+      _joinRequestSubscription = _nostrService!
+          .listenToEvents(
+            kind: kindJoinRequest, // 9021
+            tags: adminGroupIdsList,
+            tagKey: 'h',
+            limit: null,
+          )
+          .listen(
+            (event) => _handleJoinRequestEvent(event),
+            onError: (error) {
+              debugPrint('Error listening to join requests: $error');
+            },
+          );
+
+      debugPrint(
+        'Started listening for join requests (${adminGroupIdsList.length} admin groups): $adminGroupIdsList',
+      );
+    } catch (e) {
+      debugPrint('Failed to start join request listener: $e');
+    }
+  }
+
+  /// Handle a new join request event (kind 9021).
+  /// Triggers UI refresh so admins see the new request in real-time.
+  Future<void> _handleJoinRequestEvent(NostrEventModel event) async {
+    debugPrint(
+      'JOIN_REQUEST_HANDLER: Received event ${event.id.substring(0, 8)}... from ${event.pubkey.substring(0, 8)}...',
+    );
+
+    // Extract group ID from 'h' tag
+    String? groupIdHex;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'h' && tag.length >= 2) {
+        groupIdHex = tag[1];
+        break;
+      }
+    }
+    if (groupIdHex == null) {
+      debugPrint('JOIN_REQUEST_HANDLER: No group ID (h tag) found, ignoring');
+      return;
+    }
+
+    debugPrint('JOIN_REQUEST_HANDLER: For group $groupIdHex');
+
+    // Find the MLS group ID for this NIP-29 group
+    String? mlsGroupId;
+    for (final entry in _mlsToNip29GroupId.entries) {
+      if (entry.value == groupIdHex) {
+        mlsGroupId = entry.key;
+        break;
+      }
+    }
+    // If no mapping exists, the NIP-29 ID is the same as MLS ID
+    mlsGroupId ??= groupIdHex;
+
+    // Check if requester is already a member (skip if so)
+    if (_mlsGroups.containsKey(mlsGroupId)) {
+      try {
+        final members = await getGroupMembers(mlsGroupId);
+        if (members.any((m) => m.pubkey == event.pubkey)) {
+          debugPrint(
+            'JOIN_REQUEST_HANDLER: User ${event.pubkey.substring(0, 8)}... is already a member, ignoring',
+          );
+          return; // Already a member, ignore this request
+        }
+      } catch (_) {
+        // Continue anyway - better to show a potentially stale request
+      }
+    }
+
+    debugPrint(
+      'JOIN_REQUEST_HANDLER: New join request from ${event.pubkey.substring(0, 8)}... for group $groupIdHex - triggering UI refresh',
+    );
+
+    // Trigger UI refresh via existing cache invalidation pattern
+    _membershipCacheVersion++;
+    safeNotifyListeners();
+  }
+
+  /// Handle put-user event for a user we invited - auto-send MLS Welcome message
+  void _handlePutUserForInvitedMember(NostrEventModel event) {
+    // Extract the added user's pubkey from 'p' tag
+    String? addedPubkey;
+    String? groupIdHex;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'p' && tag.length >= 2) {
+        addedPubkey = tag[1];
+      }
+      if (tag.isNotEmpty && tag[0] == 'h' && tag.length >= 2) {
+        groupIdHex = tag[1];
+      }
+    }
+
+    if (addedPubkey == null || groupIdHex == null) return;
+
+    // Check if this user is in our pending invites
+    final pendingGroupId = _pendingSentInvites[addedPubkey];
+    if (pendingGroupId == null) {
+      debugPrint(
+        'Put-user for $addedPubkey not in pending invites, skipping Welcome',
+      );
+      return;
+    }
+
+    // Verify group ID matches (handle both MLS and NIP-29 ID formats)
+    final mlsGroupId = pendingGroupId;
+    final nip29GroupId = getNip29GroupId(pendingGroupId);
+    if (groupIdHex != mlsGroupId && groupIdHex != nip29GroupId) {
+      debugPrint(
+        'Put-user group $groupIdHex does not match pending invite group $pendingGroupId',
+      );
+      return;
+    }
+
+    // Remove from pending invites
+    _pendingSentInvites.remove(addedPubkey);
+
+    debugPrint(
+      'User $addedPubkey accepted invite to group $groupIdHex, auto-sending MLS Welcome',
+    );
+
+    // Auto-send Welcome message
+    // Need to ensure the active group is set correctly
+    _autoSendWelcomeToInvitee(addedPubkey, mlsGroupId);
+  }
+
+  /// Auto-send MLS Welcome message to an invitee who just joined
+  Future<void> _autoSendWelcomeToInvitee(
+    String inviteePubkey,
+    String groupIdHex,
+  ) async {
+    try {
+      // Find the group
+      final group = _mlsGroups[groupIdHex];
+      if (group == null) {
+        debugPrint('Cannot send Welcome: group $groupIdHex not found in MLS groups');
+        return;
+      }
+
+      // Temporarily set as active group if needed
+      final previousActiveGroup = _activeGroup;
+      if (_activeGroup?.id != group.id) {
+        _activeGroup = group;
+      }
+
+      try {
+        // Use approveJoinRequest which handles fetching HPKE keys and sending Welcome
+        await approveJoinRequest(inviteePubkey);
+        debugPrint(
+          'Auto-sent MLS Welcome to ${inviteePubkey.substring(0, 8)}... for group $groupIdHex',
+        );
+      } finally {
+        // Restore previous active group
+        if (previousActiveGroup != null && _activeGroup?.id != previousActiveGroup.id) {
+          _activeGroup = previousActiveGroup;
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to auto-send Welcome to $inviteePubkey: $e');
+      // Don't rethrow - this is a background operation
     }
   }
 
@@ -4482,6 +4754,10 @@ class GroupState with ChangeNotifier {
     // Invalidate membership cache to force refresh on next access
     _membershipCacheLoaded = false;
 
+    // Re-setup join request listener since admin status may have changed
+    // (we may now be admin of a new group, or no longer admin of an existing one)
+    _startListeningForJoinRequests();
+
     // Notify listeners so UI can refresh if needed
     safeNotifyListeners();
   }
@@ -4548,9 +4824,67 @@ class GroupState with ChangeNotifier {
     // Invalidate membership cache to force refresh
     invalidateMembershipCache(notify: true);
 
+    // Fetch and cache the group announcement so it appears in user's sidebar
+    await _ensureGroupAnnouncementCached(groupIdHex);
+
     // Note: The actual MLS group join may still need to happen separately
     // if Welcome messages are required for encryption. This depends on the
     // implementation details of how MLS groups are created after NIP-29 membership.
+  }
+
+  /// Fetch and cache group announcement (kind:39000) for a specific group.
+  /// This ensures the group appears in the sidebar after a user is added.
+  Future<void> _ensureGroupAnnouncementCached(String groupIdHex) async {
+    // Check if already in discoveredGroups
+    final existing = _discoveredGroups.any((g) => g.mlsGroupId == groupIdHex);
+    if (existing) {
+      debugPrint(
+        'Group $groupIdHex already in discoveredGroups, skipping fetch',
+      );
+      return;
+    }
+
+    if (_nostrService == null) {
+      debugPrint('Cannot fetch group announcement: NostrService not available');
+      return;
+    }
+
+    debugPrint('Fetching group announcement for $groupIdHex');
+
+    try {
+      // Fetch group metadata (kind:39000) from relay
+      final metadataEvents = await _nostrService!.requestPastEvents(
+        kind: kindGroupMetadata,
+        tags: [groupIdHex],
+        tagKey: 'd',
+        limit: 1,
+      );
+
+      if (metadataEvents.isNotEmpty) {
+        // Parse and add to discoveredGroups
+        final announcement = _parseGroupMetadataEvent(metadataEvents.first);
+        if (announcement != null) {
+          _discoveredGroups.insert(0, announcement);
+
+          // Also update caches for O(1) lookup
+          if (announcement.mlsGroupId != null) {
+            _groupAnnouncementCache[announcement.mlsGroupId!] = announcement;
+            if (announcement.name != null) {
+              _groupNameCache[announcement.mlsGroupId!] = announcement.name!;
+            }
+          }
+
+          debugPrint(
+            'Added group ${announcement.name ?? groupIdHex} to discoveredGroups',
+          );
+          safeNotifyListeners();
+        }
+      } else {
+        debugPrint('No group metadata found for $groupIdHex');
+      }
+    } catch (e) {
+      debugPrint('Error fetching group announcement for $groupIdHex: $e');
+    }
   }
 
   /// Handle kind 39002 (group members) event from relay
@@ -4584,10 +4918,8 @@ class GroupState with ChangeNotifier {
     );
 
     // Invalidate membership cache to force refresh on next access
-    _membershipCacheLoaded = false;
-
-    // Notify listeners so UI can refresh if needed
-    safeNotifyListeners();
+    // This increments _membershipCacheVersion so MembersSidebar detects the change
+    invalidateMembershipCache(notify: true);
   }
 
   /// Handle a decrypted kind 1 post from any group
@@ -4684,7 +5016,10 @@ class GroupState with ChangeNotifier {
   /// Restart the event listener when groups change
   /// Call this after joining or leaving a group
   void refreshGroupEventListener() {
+    debugPrint('refreshGroupEventListener: Refreshing all event subscriptions');
     _startListeningForAllGroupEvents();
+    // Also refresh metadata subscriptions (kind 39xxx, 9000) for new groups
+    _startListeningForGroupMetadataUpdates();
   }
 
   /// Handle incoming kind 9002 (edit-metadata) events
@@ -5543,6 +5878,57 @@ class GroupState with ChangeNotifier {
   /// This should be called when the user first reaches the feed screen
   Future<void> markOnboardingComplete() async {
     await secureStorage.write(key: _onboardingCompleteKey, value: 'true');
+    // Now that onboarding is complete, the user has a pubkey
+    // Set up the Welcome message listener to receive MLS group invitations
+    await _setupWelcomeMessageListener();
+  }
+
+  /// Set up listener for MLS Welcome messages (kind 1060)
+  /// This allows the user to receive group invitations after accepting an invite
+  /// Called from both _startListeningForGroupEvents (for existing users) and
+  /// markOnboardingComplete (for new users after onboarding)
+  Future<void> _setupWelcomeMessageListener() async {
+    if (_nostrService == null || !_isConnected) {
+      debugPrint('LISTENING FOR WELCOME: Not connected, skipping setup');
+      return;
+    }
+
+    final ourPubkey = await getNostrPublicKey();
+    debugPrint(
+      'LISTENING FOR WELCOME: Setting up kind:1060 listener - pubkey: ${ourPubkey != null ? "${ourPubkey.substring(0, 8)}..." : "NULL"}',
+    );
+
+    if (ourPubkey == null) {
+      debugPrint('LISTENING FOR WELCOME: Skipped - ourPubkey is null');
+      return;
+    }
+
+    // Cancel existing subscription if any
+    _welcomeMessageSubscription?.cancel();
+
+    _welcomeMessageSubscription = _nostrService!
+        .listenToEvents(
+          kind: kindMlsWelcome,
+          pTags: [ourPubkey], // Filter by recipient pubkey
+          limit: null,
+        )
+        .listen(
+          (event) {
+            debugPrint(
+              'LISTENING FOR WELCOME: Received kind:1060 event ${event.id.substring(0, 8)}...',
+            );
+            // Handle Welcome message to join the group
+            handleWelcomeInvitation(event).catchError((error) {
+              debugPrint('Error handling Welcome message: $error');
+            });
+          },
+          onError: (error) {
+            debugPrint('Error listening to Welcome messages: $error');
+          },
+        );
+    debugPrint(
+      'LISTENING FOR WELCOME: Subscription created for kind:1060 with pTags filter',
+    );
   }
 
   /// Derive HPKE key pair from Nostr private key
@@ -6404,6 +6790,12 @@ class GroupState with ChangeNotifier {
       // Publish invite event
       await _nostrService!.publishEvent(inviteEventModel.toJson());
 
+      // Track this invite so we can auto-send MLS Welcome when user accepts
+      _pendingSentInvites[inviteeNostrPubkey] = groupIdHex;
+      debugPrint(
+        'Tracking pending invite for $inviteeNostrPubkey -> $groupIdHex',
+      );
+
       debugPrint(
         'Created invite (kind:9009) for user $username (${inviteeNostrPubkey.substring(0, 8)}...) to group $nip29GroupId',
       );
@@ -7152,10 +7544,76 @@ class GroupState with ChangeNotifier {
       debugPrint(
         'Accepted invitation for group $groupIdHex (join request sent)',
       );
+
+      // Wait briefly for relay to generate the kind:9000 (put-user) event
+      // Then fetch memberships and ensure group announcement is cached
+      await _refreshMembershipAfterAccept(groupIdHex);
     } catch (e) {
       debugPrint('Failed to accept invitation: $e');
       rethrow;
     }
+  }
+
+  /// Refresh membership after accepting an invite
+  /// Polls for the kind:9000 event and updates the UI
+  Future<void> _refreshMembershipAfterAccept(String groupIdHex) async {
+    final userPubkey = await getNostrPublicKey();
+    if (userPubkey == null || _nostrService == null) return;
+
+    // Give relay time to process the join request and generate kind:9000
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    // Poll for the new kind:9000 event (up to 3 attempts)
+    for (int attempt = 0; attempt < 3; attempt++) {
+      debugPrint(
+        'Checking for membership confirmation for group $groupIdHex (attempt ${attempt + 1})',
+      );
+
+      // Fetch kind:9000 events for this user, bypassing cache to get latest
+      final putEvents = await _nostrService!.requestPastEvents(
+        kind: kindPutUser,
+        tags: [userPubkey],
+        tagKey: 'p',
+        limit: 100,
+        useCache: false, // Force network fetch to get latest
+      );
+
+      // Check if we found a put-user event for this group
+      final foundMembership = putEvents.any((event) {
+        final eventGroupId = event.tags
+            .firstWhere(
+              (tag) => tag.isNotEmpty && tag[0] == 'h' && tag.length >= 2,
+              orElse: () => [],
+            )
+            .elementAtOrNull(1);
+        return eventGroupId == groupIdHex;
+      });
+
+      if (foundMembership) {
+        debugPrint(
+          'Membership confirmed for group $groupIdHex',
+        );
+
+        // Ensure group announcement is cached so it appears in sidebar
+        await _ensureGroupAnnouncementCached(groupIdHex);
+
+        // Invalidate membership cache to trigger UI refresh
+        invalidateMembershipCache(notify: true);
+        return;
+      }
+
+      // Wait before next attempt
+      if (attempt < 2) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
+
+    // Even if we didn't find the event, still try to refresh
+    debugPrint(
+      'Membership event not found after polling, refreshing anyway for group $groupIdHex',
+    );
+    await _ensureGroupAnnouncementCached(groupIdHex);
+    invalidateMembershipCache(notify: true);
   }
 
   /// Reject a pending invitation (remove without joining)
@@ -8725,6 +9183,8 @@ class GroupState with ChangeNotifier {
     _groupEventSubscription = null;
     _messageEventSubscription?.cancel();
     _messageEventSubscription = null;
+    _joinRequestSubscription?.cancel();
+    _joinRequestSubscription = null;
     _dailyBackupTimer?.cancel();
     _dailyBackupTimer = null;
     _backupService = null;

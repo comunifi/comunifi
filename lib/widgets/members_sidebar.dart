@@ -188,7 +188,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
 
         // Reload members to show the new member
         if (_lastGroupIdHex != null) {
-          _loadMembers(groupState, _lastGroupIdHex!);
+          _loadMembers(groupState, _lastGroupIdHex!, forceRefresh: true);
         }
 
         // Show success message
@@ -326,7 +326,7 @@ class _MembersSidebarState extends State<MembersSidebar> {
 
         // Reload members after inviting
         if (_lastGroupIdHex != null) {
-          _loadMembers(groupState, _lastGroupIdHex!);
+          _loadMembers(groupState, _lastGroupIdHex!, forceRefresh: true);
         }
 
         // Show success toast

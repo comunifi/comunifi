@@ -1,0 +1,3 @@
+#include "Debug.xcconfig"
+PRODUCT_NAME = Comunifi Member
+PRODUCT_BUNDLE_IDENTIFIER = io.comunifi.app.member

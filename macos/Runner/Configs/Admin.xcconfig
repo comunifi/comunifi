@@ -1,0 +1,3 @@
+#include "Debug.xcconfig"
+PRODUCT_NAME = Comunifi Admin
+PRODUCT_BUNDLE_IDENTIFIER = io.comunifi.app.admin
