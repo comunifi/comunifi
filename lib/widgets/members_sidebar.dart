@@ -51,6 +51,9 @@ class _MembersSidebarState extends State<MembersSidebar> {
   // Track membership cache version to detect changes
   int _lastMembershipCacheVersion = -1;
 
+  // Track which members are being removed (for loading state)
+  Set<String> _removingPubkeys = {};
+
   @override
   void initState() {
     super.initState();
@@ -218,6 +221,89 @@ class _MembersSidebarState extends State<MembersSidebar> {
           builder: (context) => CupertinoAlertDialog(
             title: const Text('Error'),
             content: Text('Failed to approve request: $e'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _confirmAndRemoveMember(String pubkey, String displayName) async {
+    final confirmed = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Remove Member'),
+        content: Text('Are you sure you want to remove $displayName from the group?'),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            child: const Text('Remove'),
+            onPressed: () => Navigator.of(context).pop(true),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await _removeMember(pubkey);
+    }
+  }
+
+  Future<void> _removeMember(String pubkey) async {
+    if (_removingPubkeys.contains(pubkey)) return;
+
+    setState(() {
+      _removingPubkeys.add(pubkey);
+    });
+
+    try {
+      final groupState = context.read<GroupState>();
+      await groupState.removeGroupMember(pubkey);
+
+      if (mounted) {
+        setState(() {
+          _removingPubkeys.remove(pubkey);
+          // Remove from members list
+          _members.removeWhere((m) => m.pubkey == pubkey);
+        });
+
+        // Show success message
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Member Removed'),
+            content: const Text('The member has been removed from the group.'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _removingPubkeys.remove(pubkey);
+        });
+
+        // Show error message
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Error'),
+            content: Text('Failed to remove member: $e'),
             actions: [
               CupertinoDialogAction(
                 child: const Text('OK'),
@@ -484,6 +570,13 @@ class _MembersSidebarState extends State<MembersSidebar> {
                           key: ValueKey(member.pubkey),
                           member: member,
                           isCurrentUser: member.pubkey == _currentUserPubkey,
+                          isCurrentUserAdmin: _isAdmin,
+                          isRemoving: _removingPubkeys.contains(member.pubkey),
+                          onRemove: () => _confirmAndRemoveMember(
+                            member.pubkey,
+                            profileState.profiles[member.pubkey]?.getUsername() ??
+                                member.pubkey.substring(0, 8),
+                          ),
                           profileState: profileState,
                         ),
                       ),
@@ -761,12 +854,18 @@ class _MembersSidebarState extends State<MembersSidebar> {
 class _NIP29MemberTile extends StatefulWidget {
   final NIP29GroupMember member;
   final bool isCurrentUser;
+  final bool isCurrentUserAdmin;
+  final bool isRemoving;
+  final VoidCallback? onRemove;
   final ProfileState profileState;
 
   const _NIP29MemberTile({
     super.key,
     required this.member,
     required this.isCurrentUser,
+    this.isCurrentUserAdmin = false,
+    this.isRemoving = false,
+    this.onRemove,
     required this.profileState,
   });
 
@@ -917,6 +1016,25 @@ class _NIP29MemberTileState extends State<_NIP29MemberTile> {
               ],
             ),
           ),
+          // Remove button (visible for admins, non-self, non-admin members)
+          if (widget.isCurrentUserAdmin &&
+              !widget.isCurrentUser &&
+              !widget.member.isAdmin)
+            widget.isRemoving
+                ? const Padding(
+                    padding: EdgeInsets.only(left: 8),
+                    child: CupertinoActivityIndicator(radius: 10),
+                  )
+                : CupertinoButton(
+                    padding: const EdgeInsets.only(left: 8),
+                    minSize: 0,
+                    onPressed: widget.onRemove,
+                    child: const Icon(
+                      CupertinoIcons.minus_circle_fill,
+                      color: AppColors.error,
+                      size: 24,
+                    ),
+                  ),
         ],
       ),
     );
