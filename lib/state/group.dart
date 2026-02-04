@@ -916,6 +916,7 @@ class GroupState with ChangeNotifier {
     _groupEventSubscription?.cancel();
     _messageEventSubscription?.cancel();
     _encryptedEnvelopeSubscription?.cancel();
+    _joinRequestSubscription?.cancel();
     _reactionUpdateController.close();
     _commentUpdateController.close();
     _nostrService?.disconnect();
@@ -3985,6 +3986,9 @@ class GroupState with ChangeNotifier {
   // Subscription for kind:9000 put-user events (to detect auto-approval after join requests)
   StreamSubscription<NostrEventModel>? _putUserEventSubscription;
 
+  // Subscription for kind:9021 join request events (for admins to see new requests in real-time)
+  StreamSubscription<NostrEventModel>? _joinRequestSubscription;
+
   // Track pending invites sent by admin: invitee pubkey -> group ID
   // When user accepts and is added via kind:9000, we auto-send MLS Welcome
   final Map<String, String> _pendingSentInvites = {};
@@ -4418,9 +4422,151 @@ class GroupState with ChangeNotifier {
       debugPrint(
         'Started listening for 39xxx metadata updates (${groupIds.length} groups): $groupIds',
       );
+
+      // Start listening for join requests (kind 9021) for groups where we are admin
+      _startListeningForJoinRequests();
     } catch (e) {
       debugPrint('Failed to start listening for metadata updates: $e');
     }
+  }
+
+  /// Start listening for join requests (kind 9021) for groups where we are admin.
+  /// When a new join request comes in, this increments the membership cache version
+  /// so the MembersSidebar (and other UI) refreshes to show the new request.
+  Future<void> _startListeningForJoinRequests() async {
+    debugPrint(
+      'JOIN_REQUEST_LISTENER: Starting setup - service: ${_nostrService != null}, connected: $_isConnected',
+    );
+    if (_nostrService == null || !_isConnected) return;
+
+    final ourPubkey = await getNostrPublicKey();
+    if (ourPubkey == null) {
+      debugPrint('JOIN_REQUEST_LISTENER: No pubkey available, skipping');
+      return;
+    }
+
+    debugPrint(
+      'JOIN_REQUEST_LISTENER: Our pubkey: ${ourPubkey.substring(0, 8)}..., checking ${_mlsGroups.length} groups',
+    );
+
+    // Get NIP-29 group IDs for groups where we are admin
+    // Include both:
+    // 1. Groups where we're listed as admin (kind 39001)
+    // 2. Groups we created (we're always admin of these, even before relay confirms)
+    final adminGroupIds = <String>{};
+    for (final mlsId in _mlsGroups.keys) {
+      final nip29Id = getNip29GroupId(mlsId);
+
+      // Check if we created this group (from local cache)
+      final announcement = _groupAnnouncementCache[mlsId] ??
+          _groupAnnouncementCache[nip29Id];
+      if (announcement != null && announcement.pubkey == ourPubkey) {
+        debugPrint(
+          'JOIN_REQUEST_LISTENER: Group $nip29Id - we are creator (from cache)',
+        );
+        adminGroupIds.add(nip29Id);
+        continue;
+      }
+
+      // Check if we're admin according to relay
+      if (await isGroupAdmin(mlsId)) {
+        debugPrint(
+          'JOIN_REQUEST_LISTENER: Group $nip29Id - we are admin (from relay)',
+        );
+        adminGroupIds.add(nip29Id);
+      } else {
+        debugPrint(
+          'JOIN_REQUEST_LISTENER: Group $nip29Id - not admin (cache: ${announcement != null}, creator: ${announcement?.pubkey?.substring(0, 8) ?? "null"})',
+        );
+      }
+    }
+
+    if (adminGroupIds.isEmpty) {
+      debugPrint('No admin groups to listen for join requests');
+      return;
+    }
+
+    try {
+      _joinRequestSubscription?.cancel();
+
+      final adminGroupIdsList = adminGroupIds.toList();
+      _joinRequestSubscription = _nostrService!
+          .listenToEvents(
+            kind: kindJoinRequest, // 9021
+            tags: adminGroupIdsList,
+            tagKey: 'h',
+            limit: null,
+          )
+          .listen(
+            (event) => _handleJoinRequestEvent(event),
+            onError: (error) {
+              debugPrint('Error listening to join requests: $error');
+            },
+          );
+
+      debugPrint(
+        'Started listening for join requests (${adminGroupIdsList.length} admin groups): $adminGroupIdsList',
+      );
+    } catch (e) {
+      debugPrint('Failed to start join request listener: $e');
+    }
+  }
+
+  /// Handle a new join request event (kind 9021).
+  /// Triggers UI refresh so admins see the new request in real-time.
+  Future<void> _handleJoinRequestEvent(NostrEventModel event) async {
+    debugPrint(
+      'JOIN_REQUEST_HANDLER: Received event ${event.id.substring(0, 8)}... from ${event.pubkey.substring(0, 8)}...',
+    );
+
+    // Extract group ID from 'h' tag
+    String? groupIdHex;
+    for (final tag in event.tags) {
+      if (tag.isNotEmpty && tag[0] == 'h' && tag.length >= 2) {
+        groupIdHex = tag[1];
+        break;
+      }
+    }
+    if (groupIdHex == null) {
+      debugPrint('JOIN_REQUEST_HANDLER: No group ID (h tag) found, ignoring');
+      return;
+    }
+
+    debugPrint('JOIN_REQUEST_HANDLER: For group $groupIdHex');
+
+    // Find the MLS group ID for this NIP-29 group
+    String? mlsGroupId;
+    for (final entry in _mlsToNip29GroupId.entries) {
+      if (entry.value == groupIdHex) {
+        mlsGroupId = entry.key;
+        break;
+      }
+    }
+    // If no mapping exists, the NIP-29 ID is the same as MLS ID
+    mlsGroupId ??= groupIdHex;
+
+    // Check if requester is already a member (skip if so)
+    if (_mlsGroups.containsKey(mlsGroupId)) {
+      try {
+        final members = await getGroupMembers(mlsGroupId);
+        if (members.any((m) => m.pubkey == event.pubkey)) {
+          debugPrint(
+            'JOIN_REQUEST_HANDLER: User ${event.pubkey.substring(0, 8)}... is already a member, ignoring',
+          );
+          return; // Already a member, ignore this request
+        }
+      } catch (_) {
+        // Continue anyway - better to show a potentially stale request
+      }
+    }
+
+    debugPrint(
+      'JOIN_REQUEST_HANDLER: New join request from ${event.pubkey.substring(0, 8)}... for group $groupIdHex - triggering UI refresh',
+    );
+
+    // Trigger UI refresh via existing cache invalidation pattern
+    _membershipCacheVersion++;
+    safeNotifyListeners();
   }
 
   /// Handle put-user event for a user we invited - auto-send MLS Welcome message
@@ -4607,6 +4753,10 @@ class GroupState with ChangeNotifier {
 
     // Invalidate membership cache to force refresh on next access
     _membershipCacheLoaded = false;
+
+    // Re-setup join request listener since admin status may have changed
+    // (we may now be admin of a new group, or no longer admin of an existing one)
+    _startListeningForJoinRequests();
 
     // Notify listeners so UI can refresh if needed
     safeNotifyListeners();
@@ -9033,6 +9183,8 @@ class GroupState with ChangeNotifier {
     _groupEventSubscription = null;
     _messageEventSubscription?.cancel();
     _messageEventSubscription = null;
+    _joinRequestSubscription?.cancel();
+    _joinRequestSubscription = null;
     _dailyBackupTimer?.cancel();
     _dailyBackupTimer = null;
     _backupService = null;
