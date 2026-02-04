@@ -43,7 +43,7 @@ import 'package:comunifi/models/nostr_event.dart'
         NostrEventModel;
 import 'package:comunifi/services/nostr/client_signature.dart';
 import 'package:comunifi/services/mls/messages/messages.dart'
-    show AddProposal, Commit, Welcome;
+    show AddProposal, Commit, RemoveProposal, Welcome;
 import 'package:comunifi/services/mls/key_schedule/key_schedule.dart'
     show EpochSecrets;
 import 'package:comunifi/services/mls/crypto/crypto.dart' as mls_crypto;
@@ -6899,6 +6899,141 @@ class GroupState with ChangeNotifier {
       );
     } catch (e) {
       debugPrint('Failed to approve join request: $e');
+      rethrow;
+    }
+  }
+
+  /// Remove a member from the active group (admin only)
+  ///
+  /// This will:
+  /// 1. Validate admin status
+  /// 2. Block self-removal and admin removal
+  /// 3. Remove from MLS group (if member is present)
+  /// 4. Publish NIP-29 kind:9001 (remove-user) event
+  /// 5. Invalidate membership cache
+  Future<void> removeGroupMember(String targetPubkey) async {
+    if (_activeGroup == null) {
+      throw Exception('No active group selected. Please select a group first.');
+    }
+
+    if (!_isConnected || _nostrService == null) {
+      throw Exception('Not connected to relay. Please connect first.');
+    }
+
+    final groupIdHex =
+        _activeGroup!.id.bytes
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+
+    try {
+      // Check admin status
+      final isAdmin = await isGroupAdmin(groupIdHex);
+      if (!isAdmin) {
+        throw Exception('Only admins can remove members');
+      }
+
+      // Get current user pubkey
+      final currentUserPubkey = await getNostrPublicKey();
+      if (currentUserPubkey == null) {
+        throw Exception('Failed to get current user pubkey');
+      }
+
+      // Block self-removal
+      if (targetPubkey == currentUserPubkey) {
+        throw Exception('You cannot remove yourself from the group');
+      }
+
+      // Check if target is an admin (cannot remove admins)
+      final members = await getGroupMembers(groupIdHex, forceRefresh: true);
+      final targetMember = members.where((m) => m.pubkey == targetPubkey).firstOrNull;
+      if (targetMember != null && targetMember.isAdmin) {
+        throw Exception('Cannot remove an admin from the group');
+      }
+
+      // Remove from MLS group if member is present
+      final mlsMember = _activeGroup!.getMemberByUserId(targetPubkey);
+      if (mlsMember != null) {
+        debugPrint(
+          'Removing member ${targetPubkey.substring(0, 8)}... from MLS group at leaf ${mlsMember.leafIndex.value}',
+        );
+
+        final removeProposal = RemoveProposal(
+          removedLeafIndex: mlsMember.leafIndex.value,
+        );
+
+        // Remove member and get commit (this also saves the group state internally)
+        final (commit, _) = await _activeGroup!.removeMembers([removeProposal]);
+
+        // Get our Nostr private key for signing
+        final privateKey = await getNostrPrivateKey();
+        if (privateKey != null && privateKey.isNotEmpty) {
+          final keyPair = NostrKeyPairs(private: privateKey);
+          // Broadcast commit to remaining members
+          await _broadcastCommitToMembers(
+            commit: commit,
+            existingMembers: _activeGroup!.members
+                .where((m) => m.userId != targetPubkey)
+                .toList(),
+            groupIdHex: groupIdHex,
+            keyPair: keyPair,
+            ourPubkey: currentUserPubkey,
+          );
+        }
+
+        debugPrint(
+          'Removed member from MLS group, new epoch: ${_activeGroup!.epoch}',
+        );
+      } else {
+        debugPrint(
+          'Member ${targetPubkey.substring(0, 8)}... not found in MLS group, publishing NIP-29 remove only',
+        );
+      }
+
+      // Publish NIP-29 remove-user event (kind 9001)
+      final privateKey = await getNostrPrivateKey();
+      if (privateKey == null || privateKey.isEmpty) {
+        throw Exception('No Nostr key found');
+      }
+      final keyPair = NostrKeyPairs(private: privateKey);
+
+      final removeUserCreatedAt = DateTime.now();
+      final removeUserTags = await addClientTagsWithSignature([
+        ['h', groupIdHex], // Group ID (NIP-29 uses 'h' tag)
+        ['p', targetPubkey], // User to remove
+      ], createdAt: removeUserCreatedAt);
+
+      final removeUserEvent = NostrEvent.fromPartialData(
+        kind: kindRemoveUser,
+        content: '',
+        keyPairs: keyPair,
+        tags: removeUserTags,
+        createdAt: removeUserCreatedAt,
+      );
+
+      final removeUserModel = NostrEventModel(
+        id: removeUserEvent.id,
+        pubkey: removeUserEvent.pubkey,
+        kind: removeUserEvent.kind,
+        content: removeUserEvent.content,
+        tags: removeUserEvent.tags,
+        sig: removeUserEvent.sig,
+        createdAt: removeUserEvent.createdAt,
+      );
+
+      debugPrint(
+        'Publishing remove-user event: id=${removeUserModel.id}, tags=${removeUserModel.tags}',
+      );
+
+      await _nostrService!.publishEvent(removeUserModel.toJson());
+
+      debugPrint(
+        'Published NIP-29 remove-user (kind 9001) to remove ${targetPubkey.substring(0, 8)}... from group',
+      );
+
+      // Invalidate membership cache so UIs update
+      invalidateMembershipCache(notify: true);
+    } catch (e) {
+      debugPrint('Failed to remove group member: $e');
       rethrow;
     }
   }
