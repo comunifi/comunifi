@@ -3979,6 +3979,9 @@ class GroupState with ChangeNotifier {
   // Subscription for kind:9009 invite events
   StreamSubscription<NostrEventModel>? _inviteEventSubscription;
 
+  // Subscription for kind:1060 Welcome messages
+  StreamSubscription<NostrEventModel>? _welcomeMessageSubscription;
+
   // Subscription for kind:9000 put-user events (to detect auto-approval after join requests)
   StreamSubscription<NostrEventModel>? _putUserEventSubscription;
 
@@ -4188,6 +4191,10 @@ class GroupState with ChangeNotifier {
               },
             );
       }
+
+      // Listen for MLS Welcome messages (kind 1060) addressed to us
+      // These are sent when we accept an invite and the admin adds us to the group
+      await _setupWelcomeMessageListener();
 
       // Listen for new NIP-29 create-group events (kind 9007) to keep DB and cache updated
       _nostrService!
@@ -5721,6 +5728,57 @@ class GroupState with ChangeNotifier {
   /// This should be called when the user first reaches the feed screen
   Future<void> markOnboardingComplete() async {
     await secureStorage.write(key: _onboardingCompleteKey, value: 'true');
+    // Now that onboarding is complete, the user has a pubkey
+    // Set up the Welcome message listener to receive MLS group invitations
+    await _setupWelcomeMessageListener();
+  }
+
+  /// Set up listener for MLS Welcome messages (kind 1060)
+  /// This allows the user to receive group invitations after accepting an invite
+  /// Called from both _startListeningForGroupEvents (for existing users) and
+  /// markOnboardingComplete (for new users after onboarding)
+  Future<void> _setupWelcomeMessageListener() async {
+    if (_nostrService == null || !_isConnected) {
+      debugPrint('LISTENING FOR WELCOME: Not connected, skipping setup');
+      return;
+    }
+
+    final ourPubkey = await getNostrPublicKey();
+    debugPrint(
+      'LISTENING FOR WELCOME: Setting up kind:1060 listener - pubkey: ${ourPubkey != null ? "${ourPubkey.substring(0, 8)}..." : "NULL"}',
+    );
+
+    if (ourPubkey == null) {
+      debugPrint('LISTENING FOR WELCOME: Skipped - ourPubkey is null');
+      return;
+    }
+
+    // Cancel existing subscription if any
+    _welcomeMessageSubscription?.cancel();
+
+    _welcomeMessageSubscription = _nostrService!
+        .listenToEvents(
+          kind: kindMlsWelcome,
+          pTags: [ourPubkey], // Filter by recipient pubkey
+          limit: null,
+        )
+        .listen(
+          (event) {
+            debugPrint(
+              'LISTENING FOR WELCOME: Received kind:1060 event ${event.id.substring(0, 8)}...',
+            );
+            // Handle Welcome message to join the group
+            handleWelcomeInvitation(event).catchError((error) {
+              debugPrint('Error handling Welcome message: $error');
+            });
+          },
+          onError: (error) {
+            debugPrint('Error listening to Welcome messages: $error');
+          },
+        );
+    debugPrint(
+      'LISTENING FOR WELCOME: Subscription created for kind:1060 with pTags filter',
+    );
   }
 
   /// Derive HPKE key pair from Nostr private key
